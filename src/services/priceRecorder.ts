@@ -1,0 +1,277 @@
+/**
+ * Price recording to SQLite for later replay/testdrive.
+ * Samples at 1/sec per epic. Schema: epic, ts, bid, offer, spread, long_pct, short_pct.
+ */
+
+import path from 'path';
+import Database from 'better-sqlite3';
+
+// Resolve DB path from this module's location (works for both ts-node and compiled dist)
+const _moduleDir = path.dirname(__dirname); // src/services -> src, or dist/services -> dist
+const _projectRoot = path.resolve(_moduleDir, '..');
+const DB_PATH = process.env.PRICE_RECORDS_DB || path.join(_projectRoot, 'price_records.db');
+const SAMPLE_INTERVAL_MS = 1000;
+
+let db: Database.Database | null = null;
+let recording = false;
+let lastSampleTsByEpic: Record<string, number> = {};
+let sessionSampleCount = 0;
+let sessionStartTs = 0;
+
+function getDb(): Database.Database {
+  if (!db) {
+    db = new Database(DB_PATH);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS price_samples (
+        epic    TEXT    NOT NULL,
+        ts      INTEGER NOT NULL,
+        bid     REAL    NOT NULL,
+        offer   REAL    NOT NULL,
+        spread  REAL    NOT NULL,
+        long_pct REAL,
+        short_pct REAL,
+        PRIMARY KEY (epic, ts)
+      )
+    `);
+    try { db.exec('ALTER TABLE price_samples ADD COLUMN long_pct REAL'); } catch { /* exists */ }
+    try { db.exec('ALTER TABLE price_samples ADD COLUMN short_pct REAL'); } catch { /* exists */ }
+  }
+  return db;
+}
+
+function ensureClosed(): void {
+  if (db) {
+    db.close();
+    db = null;
+  }
+}
+
+export interface RecordingStatus {
+  recording: boolean;
+  epic: string | null;
+  sampleCount: number;
+  durationMs: number;
+}
+
+export function isRecording(): boolean {
+  return recording;
+}
+
+export function startRecording(): void {
+  if (recording) return;
+  recording = true;
+  lastSampleTsByEpic = {};
+  sessionSampleCount = 0;
+  sessionStartTs = Date.now();
+}
+
+export function stopRecording(): void {
+  recording = false;
+}
+
+export function getRecordingStatus(): RecordingStatus {
+  return {
+    recording,
+    epic: null, // Caller provides epic from config
+    sampleCount: sessionSampleCount,
+    durationMs: sessionStartTs > 0 ? Date.now() - sessionStartTs : 0,
+  };
+}
+
+export interface PriceData {
+  bid: string;
+  offer: string;
+  spread: string;
+}
+
+export interface ClientSentiment {
+  longPct: number;
+  shortPct: number;
+}
+
+export function recordPrice(epic: string, data: PriceData, sentiment?: ClientSentiment | null): boolean {
+  if (!recording || !epic) return false;
+
+  const bid = parseFloat(data.bid);
+  const offer = parseFloat(data.offer);
+  const spread = parseFloat(data.spread);
+  if (isNaN(bid) || isNaN(offer)) return false;
+
+  const now = Date.now();
+  const last = lastSampleTsByEpic[epic] ?? 0;
+  if (now - last < SAMPLE_INTERVAL_MS) return false;
+
+  lastSampleTsByEpic[epic] = now;
+
+  const longPct = sentiment && typeof sentiment.longPct === 'number' ? sentiment.longPct : null;
+  const shortPct = sentiment && typeof sentiment.shortPct === 'number' ? sentiment.shortPct : null;
+
+  try {
+    const database = getDb();
+    const stmt = database.prepare(
+      'INSERT OR IGNORE INTO price_samples (epic, ts, bid, offer, spread, long_pct, short_pct) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    );
+    stmt.run(epic, now, bid, offer, isNaN(spread) ? 0 : spread, longPct, shortPct);
+    sessionSampleCount++;
+    return true;
+  } catch {
+    // Silently ignore DB errors to avoid disrupting the stream
+    return false;
+  }
+}
+
+export function closePriceRecorder(): void {
+  stopRecording();
+  ensureClosed();
+}
+
+export interface RecordedSample {
+  epic: string;
+  ts: number;
+  bid: number;
+  offer: number;
+  spread: number;
+  longPct: number | null;
+  shortPct: number | null;
+}
+
+export function getRecordedSamples(epic: string): RecordedSample[] {
+  return getRecordedSamplesFiltered(epic);
+}
+
+/** Get samples with optional filter. Avoids loading entire DB when days/range specified. */
+export function getRecordedSamplesFiltered(
+  epic: string,
+  opts?: { fromTs?: number; toTs?: number; days?: string[] }
+): RecordedSample[] {
+  try {
+    const database = getDb();
+    let sql = 'SELECT epic, ts, bid, offer, spread, long_pct, short_pct FROM price_samples WHERE epic = ?';
+    const params: (string | number)[] = [epic];
+    if (opts?.days && opts.days.length > 0) {
+      const placeholders = opts.days.map(() => '?').join(',');
+      sql += ` AND strftime('%Y-%m-%d', ts / 1000, 'unixepoch', 'localtime') IN (${placeholders})`;
+      params.push(...opts.days);
+    } else if (opts?.fromTs != null || opts?.toTs != null) {
+      if (opts.fromTs != null) {
+        sql += ' AND ts >= ?';
+        params.push(opts.fromTs);
+      }
+      if (opts.toTs != null) {
+        sql += ' AND ts <= ?';
+        params.push(opts.toTs);
+      }
+    }
+    sql += ' ORDER BY ts ASC';
+    const rows = database.prepare(sql).all(...params) as Array<{ epic: string; ts: number; bid: number; offer: number; spread: number; long_pct: number | null; short_pct: number | null }>;
+    return rows.map((r) => ({
+      epic: r.epic,
+      ts: r.ts,
+      bid: r.bid,
+      offer: r.offer,
+      spread: r.spread,
+      longPct: r.long_pct,
+      shortPct: r.short_pct,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export function getRecordedSampleCount(epic: string): number {
+  try {
+    const database = getDb();
+    const row = database.prepare('SELECT COUNT(*) as c FROM price_samples WHERE epic = ?').get(epic) as { c: number };
+    return row?.c ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Returns distinct epics that have recorded samples. */
+export function getEpicsWithData(): string[] {
+  try {
+    const database = getDb();
+    const rows = database.prepare('SELECT DISTINCT epic FROM price_samples ORDER BY epic').all() as Array<{ epic: string }>;
+    return rows.map((r) => r.epic).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/** Exposed for debugging - DB path in use. */
+export function getDbPath(): string {
+  return DB_PATH;
+}
+
+/** Returns distinct dates (YYYY-MM-DD) that have recorded samples for the epic, sorted ascending. */
+export function getRecordedDays(epic: string): string[] {
+  try {
+    const database = getDb();
+    const rows = database.prepare(
+      `SELECT DISTINCT strftime('%Y-%m-%d', ts / 1000, 'unixepoch', 'localtime') as day
+       FROM price_samples WHERE epic = ? ORDER BY day ASC`
+    ).all(epic) as Array<{ day: string }>;
+    return rows.map((r) => r.day).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/** Returns days with sample count for the epic, sorted ascending. */
+export function getDayStats(epic: string): { day: string; count: number; epic?: string }[] {
+  try {
+    const database = getDb();
+    const rows = database.prepare(
+      `SELECT strftime('%Y-%m-%d', ts / 1000, 'unixepoch', 'localtime') as day, COUNT(*) as count
+       FROM price_samples WHERE epic = ?
+       GROUP BY 1 ORDER BY 1 ASC`
+    ).all(epic) as Array<{ day: string; count: number }>;
+    return rows.filter((r) => r.day).map((r) => ({ day: r.day, count: Number(r.count), epic }));
+  } catch {
+    return [];
+  }
+}
+
+/** Returns days with count and epic for ALL epics in the DB, sorted by day then epic. */
+export function getAllDayStats(): { day: string; count: number; epic: string }[] {
+  try {
+    const database = getDb();
+    const rows = database.prepare(
+      `SELECT epic, strftime('%Y-%m-%d', ts / 1000, 'unixepoch', 'localtime') as day, COUNT(*) as count
+       FROM price_samples
+       GROUP BY epic, day ORDER BY day ASC, epic ASC`
+    ).all() as Array<{ epic: string; day: string; count: number }>;
+    return rows.filter((r) => r.day && r.epic).map((r) => ({ day: r.day, count: Number(r.count), epic: r.epic }));
+  } catch {
+    return [];
+  }
+}
+
+const YYYY_MM_DD = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Delete samples for the given epic on the given days. Returns number of rows deleted. */
+export function deleteSamplesByDays(epic: string, days: string[]): number {
+  const valid = days.filter((d) => typeof d === 'string' && YYYY_MM_DD.test(d));
+  if (!valid.length) return 0;
+  try {
+    const database = getDb();
+    const placeholders = valid.map(() => '?').join(',');
+    const stmt = database.prepare(
+      `DELETE FROM price_samples WHERE epic = ? AND strftime('%Y-%m-%d', ts / 1000, 'unixepoch', 'localtime') IN (${placeholders})`
+    );
+    const result = stmt.run(epic, ...valid);
+    return result.changes;
+  } catch {
+    return 0;
+  }
+}
+
+/** Delete days that have fewer than minCount samples. Returns { deleted: number, daysRemoved: string[] }. */
+export function deleteSparseDays(epic: string, minCount: number): { deleted: number; daysRemoved: string[] } {
+  const stats = getDayStats(epic);
+  const toRemove = stats.filter((s) => s.count < minCount).map((s) => s.day);
+  if (toRemove.length === 0) return { deleted: 0, daysRemoved: [] };
+  const deleted = deleteSamplesByDays(epic, toRemove);
+  return { deleted, daysRemoved: toRemove };
+}

@@ -1,0 +1,39 @@
+{
+  "defaultSize": "1",
+  "defaultExpiry": "DFB",
+  "currencyCode": "GBP",
+  "ui": {
+    "theme": "dark",
+    "maPeriod": 20,
+    "probesShortPeriod": 5,
+    "probesMediumPeriod": 60,
+    "probesLongPeriod": 1440,
+    "probesBackfillDays": 3,
+    "tradingRules": [],
+    "tradingRulesRunning": false,
+    "tradingRulesConfirmBeforePlace": true,
+    "tradingRulesAutoStopEnabled": true,
+    "tradingRulesAutoStopBeforeMinutes": 60,
+    "dealDirection": "BUY",
+    "dealSize": "1",
+    "dealTpSlMode": "rate",
+    "dealTakeProfit": "",
+    "dealStopLoss": "",
+    "dealCloseAt": ""
+  },
+  "igProfiles": {
+    "demo": {
+      "igApiKey": "",
+      "igUsername": "",
+      "igPassword": "",
+      "igBaseUrl": "https://demo-api.ig.com"
+    },
+    "live": {
+      "igApiKey": "",
+      "igUsername": "",
+      "igPassword": "",
+      "igBaseUrl": "https://api.ig.com"
+    }
+  },
+  "activeProfile": "demo"
+}

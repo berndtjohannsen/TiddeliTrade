@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TiddeliTrade</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/css/main.css">
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+  <header class="flex items-center justify-between gap-4 px-4 py-3 bg-slate-900 border-b border-slate-800">
+    <div class="flex items-center gap-2">
+      <span class="text-sm font-semibold text-slate-400" id="version">TiddeliTrade ver: —</span>
+      <span id="profileBadge" class="hidden px-2 py-0.5 rounded text-xs font-semibold" data-tooltip="Account mode – switch in Settings">—</span>
+    </div>
+    <div class="flex flex-col gap-1 flex-1 justify-center max-w-xs">
+      <div class="flex items-center gap-2">
+        <select id="watchlistSelect" class="hidden px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none" title="Watchlist">
+          <option value="">—</option>
+        </select>
+        <select id="epicSelect" class="flex-1 min-w-0 px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none" title="Instrument" disabled>
+          <option value="">—</option>
+        </select>
+      </div>
+      <p id="headerMessage" class="text-xs text-amber-400 hidden min-w-0"></p>
+    </div>
+    <div class="flex items-center gap-3 flex-1 justify-end flex-wrap">
+      <span class="text-sm text-slate-500" id="status">Status: Ready</span>
+      <span id="accountInfo" class="text-sm text-slate-500 hidden"></span>
+      <span class="text-slate-600">|</span>
+      <span class="text-slate-500 text-xs" data-tooltip="TRADEABLE=open, CLOSED=closed, EDIT=closed but can edit stops/limits, AUCTION=auction, SUSPENDED=suspended, OFFLINE=offline">Market state</span>
+      <span id="nowMarketState" class="font-mono text-slate-400 text-xs">—</span>
+      <span class="text-slate-500 text-xs" data-tooltip="Live=real-time prices, Delayed=delayed prices">Delay</span>
+      <span id="nowDelay" class="font-mono text-slate-400 text-xs">—</span>
+      <span class="text-slate-500 text-xs" data-tooltip="Today's market close time (UK local). — for 24/7 markets or when unavailable">Market closes at</span>
+      <span id="marketClosesAt" class="font-mono text-slate-400 text-xs">—</span>
+      <button id="startBtn" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors">
+        Start
+      </button>
+      <button id="stopBtn" class="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-medium transition-colors hidden">
+        Stop
+      </button>
+      <button id="settingsBtn" class="p-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors" title="Settings" aria-label="Settings">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+      </button>
+    </div>
+  </header>
+
+  <div id="disconnectBanner" class="hidden py-4 px-4 bg-red-600 text-white text-center font-bold text-lg shadow-lg" role="alert">
+    Server disconnected. Press Start to reconnect.
+  </div>
+
+  <div id="dealConfirmModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-xl w-full max-w-sm mx-4 overflow-hidden">
+      <div class="px-4 py-3 border-b border-slate-700">
+        <h2 class="text-lg font-semibold text-slate-200">Confirm order</h2>
+      </div>
+      <div class="p-4 space-y-2 text-sm">
+        <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+          <dt class="text-slate-500">Instrument</dt>
+          <dd id="confirmInstrument" class="font-mono text-slate-200 truncate">—</dd>
+          <dt class="text-slate-500">Direction</dt>
+          <dd id="confirmDirection" class="font-mono">—</dd>
+          <dt class="text-slate-500" data-tooltip="Current bid/offer from live stream">Live price</dt>
+          <dd id="confirmLivePrice" class="font-mono text-slate-200">—</dd>
+          <dt class="text-slate-500">Size</dt>
+          <dd id="confirmSize" class="font-mono text-slate-200">—</dd>
+          <dt class="text-slate-500">Take profit</dt>
+          <dd id="confirmTakeProfit" class="font-mono text-slate-400">—</dd>
+          <dt class="text-slate-500">Stop loss</dt>
+          <dd id="confirmStopLoss" class="font-mono text-slate-400">—</dd>
+          <dt class="text-slate-500">Scheduled close</dt>
+          <dd id="confirmCloseAt" class="font-mono text-slate-400">—</dd>
+          <dt class="text-slate-500" data-tooltip="Notional value of the position (size × price), in account currency">Position value</dt>
+          <dd id="confirmPositionValue" class="font-mono text-slate-200">—</dd>
+          <dt class="text-slate-500" data-tooltip="Estimated margin/deposit required to open, in account currency">Margin required</dt>
+          <dd id="confirmMargin" class="font-mono text-slate-200">—</dd>
+          <dt class="text-slate-500" data-tooltip="Opening + closing spread cost from IG indicative costs API.">Indicative cost (intraday)</dt>
+          <dd id="confirmCost" class="font-mono text-slate-200">—</dd>
+        </dl>
+        <div id="dealConfirmLiveWarning" class="hidden mt-3 px-3 py-2 rounded-lg bg-amber-900/60 border border-amber-600/50 text-amber-200 text-sm">
+          You are trading with real money. This deal will execute on your live IG account.
+        </div>
+      </div>
+      <div class="px-4 py-3 border-t border-slate-700 flex gap-2 justify-end">
+        <button type="button" id="dealConfirmCancel" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium transition-colors">Cancel</button>
+        <button type="button" id="dealConfirmOk" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors">Place deal</button>
+      </div>
+    </div>
+  </div>
+  <div id="orderConfirmModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-xl w-full max-w-sm mx-4 overflow-hidden">
+      <div class="px-4 py-3 border-b border-slate-700">
+        <h2 class="text-lg font-semibold text-slate-200">Confirm order</h2>
+      </div>
+      <div class="p-4 space-y-2 text-sm">
+        <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+          <dt class="text-slate-500">Instrument</dt>
+          <dd id="orderConfirmInstrument" class="font-mono text-slate-200 truncate">—</dd>
+          <dt class="text-slate-500">Direction</dt>
+          <dd id="orderConfirmDirection" class="font-mono">—</dd>
+          <dt class="text-slate-500" data-tooltip="Current bid/offer from live stream">Live price</dt>
+          <dd id="orderConfirmLivePrice" class="font-mono text-slate-200">—</dd>
+          <dt class="text-slate-500">Price</dt>
+          <dd id="orderConfirmPrice" class="font-mono text-slate-200">—</dd>
+          <dt class="text-slate-500">Size</dt>
+          <dd id="orderConfirmSize" class="font-mono text-slate-200">—</dd>
+          <dt class="text-slate-500">Take profit</dt>
+          <dd id="orderConfirmTakeProfit" class="font-mono text-slate-400">—</dd>
+          <dt class="text-slate-500">Stop loss</dt>
+          <dd id="orderConfirmStopLoss" class="font-mono text-slate-400">—</dd>
+          <dt class="text-slate-500">Scheduled close</dt>
+          <dd id="orderConfirmCloseAt" class="font-mono text-slate-400">—</dd>
+          <dt class="text-slate-500">Good till</dt>
+          <dd id="orderConfirmStopAt" class="font-mono text-slate-400">—</dd>
+          <dt class="text-slate-500" data-tooltip="Notional value (size × trigger price), in account currency">Position value</dt>
+          <dd id="orderConfirmPositionValue" class="font-mono text-slate-200">—</dd>
+          <dt class="text-slate-500" data-tooltip="Estimated margin required">Margin required</dt>
+          <dd id="orderConfirmMargin" class="font-mono text-slate-200">—</dd>
+          <dt class="text-slate-500" data-tooltip="Opening + closing spread cost (approx)">Indicative cost</dt>
+          <dd id="orderConfirmCost" class="font-mono text-slate-200">—</dd>
+        </dl>
+      </div>
+      <div class="px-4 py-3 border-t border-slate-700 flex gap-2 justify-end">
+        <button type="button" id="orderConfirmCancel" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium transition-colors">Cancel</button>
+        <button type="button" id="orderConfirmOk" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors">Place order</button>
+      </div>
+    </div>
+  </div>
+  <div id="analyseProgressModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-xl w-full max-w-sm mx-4 overflow-hidden">
+      <div class="px-4 py-3 border-b border-slate-700">
+        <h2 class="text-lg font-semibold text-slate-200">Analysing recording</h2>
+      </div>
+      <div class="p-4 flex flex-col items-center gap-4">
+        <div class="flex items-center gap-3">
+          <svg class="animate-spin h-8 w-8 text-emerald-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <p id="analyseProgressText" class="text-slate-400">Processing…</p>
+        </div>
+        <p class="text-xs text-slate-500">This may take several minutes for many days.</p>
+        <button type="button" id="analyseProgressStop" class="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-medium transition-colors">Stop</button>
+      </div>
+    </div>
+  </div>
+  <div id="dealErrorModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
+    <div class="bg-slate-900 border border-amber-500/50 rounded-xl shadow-xl w-full max-w-sm mx-4 overflow-hidden">
+      <div class="px-4 py-3 border-b border-slate-700">
+        <h2 class="text-lg font-semibold text-amber-400">Deal error</h2>
+      </div>
+      <div class="p-4 text-sm text-slate-200">
+        <p id="dealErrorText">—</p>
+      </div>
+      <div class="px-4 py-3 border-t border-slate-700 flex justify-end">
+        <button type="button" id="dealErrorOk" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium transition-colors">OK</button>
+      </div>
+    </div>
+  </div>
+  <div id="settingsModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-xl w-full max-w-md mx-4 overflow-hidden">
+      <div class="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
+        <h2 class="text-lg font-semibold text-slate-200">Configuration</h2>
+        <button id="settingsClose" class="p-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors" aria-label="Close">&times;</button>
+      </div>
+      <form id="settingsForm" class="p-4 space-y-4">
+        <div>
+          <label for="igProfileSelect" class="block text-sm font-medium text-slate-400 mb-1" data-tooltip="Switch between demo and live account credentials">Account</label>
+          <select id="igProfileSelect" class="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none">
+            <option value="demo">Demo</option>
+            <option value="live">Live</option>
+          </select>
+        </div>
+        <div>
+          <label for="igBaseUrl" class="block text-sm font-medium text-slate-400 mb-1" data-tooltip="IG API base URL. Demo: https://demo-api.ig.com, Live: https://api.ig.com">API base URL</label>
+          <input type="text" id="igBaseUrl" name="igBaseUrl" placeholder="https://demo-api.ig.com" autocomplete="off" class="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none font-mono text-sm">
+        </div>
+        <div>
+          <label for="igApiKey" class="block text-sm font-medium text-slate-400 mb-1">API Key *</label>
+          <input type="password" id="igApiKey" name="igApiKey" placeholder="IG API key" autocomplete="off" class="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none">
+        </div>
+        <div>
+          <label for="igUsername" class="block text-sm font-medium text-slate-400 mb-1">Username</label>
+          <input type="text" id="igUsername" name="igUsername" placeholder="IG username" autocomplete="username" class="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none">
+        </div>
+        <div>
+          <label for="igPassword" class="block text-sm font-medium text-slate-400 mb-1">Password *</label>
+          <input type="password" id="igPassword" name="igPassword" placeholder="IG password" autocomplete="current-password" class="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none">
+        </div>
+        <p id="settingsStatus" class="text-sm text-slate-500 hidden"></p>
+        <div class="flex gap-2">
+          <button type="submit" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors">Save</button>
+          <button type="button" id="settingsCancel" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium transition-colors">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  <main class="p-4 pb-16">
+    <div class="flex flex-wrap gap-4 items-start">
+      <section id="probesPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[320px] hidden">
+        <div class="flex items-center gap-2 mb-2">
+          <h3 class="text-sm font-semibold text-slate-400" data-tooltip="Price statistics over configurable periods">Probes</h3>
+          <div class="flex items-center gap-2">
+            <button type="button" id="probesBackfillBtn" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-slate-700" data-tooltip="Fetch historical prices from IG (uses allowance). Disabled when rules engine is running.">Backfill</button>
+            <span id="probesBackfillStatus" class="text-xs text-slate-500 hidden"></span>
+          </div>
+          <div class="flex-1"></div>
+        </div>
+        <div class="grid grid-cols-4 gap-2 text-xs mb-2">
+          <div>
+            <label for="probeLongPeriod" class="text-slate-500 block mb-0.5" data-tooltip="Lookback period in hours (1–720)">Long (hr)</label>
+            <input type="number" id="probeLongPeriod" min="1" max="720" value="24" class="w-full px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs" title="Lookback period in hours">
+          </div>
+          <div>
+            <label for="probeMediumPeriod" class="text-slate-500 block mb-0.5" data-tooltip="Lookback period in minutes (1–10080)">Medium (min)</label>
+            <input type="number" id="probeMediumPeriod" min="1" max="10080" value="60" class="w-full px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs" title="Lookback period in minutes">
+          </div>
+          <div>
+            <label for="probeShortPeriod" class="text-slate-500 block mb-0.5" data-tooltip="Lookback period in minutes (1–1440)">Short (min)</label>
+            <input type="number" id="probeShortPeriod" min="1" max="1440" value="5" class="w-full px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs" title="Lookback period in minutes">
+          </div>
+          <div class="flex items-end">
+            <span class="text-slate-500 text-xs">Now</span>
+          </div>
+        </div>
+        <div class="grid grid-cols-4 gap-2 text-xs">
+          <div class="rounded-lg bg-slate-800 border border-slate-700 p-2 space-y-0.5">
+            <dl class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
+              <dt class="text-slate-500" data-tooltip="First vs last price in period (up/down/flat)">Trend</dt><dd id="probeLongTrend" class="font-mono text-xs">—</dd>
+              <dt class="text-slate-500" data-tooltip="Lowest mid price in the period">Min</dt><dd id="probeLongMin" class="font-mono text-slate-300">—</dd>
+              <dt class="text-slate-500" data-tooltip="Highest mid price in the period">Max</dt><dd id="probeLongMax" class="font-mono text-slate-300">—</dd>
+              <dt class="text-slate-500" data-tooltip="Mean mid price in the period">Avg</dt><dd id="probeLongAvg" class="font-mono text-slate-300">—</dd>
+              <dt class="text-slate-500" data-tooltip="Max minus min (price range)">Range</dt><dd id="probeLongRange" class="font-mono text-slate-400">—</dd>
+              <dt class="text-slate-500" data-tooltip="Standard deviation of mid prices (volatility)">Std dev</dt><dd id="probeLongStdDev" class="font-mono text-slate-400">—</dd>
+              <dt class="text-slate-500" data-tooltip="Average spread (buy–sell difference) in the period">Spread</dt><dd id="probeLongSpread" class="font-mono text-slate-400">—</dd>
+              <dt class="text-slate-500" data-tooltip="Number of price updates (tick volume) in the period">Volume</dt><dd id="probeLongSamples" class="font-mono text-slate-500">0</dd>
+            </dl>
+          </div>
+          <div class="rounded-lg bg-slate-800 border border-slate-700 p-2 space-y-0.5">
+            <dl class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
+              <dt class="text-slate-500" data-tooltip="First vs last price in period (up/down/flat)">Trend</dt><dd id="probeMediumTrend" class="font-mono text-xs">—</dd>
+              <dt class="text-slate-500" data-tooltip="Lowest mid price in the period">Min</dt><dd id="probeMediumMin" class="font-mono text-slate-300">—</dd>
+              <dt class="text-slate-500" data-tooltip="Highest mid price in the period">Max</dt><dd id="probeMediumMax" class="font-mono text-slate-300">—</dd>
+              <dt class="text-slate-500" data-tooltip="Mean mid price in the period">Avg</dt><dd id="probeMediumAvg" class="font-mono text-slate-300">—</dd>
+              <dt class="text-slate-500" data-tooltip="Max minus min (price range)">Range</dt><dd id="probeMediumRange" class="font-mono text-slate-400">—</dd>
+              <dt class="text-slate-500" data-tooltip="Standard deviation of mid prices (volatility)">Std dev</dt><dd id="probeMediumStdDev" class="font-mono text-slate-400">—</dd>
+              <dt class="text-slate-500" data-tooltip="Average spread (buy–sell difference) in the period">Spread</dt><dd id="probeMediumSpread" class="font-mono text-slate-400">—</dd>
+              <dt class="text-slate-500" data-tooltip="Number of price updates (tick volume) in the period">Volume</dt><dd id="probeMediumSamples" class="font-mono text-slate-500">0</dd>
+            </dl>
+          </div>
+          <div class="rounded-lg bg-slate-800 border border-slate-700 p-2 space-y-0.5">
+            <dl class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
+              <dt class="text-slate-500" data-tooltip="First vs last price in period (up/down/flat)">Trend</dt><dd id="probeShortTrend" class="font-mono text-xs">—</dd>
+              <dt class="text-slate-500" data-tooltip="Lowest mid price in the period">Min</dt><dd id="probeShortMin" class="font-mono text-slate-300">—</dd>
+              <dt class="text-slate-500" data-tooltip="Highest mid price in the period">Max</dt><dd id="probeShortMax" class="font-mono text-slate-300">—</dd>
+              <dt class="text-slate-500" data-tooltip="Mean mid price in the period">Avg</dt><dd id="probeShortAvg" class="font-mono text-slate-300">—</dd>
+              <dt class="text-slate-500" data-tooltip="Max minus min (price range)">Range</dt><dd id="probeShortRange" class="font-mono text-slate-400">—</dd>
+              <dt class="text-slate-500" data-tooltip="Standard deviation of mid prices (volatility)">Std dev</dt><dd id="probeShortStdDev" class="font-mono text-slate-400">—</dd>
+              <dt class="text-slate-500" data-tooltip="Average spread (buy–sell difference) in the period">Spread</dt><dd id="probeShortSpread" class="font-mono text-slate-400">—</dd>
+              <dt class="text-slate-500" data-tooltip="Number of price updates (tick volume) in the period">Volume</dt><dd id="probeShortSamples" class="font-mono text-slate-500">0</dd>
+            </dl>
+          </div>
+          <div class="rounded-lg bg-slate-800 border border-slate-700 p-2 space-y-0.5">
+            <dl class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
+              <dt class="text-slate-500" data-tooltip="Current vs previous tick (up/down/flat)">Trend</dt><dd id="nowTrend" class="font-mono text-xs">—</dd>
+              <dt class="text-slate-500" data-tooltip="Offer price – price to buy at">Buy</dt><dd id="nowBuy" class="font-mono text-emerald-500">—</dd>
+              <dt class="text-slate-500" data-tooltip="Bid price – price to sell at">Sell</dt><dd id="nowSell" class="font-mono text-red-500">—</dd>
+              <dt class="text-slate-500" data-tooltip="Buy price at market/day start (midnight in market TZ)">Day start</dt><dd id="nowDayStart" class="font-mono text-slate-400">—</dd>
+              <dt class="text-slate-500" data-tooltip="Difference between buy and sell price">Spread</dt><dd id="nowSpread" class="font-mono text-slate-200">—</dd>
+              <dt class="text-slate-500" data-tooltip="Time of last price update from the stream (trade time, same as rules)">Time</dt><dd id="nowTime" class="font-mono text-slate-400 text-xs">—</dd>
+              <dt class="text-slate-500" data-tooltip="IG client sentiment: Bull = long &gt; short, Bear = short &gt; long, Neutral = within 5%. From IG API.">Sentiment</dt><dd id="nowSentiment" class="font-mono text-xs">—</dd>
+            </dl>
+          </div>
+        </div>
+      </section>
+      <section id="testRulesPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[320px] hidden">
+        <h3 class="text-sm font-semibold text-slate-400 mb-2">Test rules</h3>
+        <div class="flex flex-wrap items-center gap-2 mb-2">
+          <button type="button" id="testRulesRecordBtn" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-slate-700" data-tooltip="Record price data to database at 1/sec for later replay. Requires streaming and instrument selected.">Record</button>
+          <button type="button" id="testRulesButton2" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Run backtest on recorded samples using current rules and probe periods">Analyse recording</button>
+          <span id="testRulesRecordedCount" class="text-xs text-slate-500" data-tooltip="Total recorded samples for current instrument in database">—</span>
+        </div>
+        <div class="flex flex-col gap-1 mb-2 text-xs">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="text-slate-500" data-tooltip="Grouped by instrument; each line shows instrument, then its days below">Days (all instruments)</span>
+            <button type="button" id="testRulesLoadDays" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300" data-tooltip="Load days with recorded data from all instruments">Load days</button>
+            <button type="button" id="testRulesSelectAllDays" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 hidden">Select all</button>
+            <button type="button" id="testRulesClearDays" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 hidden">Clear</button>
+            <button type="button" id="testRulesDeleteSelectedDays" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 hidden" data-tooltip="Delete selected days from the database">Delete selected</button>
+            <span class="text-slate-500">Prune:</span>
+            <input type="number" id="testRulesPruneMinCount" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono w-20 text-xs" min="0" placeholder="3600" data-tooltip="Remove days with fewer than this many samples (e.g. 3600 ≈ 1 hour)">
+            <button type="button" id="testRulesPruneBtn" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300" data-tooltip="Remove days with fewer than the threshold samples">Prune sparse</button>
+          </div>
+          <div id="testRulesDaysList" class="flex flex-col gap-0.5 max-h-36 overflow-y-auto" data-tooltip="Grouped by instrument. Select days for current instrument to analyse."></div>
+          <div class="flex flex-wrap items-center gap-2 text-slate-500">
+            <label for="testRulesFromDate">Or range:</label>
+            <input type="date" id="testRulesFromDate" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono w-28">
+            <span>to</span>
+            <input type="date" id="testRulesToDate" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono w-28">
+          </div>
+          <div class="flex flex-col gap-1">
+            <span class="text-slate-500 text-[11px]">Analysis mode:</span>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="radio" name="testRulesAnalysisMode" value="intraday" checked class="rounded bg-slate-800 border-slate-600 text-emerald-500">
+              <span class="text-slate-400" data-tooltip="Each day analysed independently. No positions carry over to the next day.">Intraday only</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="radio" name="testRulesAnalysisMode" value="carryover" class="rounded bg-slate-800 border-slate-600 text-emerald-500">
+              <span class="text-slate-400" data-tooltip="Positions can span days. Use fewer days for long runs.">Positions carry over</span>
+            </label>
+          </div>
+        </div>
+        <div class="flex flex-col gap-1">
+          <span class="text-xs text-slate-500">Recorded log</span>
+          <div id="testRulesLog" class="h-24 overflow-y-auto rounded-lg bg-slate-800 border border-slate-700 font-mono text-[11px]">
+            <table class="w-full border-collapse">
+              <thead class="sticky top-0 bg-slate-800 z-10">
+                <tr class="text-slate-500 border-b border-slate-700">
+                  <th class="text-left px-2 py-1.5 font-normal">Time</th>
+                  <th class="text-left px-2 py-1.5 font-normal">Buy</th>
+                  <th class="text-left px-2 py-1.5 font-normal">Sell</th>
+                  <th class="text-left px-2 py-1.5 font-normal">Mid</th>
+                  <th class="text-left px-2 py-1.5 font-normal">Spread</th>
+                </tr>
+              </thead>
+              <tbody id="testRulesLogBody" class="text-slate-400"></tbody>
+            </table>
+          </div>
+        </div>
+        <div id="testRulesReport" class="hidden mt-2 rounded-lg bg-slate-800 border border-slate-700 p-2 text-xs">
+          <h4 class="text-slate-400 font-medium mb-1.5">Backtest report</h4>
+          <dl id="testRulesReportBody" class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-slate-300"></dl>
+          <div id="testRulesBlockerSection" class="hidden mt-2 pt-2 border-t border-slate-700">
+            <h5 class="text-slate-500 font-medium mb-1" data-tooltip="Times this rule was the only one failing when a deal could have opened">Sole blockers (trim candidates)</h5>
+            <ul id="testRulesBlockerList" class="text-slate-400 space-y-0.5"></ul>
+          </div>
+          <div id="testRulesTradeListSection" class="hidden mt-2 pt-2 border-t border-slate-700">
+            <h5 class="text-slate-500 font-medium mb-1">Trades (day, close time)</h5>
+            <ul id="testRulesTradeList" class="text-slate-400 space-y-0.5 font-mono text-[11px]"></ul>
+          </div>
+        </div>
+      </section>
+      <section id="tradingRulesPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[320px] hidden">
+        <div class="flex items-center justify-between gap-2 mb-2">
+          <h3 class="text-sm font-semibold text-slate-400" data-tooltip="When running: engine places deals when conditions are met. Manual trading disabled.">Trading rules</h3>
+          <button type="button" id="tradingRulesToggle" class="px-2 py-1 rounded text-xs font-medium transition-colors" title="Start/stop rules engine">Stop</button>
+        </div>
+        <p id="tradingRulesEngineStatus" class="text-xs text-slate-500 mb-2" data-tooltip="Running = engine evaluates rules and can place deals. Stopped = manual trading only.">Engine: Stopped</p>
+        <p id="tradingRulesLockedMsg" class="text-xs text-amber-400 mb-2 hidden" data-tooltip="Rules cannot be edited while the engine is running">Rules locked – stop the engine to edit</p>
+        <div class="space-y-2 text-sm">
+          <div class="flex items-center gap-2">
+            <input type="checkbox" id="tradingRulesConfirmBeforePlace" checked class="rounded bg-slate-800 border-slate-600 text-emerald-500 focus:ring-emerald-500">
+            <label for="tradingRulesConfirmBeforePlace" class="text-slate-500" data-tooltip="When unchecked, deals place automatically without confirmation dialog">Confirm before placing</label>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <input type="checkbox" id="tradingRulesAutoStop" checked class="rounded bg-slate-800 border-slate-600 text-emerald-500 focus:ring-emerald-500">
+            <label for="tradingRulesAutoStop" class="text-slate-500 shrink-0" data-tooltip="When enabled, engine auto-stops N minutes before market close (or midnight for 24/7)">Auto-stop engine</label>
+            <label for="tradingRulesAutoStopMinutes" class="text-slate-500 text-xs shrink-0">min before:</label>
+            <input type="number" id="tradingRulesAutoStopMinutes" min="0" max="1440" value="60" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Minutes before market close (or midnight for 24/7) to stop the engine. Default 60.">
+            <span id="tradingRulesAutoStopTime" class="text-xs font-mono text-slate-400" data-tooltip="Local time when engine will auto-stop">—</span>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <label for="tradingRulesPauseOnLoss" class="text-slate-500 shrink-0" data-tooltip="When a trade closes with a loss, stop the engine for this many seconds before resuming">Pause on loss</label>
+            <input type="number" id="tradingRulesPauseOnLoss" min="0" max="86400" value="0" placeholder="0" class="w-20 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Seconds to pause after a losing trade. 0 = disabled.">
+            <span class="text-slate-500 text-xs shrink-0">sec</span>
+          </div>
+          <div id="tradingRulesList" class="space-y-2">
+            <p class="text-xs text-slate-500">All conditions must be met (AND). No deal if a position or order already exists.</p>
+            <div id="tradingRulesHeader" class="rules-grid px-2 pb-1 mb-1 text-xs text-slate-500 border-b border-slate-700/50">
+              <span data-tooltip="Drag to reorder rules">⋮⋮</span>
+              <span data-tooltip="Enable/disable rule (engine must be stopped)">On</span>
+              <span>Left</span>
+              <span>Compare</span>
+              <span>Right</span>
+              <span data-tooltip="Condition met right now">✓</span>
+              <span></span>
+            </div>
+            <div id="tradingRulesItems" class="space-y-2"></div>
+            <button type="button" id="tradingRulesAdd" class="text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-slate-800">+ Add rule</button>
+          </div>
+          <p id="tradingRulesStatus" class="text-xs text-slate-500 mt-1" data-tooltip="Shows whether conditions are met (not an error – just current state)">—</p>
+        </div>
+      </section>
+      <section id="positionsPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[260px] hidden">
+        <h3 class="text-sm font-semibold text-slate-400 mb-2">Positions</h3>
+        <div id="positionsList" class="space-y-2 text-sm">
+          <p id="positionsEmpty" class="text-slate-500 text-xs">No open positions</p>
+        </div>
+      </section>
+      <section id="ordersPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[260px] hidden">
+        <h3 class="text-sm font-semibold text-slate-400 mb-2">Orders</h3>
+        <div id="ordersList" class="space-y-2 text-sm">
+          <p id="ordersEmpty" class="text-slate-500 text-xs">No working orders</p>
+        </div>
+      </section>
+      <section id="transactionLogPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[640px] max-h-[320px] flex flex-col hidden">
+        <div class="flex items-center justify-between gap-2 mb-2">
+          <h3 class="text-sm font-semibold text-slate-400" data-tooltip="Closed positions with P&L. Persisted to transactions.json, rolls at 200.">Transaction log</h3>
+          <button type="button" id="transactionLogReset" class="px-2 py-1 rounded text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">Reset</button>
+        </div>
+        <div id="transactionLogList" class="flex-1 min-h-0 overflow-y-auto overflow-x-auto space-y-1 text-xs font-mono"></div>
+        <div class="mt-3 pt-3 border-t border-slate-700 flex justify-between items-center text-sm shrink-0">
+          <span class="text-slate-500 font-medium">Total P&L</span>
+          <span id="transactionLogTotal" class="font-mono font-semibold">—</span>
+        </div>
+      </section>
+      <section id="splashPanel" class="flex-1 min-w-[280px] max-w-[400px] flex flex-col items-center justify-center py-12 px-6 rounded-xl bg-gradient-to-br from-slate-900/80 to-slate-950 border border-slate-800">
+        <div class="flex flex-col items-center gap-6">
+          <svg class="w-28 h-28 text-emerald-500/90 drop-shadow-[0_0_16px_rgba(16,185,129,0.25)]" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M14 56V24l14 16 14-16 14 16 14-16" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="40" cy="40" r="36" stroke="currentColor" stroke-width="1.5" stroke-opacity="0.2" fill="none"/>
+          </svg>
+          <div class="text-center">
+            <h1 class="text-2xl font-bold tracking-tight text-slate-100">TiddeliTrade</h1>
+            <p class="mt-1 text-sm text-slate-500">IG Index trading with rules</p>
+          </div>
+          <p id="splashHint" class="text-slate-500 text-sm">Press Start to connect</p>
+        </div>
+      </section>
+      <section id="dealPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[200px] max-w-[320px] hidden">
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="text-sm font-semibold text-slate-400">Deal</h3>
+          <span id="dealCurrency" class="text-xs text-slate-500" data-tooltip="Trading currency for this instrument">—</span>
+        </div>
+        <p id="dealEngineActiveMsg" class="text-xs text-amber-400 mb-2 hidden" data-tooltip="Rules engine is running – it will place deals when conditions are met">Rules engine running – manual trading disabled</p>
+        <form id="dealForm" class="space-y-2 text-sm min-w-0">
+          <div class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 items-center">
+            <label for="dealDirection" class="text-slate-500" data-tooltip="Buy or sell direction">Direction</label>
+            <select id="dealDirection" class="px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none">
+              <option value="BUY">Buy</option>
+              <option value="SELL">Sell</option>
+            </select>
+            <label for="dealSize" class="text-slate-500" data-tooltip="Trade size in contracts">Size</label>
+            <div class="flex flex-col gap-0.5">
+              <input type="text" id="dealSize" placeholder="0.5" class="px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-mono placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 outline-none">
+              <span id="dealMinSize" class="text-xs text-slate-500 hidden" data-tooltip="Minimum contract size for this instrument">Min: —</span>
+            </div>
+            <label for="dealTpSlMode" class="text-slate-500" data-tooltip="Value = gain/loss in currency, Rate = price level, % = percent from entry">TP/SL in</label>
+            <select id="dealTpSlMode" class="px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none">
+              <option value="value">Value (gain/loss)</option>
+              <option value="rate">Rate (price)</option>
+              <option value="pct">%</option>
+            </select>
+            <label for="dealTakeProfit" class="text-slate-500" data-tooltip="Take profit – gain in £, price level, or % (optional)">Take profit</label>
+            <div class="flex flex-col gap-0.5">
+              <input type="text" id="dealTakeProfit" placeholder="—" class="px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-mono placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 outline-none">
+              <span id="dealTpWarning" class="text-xs text-amber-500 hidden">Take profit would result in a loss</span>
+            </div>
+            <label for="dealStopLoss" class="text-slate-500" data-tooltip="Stop loss – loss in £, price level, or % (optional)">Stop loss</label>
+            <input type="text" id="dealStopLoss" placeholder="—" class="px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-mono placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 outline-none">
+            <span class="text-slate-500 text-xs" data-tooltip="Estimated gain/loss if TP or SL triggers">Est. TP/SL</span>
+            <span id="dealEstTpSl" class="text-xs font-mono text-slate-400">—</span>
+            <label for="dealCloseAt" class="text-slate-500" data-tooltip="App will auto-close position at this time (optional, app must be running)">Scheduled close</label>
+            <div class="flex gap-1 items-center">
+              <input type="datetime-local" id="dealCloseAt" class="flex-1 min-w-0 px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none">
+              <button type="button" id="dealCloseAtClear" class="shrink-0 p-1.5 rounded text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition-colors" title="Clear scheduled close" aria-label="Clear scheduled close">×</button>
+            </div>
+          </div>
+          <p id="dealLiveWarning" class="hidden mt-2 text-xs text-amber-400" data-tooltip="Trades will execute on your live IG account">Real money – trades will execute on your live account</p>
+          <button type="submit" id="dealPlaceBtn" class="w-full mt-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+            Place deal
+          </button>
+          <p id="dealMessage" class="mt-2 text-sm text-amber-400 hidden break-words min-w-0 max-w-full"></p>
+        </form>
+      </section>
+      <section id="orderPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[200px] max-w-[320px] hidden">
+        <h3 class="text-sm font-semibold text-slate-400 mb-2">Order</h3>
+        <p id="orderEngineActiveMsg" class="text-xs text-amber-400 mb-2 hidden" data-tooltip="Rules engine is running – manual trading disabled">Rules engine running – manual trading disabled</p>
+        <form id="orderForm" class="space-y-2 text-sm min-w-0">
+          <div class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 items-center">
+            <label for="orderDirection" class="text-slate-500" data-tooltip="Buy: triggers when price falls to or below. Sell: triggers when price rises to or above.">Direction</label>
+            <select id="orderDirection" class="px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none">
+              <option value="BUY">Buy</option>
+              <option value="SELL">Sell</option>
+            </select>
+            <label for="orderSize" class="text-slate-500" data-tooltip="Number of contracts to trade when order fills">Size</label>
+            <div class="flex flex-col gap-0.5">
+              <input type="text" id="orderSize" placeholder="0.5" class="px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-mono placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 outline-none">
+              <span id="orderMinSize" class="text-xs text-slate-500 hidden" data-tooltip="Minimum contract size for this instrument">Min: —</span>
+            </div>
+            <label for="orderPrice" class="text-slate-500" data-tooltip="Trigger price. Buy: trade when market reaches this price or below. Sell: trade when market reaches this price or above.">Price</label>
+            <input type="text" id="orderPrice" placeholder="e.g. 2650.50" class="px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-mono placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 outline-none">
+            <label for="orderTpSlMode" class="text-slate-500" data-tooltip="Value = gain/loss in currency, Rate = price level, % = percent from trigger price">TP/SL in</label>
+            <select id="orderTpSlMode" class="px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none">
+              <option value="value">Value (gain/loss)</option>
+              <option value="rate">Rate (price)</option>
+              <option value="pct">%</option>
+            </select>
+            <label for="orderTakeProfit" class="text-slate-500" data-tooltip="Take profit level when position fills. Optional.">Take profit</label>
+            <input type="text" id="orderTakeProfit" placeholder="—" class="px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-mono placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 outline-none">
+            <label for="orderStopLoss" class="text-slate-500" data-tooltip="Stop loss level when position fills. Optional.">Stop loss</label>
+            <input type="text" id="orderStopLoss" placeholder="—" class="px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-mono placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 outline-none">
+            <label for="orderCloseAt" class="text-slate-500" data-tooltip="App will auto-close position at this time when order fills (app must be running). Optional.">Scheduled close</label>
+            <div class="flex gap-1 items-center">
+              <input type="datetime-local" id="orderCloseAt" class="flex-1 min-w-0 px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none">
+              <button type="button" id="orderCloseAtClear" class="shrink-0 p-1.5 rounded text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition-colors" title="Clear scheduled close" aria-label="Clear scheduled close">×</button>
+            </div>
+            <label for="orderStopAt" class="text-slate-500" data-tooltip="Order valid until this time. Leave empty for no expiry.">Good till</label>
+            <div class="flex gap-1 items-center">
+              <input type="datetime-local" id="orderStopAt" class="flex-1 min-w-0 px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none">
+              <button type="button" id="orderStopAtClear" class="shrink-0 p-1.5 rounded text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition-colors" title="Clear good till" aria-label="Clear good till">×</button>
+            </div>
+          </div>
+          <button type="submit" id="orderPlaceBtn" class="w-full mt-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+            Place order
+          </button>
+          <p id="orderMessage" class="mt-2 text-sm text-amber-400 hidden break-words min-w-0 max-w-full"></p>
+        </form>
+      </section>
+      <p id="mainPlaceholder" class="text-slate-500 text-sm self-center">Start to connect and log in.</p>
+    </div>
+  </main>
+  <div id="logWindow" class="fixed bottom-0 left-0 right-0 flex flex-col bg-slate-950 border-t border-slate-800 font-mono text-[10px] leading-tight text-slate-500" style="height: 48px;" aria-label="Debug log">
+    <div id="logResizeHandle" class="h-2 cursor-ns-resize hover:bg-slate-700 active:bg-slate-600 transition-colors flex-shrink-0 border-b border-slate-800" title="Drag to resize log"></div>
+    <div id="logContent" class="flex-1 min-h-0 overflow-y-auto px-3 py-1"></div>
+  </div>
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>
