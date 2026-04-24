@@ -21,20 +21,153 @@ export interface Rule {
   enabled?: boolean;
 }
 
-export interface BacktestConfig {
+export interface RuleSetConfig {
+  direction: 'BUY' | 'SELL';
   rules: Rule[];
+  takeProfit?: string | null;
+  stopLoss?: string | null;
+  tpSlMode?: 'value' | 'rate' | 'pct';
+  dealSize?: string;
+}
+
+export interface BacktestConfig {
+  /** Legacy: single rule set. When ruleSets is provided, this is ignored. */
+  rules?: Rule[];
+  /** Per-direction rule sets. Evaluation order: BUY first, then SELL. When provided, backtestRuleSets filters which to use. */
+  ruleSets?: RuleSetConfig[];
+  /** Which rule sets to include in backtest. Order: BUY first, then SELL. Default ['BUY','SELL'] when ruleSets provided. */
+  backtestRuleSets?: ('BUY' | 'SELL')[];
   probeShortMinutes: number;
   probeMediumMinutes: number;
   probeLongMinutes: number;
   is24_7: boolean;
-  /** Take profit: raw value. Interpretation depends on tpSlMode. */
+  /** Take profit: raw value. Interpretation depends on tpSlMode. (Legacy / fallback when no rule set TP/SL) */
   takeProfit?: string | null;
-  /** Stop loss: raw value. Interpretation depends on tpSlMode. */
+  /** Stop loss: raw value. Interpretation depends on tpSlMode. (Legacy / fallback) */
   stopLoss?: string | null;
   /** 'rate' = price levels, 'pct' = % from entry, 'value' = £ gain/loss. */
   tpSlMode?: 'value' | 'rate' | 'pct';
-    dealSize?: string;
+  dealSize?: string;
   contractSize?: number;
+  /**
+   * When set (non-24/7 markets from IG marketTimes), opens/closes/TP-SL only while dealing is open.
+   * Slots use minutes since midnight in Europe/London (IG’s openTime/closeTime), 7 entries Sun=0 … Sat=6; null = closed that day.
+   * Omitted/null = no dealing-hours gate.
+   */
+  dealingWeekLondon?: DealingWeekLondon | null;
+}
+
+/** Minutes since London local midnight (IG openTime/closeTime). */
+export interface DealingDaySlotLondon {
+  openMin: number;
+  closeMin: number;
+}
+
+/** Sunday=0 … Saturday=6 in Europe/London. */
+export type DealingWeekLondon = (DealingDaySlotLondon | null)[];
+
+/**
+ * When IG does not return parsable marketTimes but the instrument is not 24/7, use typical UK cash-index
+ * hours (Mon–Fri 08:00–21:59 London, Sat/Sun closed). Safer than allowing all times.
+ */
+export function defaultDealingWeekLondonMonFri(): DealingWeekLondon {
+  const slot: DealingDaySlotLondon = { openMin: 8 * 60, closeMin: 21 * 60 + 59 };
+  return [null, slot, slot, slot, slot, slot, null];
+}
+
+const LONDON_WD: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+const londonWeekdayFmt = new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/London', weekday: 'short' });
+const londonHmFmt = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false });
+
+function londonWeekdayIndexSun0(ts: number): number {
+  const part = londonWeekdayFmt.formatToParts(new Date(ts)).find((p) => p.type === 'weekday')?.value;
+  return LONDON_WD[part ?? ''] ?? 0;
+}
+
+function londonMinutesSinceMidnight(ts: number): number {
+  const parts = londonHmFmt.formatToParts(new Date(ts));
+  const h = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0', 10);
+  const m = parseInt(parts.find((p) => p.type === 'minute')?.value ?? '0', 10);
+  return (Number.isNaN(h) ? 0 : h) * 60 + (Number.isNaN(m) ? 0 : m);
+}
+
+/** Parse IG openTime/closeTime (e.g. "22:02", "1970-01-01T21:59:00") to minutes since midnight. */
+export function parseIgTimeToMinutes(raw: string | undefined | null): number | null {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  const iso = s.match(/T(\d{1,2}):(\d{2})(?::\d{2})?/);
+  if (iso) {
+    const h = parseInt(iso[1], 10);
+    const min = parseInt(iso[2], 10);
+    if (!isNaN(h) && h >= 0 && h <= 23 && !isNaN(min) && min >= 0 && min <= 59) return h * 60 + min;
+  }
+  const parts = s.split(/[:\s]+/).filter(Boolean);
+  const h = parseInt(parts[0] ?? '', 10);
+  const min = parseInt(parts[1] ?? '0', 10);
+  if (isNaN(h) || h < 0 || h > 23) return null;
+  const mm = isNaN(min) || min < 0 || min > 59 ? 0 : min;
+  return h * 60 + mm;
+}
+
+function normalizeMarketTimesToSevenSlots(
+  marketTimes: Array<{ openTime?: string; closeTime?: string }>
+): (typeof marketTimes[0] | null)[] {
+  const out: (typeof marketTimes[0] | null)[] = [null, null, null, null, null, null, null];
+  if (marketTimes.length === 7) {
+    // IG lists Monday first; layout here is Sunday=0 … Saturday=6.
+    for (let i = 0; i < 7; i++) out[(i + 1) % 7] = marketTimes[i] ?? null;
+    return out;
+  }
+  if (marketTimes.length === 5) {
+    for (let i = 0; i < 5; i++) out[i + 1] = marketTimes[i] ?? null;
+    return out;
+  }
+  for (let i = 0; i < Math.min(marketTimes.length, 7); i++) out[i] = marketTimes[i] ?? null;
+  return out;
+}
+
+function slotFromMarketTimeRow(row: { openTime?: string; closeTime?: string } | null): DealingDaySlotLondon | null {
+  if (!row) return null;
+  const openMin = parseIgTimeToMinutes(row.openTime);
+  const closeMin = parseIgTimeToMinutes(row.closeTime);
+  if (openMin == null || closeMin == null) return null;
+  return { openMin, closeMin };
+}
+
+/**
+ * Build weekly dealing slots from IG marketTimes (Europe/London wall times, same as computeDefaultCloseAt in ig.ts).
+ * Returns null when 24/7 or no usable schedule (caller treats as no gate).
+ */
+export function dealingWeekFromMarketTimes(
+  marketTimes: Array<{ openTime?: string; closeTime?: string }> | undefined | null,
+  is24_7: boolean
+): DealingWeekLondon | null {
+  if (is24_7) return null;
+  if (!marketTimes || marketTimes.length === 0) return null;
+  const normalized = normalizeMarketTimesToSevenSlots(marketTimes);
+  const week: DealingWeekLondon = [];
+  for (let i = 0; i < 7; i++) {
+    week.push(slotFromMarketTimeRow(normalized[i] ?? null));
+  }
+  const anyOpen = week.some((s) => s != null);
+  return anyOpen ? week : null;
+}
+
+/** True if IG-style dealing is open at ts (London calendar day + overnight sessions). */
+export function isDealingOpenLondon(ts: number, week: DealingWeekLondon | null | undefined): boolean {
+  if (!week || week.length !== 7) return true;
+  const wd = londonWeekdayIndexSun0(ts);
+  const min = londonMinutesSinceMidnight(ts);
+  const prevWd = (wd + 6) % 7;
+  const prev = week[prevWd];
+  // Overnight from prevWd ends on the *next* calendar day only (wd === prevWd+1 mod 7)
+  if (prev && prev.openMin > prev.closeMin && wd === (prevWd + 1) % 7 && min <= prev.closeMin) return true;
+  const today = week[wd];
+  if (!today) return false;
+  const { openMin, closeMin } = today;
+  if (openMin < closeMin) return min >= openMin && min <= closeMin;
+  return min >= openMin || min <= closeMin;
 }
 
 interface ProbeStats {
@@ -277,7 +410,8 @@ function evaluateRule(rule: Rule, ctx: Context): boolean {
 }
 
 function evaluateRules(ctx: Context, config: BacktestConfig): boolean {
-  const enabledRules = config.rules.filter((r) => r.enabled !== false);
+  const rules = config.rules || [];
+  const enabledRules = rules.filter((r) => r.enabled !== false);
   if (enabledRules.length === 0) return false;
   for (const rule of enabledRules) {
     if (!evaluateRule(rule, ctx)) return false;
@@ -287,7 +421,8 @@ function evaluateRules(ctx: Context, config: BacktestConfig): boolean {
 
 /** Returns indices of rules that failed. */
 function getFailingRuleIndices(ctx: Context, config: BacktestConfig): number[] {
-  const enabledRules = config.rules.filter((r) => r.enabled !== false);
+  const rules = config.rules || [];
+  const enabledRules = rules.filter((r) => r.enabled !== false);
   const failing: number[] = [];
   for (let i = 0; i < enabledRules.length; i++) {
     if (!evaluateRule(enabledRules[i], ctx)) failing.push(i);
@@ -296,7 +431,8 @@ function getFailingRuleIndices(ctx: Context, config: BacktestConfig): number[] {
 }
 
 function inferDirection(config: BacktestConfig): 'BUY' | 'SELL' {
-  const enabled = config.rules.filter((r) => r.enabled !== false);
+  const rules = config.rules || [];
+  const enabled = rules.filter((r) => r.enabled !== false);
   for (const r of enabled) {
     if (r.left === 'Buy') return 'BUY';
     if (r.left === 'Sell') return 'SELL';
@@ -304,12 +440,33 @@ function inferDirection(config: BacktestConfig): 'BUY' | 'SELL' {
   return 'BUY';
 }
 
+/** Build config-like object for getTpSlLevels from a rule set or legacy config. */
+function getTpSlConfig(
+  positionRuleSet: RuleSetConfig | null,
+  fallbackConfig: BacktestConfig
+): { takeProfit?: string | null; stopLoss?: string | null; tpSlMode?: 'value' | 'rate' | 'pct'; dealSize?: string } {
+  if (positionRuleSet) {
+    return {
+      takeProfit: positionRuleSet.takeProfit ?? fallbackConfig.takeProfit,
+      stopLoss: positionRuleSet.stopLoss ?? fallbackConfig.stopLoss,
+      tpSlMode: (positionRuleSet.tpSlMode || fallbackConfig.tpSlMode) as 'value' | 'rate' | 'pct',
+      dealSize: positionRuleSet.dealSize ?? fallbackConfig.dealSize,
+    };
+  }
+  return {
+    takeProfit: fallbackConfig.takeProfit,
+    stopLoss: fallbackConfig.stopLoss,
+    tpSlMode: (fallbackConfig.tpSlMode || undefined) as 'value' | 'rate' | 'pct' | undefined,
+    dealSize: fallbackConfig.dealSize,
+  };
+}
+
 function getTpSlLevels(
   entry: number,
   direction: 'BUY' | 'SELL',
   config: BacktestConfig
 ): { tpLevel: number | null; slLevel: number | null } {
-  const mode = config.tpSlMode || 'rate';
+  const mode = (config.tpSlMode || 'rate') as 'value' | 'rate' | 'pct';
   const tpRaw = config.takeProfit?.trim();
   const slRaw = config.stopLoss?.trim();
   if (!tpRaw && !slRaw) return { tpLevel: null, slLevel: null };
@@ -339,6 +496,13 @@ function getTpSlLevels(
 
 export type ExitReason = 'tp' | 'sl' | 'rules' | 'endOfPeriod';
 
+/** One rule row as configured when the trade opened (AND with others in the set). */
+export interface BacktestTradeRuleLine {
+  left: string;
+  op: string;
+  right: string;
+}
+
 export interface BacktestTrade {
   direction: 'BUY' | 'SELL';
   entryTs: number;
@@ -347,6 +511,8 @@ export interface BacktestTrade {
   exitPrice: number;
   profitLoss: number;
   exitReason?: ExitReason;
+  /** Rules that had to pass for this entry (snapshot at open). Omitted when empty/legacy edge cases. */
+  entryRules?: BacktestTradeRuleLine[];
 }
 
 export interface CloseReasonCounts {
@@ -378,8 +544,47 @@ export interface BacktestReport {
   closeReasonCounts?: CloseReasonCounts;
   /** When carry-over and days were non-consecutive, we split into blocks and closed at each block end. */
   nonConsecutiveWarning?: string;
-  /** Per-rule sole blocker counts: times this rule was the only one failing when we could have opened. */
-  ruleBlockerCounts?: Array<{ left: string; op: string; right: string; soleBlockerCount: number }>;
+  /** Per-rule sole blocker counts: times that rule was the only one failing when no deal opened (flat, no position). */
+  ruleBlockerCounts?: RuleBlockerCountRow[];
+}
+
+/** One row in the sole-blocker report (legacy rules or a BUY/SELL rule set). */
+export type RuleBlockerCountRow = {
+  left: string;
+  op: string;
+  right: string;
+  soleBlockerCount: number;
+  /** Present when using per-direction rule sets. */
+  direction?: 'BUY' | 'SELL';
+};
+
+const BLOCKER_AGG_SEP = '\u0001';
+
+function blockerRowKey(row: Pick<RuleBlockerCountRow, 'left' | 'op' | 'right'> & { direction?: 'BUY' | 'SELL' }): string {
+  return row.direction
+    ? `${row.direction}${BLOCKER_AGG_SEP}${row.left}${BLOCKER_AGG_SEP}${row.op}${BLOCKER_AGG_SEP}${row.right}`
+    : `legacy${BLOCKER_AGG_SEP}${row.left}${BLOCKER_AGG_SEP}${row.op}${BLOCKER_AGG_SEP}${row.right}`;
+}
+
+function parseBlockerAggregateKey(key: string): Omit<RuleBlockerCountRow, 'soleBlockerCount'> | null {
+  const parts = key.split(BLOCKER_AGG_SEP);
+  if (parts.length !== 4) return null;
+  const [tag, left, op, right] = parts;
+  if (tag === 'legacy') return { left, op, right };
+  if (tag === 'BUY' || tag === 'SELL') return { left, op, right, direction: tag };
+  return null;
+}
+
+function mergeBlockerAggregateMap(blockerAggregate: Map<string, number>): RuleBlockerCountRow[] {
+  const out: RuleBlockerCountRow[] = [];
+  for (const [key, count] of blockerAggregate.entries()) {
+    if (count <= 0) continue;
+    const parsed = parseBlockerAggregateKey(key);
+    if (!parsed) continue;
+    out.push({ ...parsed, soleBlockerCount: count });
+  }
+  out.sort((a, b) => b.soleBlockerCount - a.soleBlockerCount);
+  return out;
 }
 
 function getDayKey(ts: number): string {
@@ -420,7 +625,7 @@ export function runBacktestPerDay(
       openAtEndTotal += report.openAtEnd ?? 0;
       if (report.ruleBlockerCounts) {
         for (const b of report.ruleBlockerCounts) {
-          const k = `${b.left}|${b.op}|${b.right}`;
+          const k = blockerRowKey(b);
           blockerAggregate.set(k, (blockerAggregate.get(k) ?? 0) + b.soleBlockerCount);
         }
       }
@@ -442,14 +647,7 @@ export function runBacktestPerDay(
   const totalGainLossPounds = denom > 0 ? totalGainLoss * denom : undefined;
   const avgTradePnlPounds = (denom > 0 && allTrades.length > 0) ? (totalGainLoss / allTrades.length) * denom : undefined;
 
-  const ruleBlockerCounts: Array<{ left: string; op: string; right: string; soleBlockerCount: number }> = [];
-  for (const [key, count] of blockerAggregate.entries()) {
-    if (count > 0) {
-      const [left, op, right] = key.split('|');
-      ruleBlockerCounts.push({ left, op, right, soleBlockerCount: count });
-    }
-  }
-  ruleBlockerCounts.sort((a, b) => b.soleBlockerCount - a.soleBlockerCount);
+  const ruleBlockerCounts = mergeBlockerAggregateMap(blockerAggregate);
 
   const closeReasonCounts: CloseReasonCounts = {
     tp: allTrades.filter((t) => t.exitReason === 'tp').length,
@@ -546,7 +744,7 @@ export function runBacktestCarryOver(
     openAtEndTotal += report.openAtEnd ?? 0;
     if (report.ruleBlockerCounts) {
       for (const b of report.ruleBlockerCounts) {
-        const k = `${b.left}|${b.op}|${b.right}`;
+        const k = blockerRowKey(b);
         blockerAggregate.set(k, (blockerAggregate.get(k) ?? 0) + b.soleBlockerCount);
       }
     }
@@ -566,14 +764,7 @@ export function runBacktestCarryOver(
   const totalGainLossPounds = denom > 0 ? totalGainLoss * denom : undefined;
   const avgTradePnlPounds = (denom > 0 && allTrades.length > 0) ? (totalGainLoss / allTrades.length) * denom : undefined;
 
-  const ruleBlockerCounts: Array<{ left: string; op: string; right: string; soleBlockerCount: number }> = [];
-  for (const [key, count] of blockerAggregate.entries()) {
-    if (count > 0) {
-      const [left, op, right] = key.split('|');
-      ruleBlockerCounts.push({ left, op, right, soleBlockerCount: count });
-    }
-  }
-  ruleBlockerCounts.sort((a, b) => b.soleBlockerCount - a.soleBlockerCount);
+  const ruleBlockerCounts = mergeBlockerAggregateMap(blockerAggregate);
 
   const closeReasonCounts: CloseReasonCounts = {
     tp: allTrades.filter((t) => t.exitReason === 'tp').length,
@@ -634,14 +825,7 @@ export function runBacktestPerDayAsync(
       const denom = size * contractSize;
       const totalGainLossPounds = denom > 0 ? totalGainLoss * denom : undefined;
       const avgTradePnlPounds = (denom > 0 && allTrades.length > 0) ? (totalGainLoss / allTrades.length) * denom : undefined;
-      const ruleBlockerCounts: Array<{ left: string; op: string; right: string; soleBlockerCount: number }> = [];
-      for (const [key, count] of blockerAggregate.entries()) {
-        if (count > 0) {
-          const [left, op, right] = key.split('|');
-          ruleBlockerCounts.push({ left, op, right, soleBlockerCount: count });
-        }
-      }
-      ruleBlockerCounts.sort((a, b) => b.soleBlockerCount - a.soleBlockerCount);
+      const ruleBlockerCounts = mergeBlockerAggregateMap(blockerAggregate);
       done({
         trades: allTrades,
         totalGainLoss,
@@ -672,7 +856,7 @@ export function runBacktestPerDayAsync(
         openAtEndTotal += report.openAtEnd ?? 0;
         if (report.ruleBlockerCounts) {
           for (const b of report.ruleBlockerCounts) {
-            const k = `${b.left}|${b.op}|${b.right}`;
+            const k = blockerRowKey(b);
             blockerAggregate.set(k, (blockerAggregate.get(k) ?? 0) + b.soleBlockerCount);
           }
         }
@@ -704,15 +888,38 @@ export function runBacktest(
   const trades: BacktestTrade[] = [];
   const priceHistory: { ts: number; mid: number; spread: number }[] = [];
   const longWindowMs = getLongWindowMs(config);
-  let openPosition: { direction: 'BUY' | 'SELL'; entryTs: number; entryPrice: number } | null = null;
+  type Position = {
+    direction: 'BUY' | 'SELL';
+    entryTs: number;
+    entryPrice: number;
+    ruleSet: RuleSetConfig | null;
+    entryRulesSnapshot: BacktestTradeRuleLine[];
+  };
+  let openPosition: Position | null = null;
+
+  function snapshotEntryRules(triggeredRuleSet: RuleSetConfig | null): BacktestTradeRuleLine[] {
+    if (useRuleSets && triggeredRuleSet) {
+      return triggeredRuleSet.rules
+        .filter((r) => r.enabled !== false)
+        .map((r) => ({ left: r.left, op: r.op, right: r.right }));
+    }
+    return enabledLegacyRules.map((r) => ({ left: r.left, op: r.op, right: r.right }));
+  }
   let prevRulesPass = false;
   let prevBlocked = false;
+  let prevCanOpen = false;
   let prevMid: number | null = null;
-  const direction = inferDirection(config);
   const dayStart = samples.length > 0 ? samples[0].offer : null;
-  const enabledRules = config.rules.filter((r) => r.enabled !== false);
-  const soleBlockerCounts = new Map<number, number>();
-  for (let i = 0; i < enabledRules.length; i++) soleBlockerCounts.set(i, 0);
+
+  const useRuleSets = config.ruleSets && config.ruleSets.length > 0 && config.backtestRuleSets && config.backtestRuleSets.length > 0;
+  const activeRuleSets: RuleSetConfig[] = useRuleSets
+    ? (config.ruleSets!.filter((rs) => config.backtestRuleSets!.includes(rs.direction)) as RuleSetConfig[])
+    : [];
+  const legacyRules = config.rules || [];
+  const legacyDirection = inferDirection(config);
+  const enabledLegacyRules = legacyRules.filter((r) => r.enabled !== false);
+  const soleBlockerCounts = new Map<string, number>();
+
   const totalSamples = samples.length;
 
   for (let i = 0; i < samples.length; i++) {
@@ -746,44 +953,114 @@ export function runBacktest(
       probes,
     };
 
-    const rulesPass = evaluateRules(ctx, config);
+    let rulesPass: boolean;
+    let triggeredRuleSet: RuleSetConfig | null = null;
+    if (useRuleSets && activeRuleSets.length > 0) {
+      rulesPass = false;
+      for (const rs of activeRuleSets) {
+        if (evaluateRules(ctx, { ...config, rules: rs.rules })) {
+          rulesPass = true;
+          triggeredRuleSet = rs;
+          break;
+        }
+      }
+    } else {
+      rulesPass = evaluateRules(ctx, { ...config, rules: legacyRules });
+      if (rulesPass) triggeredRuleSet = null;
+    }
     const blocked = openPosition !== null;
     const pass = rulesPass;
+    const dealingOpen = isDealingOpenLondon(s.ts, config.dealingWeekLondon ?? null);
+    const canOpenHere = pass && dealingOpen;
 
-    // Sole blocker: when no position and rules don't all pass, count which rule was the only failure
-    if (!blocked && !pass && enabledRules.length > 0) {
-      const failing = getFailingRuleIndices(ctx, config);
-      if (failing.length === 1) {
-        const idx = failing[0];
-        soleBlockerCounts.set(idx, (soleBlockerCounts.get(idx) ?? 0) + 1);
+    // Sole blockers: flat, no deal would open; exactly one rule fails (per legacy list or per BUY/SELL set).
+    if (!blocked && !pass) {
+      if (!useRuleSets && enabledLegacyRules.length > 0) {
+        const failing = getFailingRuleIndices(ctx, { ...config, rules: legacyRules });
+        if (failing.length === 1) {
+          const r = enabledLegacyRules[failing[0]];
+          const key = blockerRowKey({ left: r.left, op: r.op, right: r.right });
+          soleBlockerCounts.set(key, (soleBlockerCounts.get(key) ?? 0) + 1);
+        }
+      } else if (useRuleSets && activeRuleSets.length > 0) {
+        for (const rs of activeRuleSets) {
+          const enabledRs = rs.rules.filter((rule) => rule.enabled !== false);
+          if (enabledRs.length === 0) continue;
+          const failing = getFailingRuleIndices(ctx, { ...config, rules: rs.rules });
+          if (failing.length === 1) {
+            const r = enabledRs[failing[0]];
+            const key = blockerRowKey({ left: r.left, op: r.op, right: r.right, direction: rs.direction });
+            soleBlockerCounts.set(key, (soleBlockerCounts.get(key) ?? 0) + 1);
+          }
+        }
       }
     }
 
-    // Check TP/SL when we have a position (before rules-fail close)
+    // Check TP/SL whenever we have a position (before rules-fail close). Use bid/offer on every sample — not gated by
+    // dealing hours: otherwise after-hours ticks (e.g. last stamp 23:59) never evaluate TP/SL and EOD shows uncapped P/L.
+    // Opens and rule-based exits still respect dealingOpen below.
     if (blocked && openPosition) {
-      const { tpLevel, slLevel } = getTpSlLevels(openPosition.entryPrice, openPosition.direction, config);
+      const tpSlCfg = { ...config, ...getTpSlConfig(openPosition.ruleSet, config) };
+      const { tpLevel, slLevel } = getTpSlLevels(openPosition.entryPrice, openPosition.direction, tpSlCfg);
       const exitBid = s.bid;
       const exitOffer = s.offer;
       let closedByTpSl = false;
 
+      const er = openPosition.entryRulesSnapshot.length > 0 ? openPosition.entryRulesSnapshot : undefined;
       if (tpLevel != null && openPosition.direction === 'BUY' && exitBid >= tpLevel) {
         const pnl = tpLevel - openPosition.entryPrice;
-        trades.push({ direction: openPosition.direction, entryTs: openPosition.entryTs, entryPrice: openPosition.entryPrice, exitTs: s.ts, exitPrice: tpLevel, profitLoss: pnl, exitReason: 'tp' });
+        trades.push({
+          direction: openPosition.direction,
+          entryTs: openPosition.entryTs,
+          entryPrice: openPosition.entryPrice,
+          exitTs: s.ts,
+          exitPrice: tpLevel,
+          profitLoss: pnl,
+          exitReason: 'tp',
+          entryRules: er,
+        });
         openPosition = null;
         closedByTpSl = true;
       } else if (tpLevel != null && openPosition.direction === 'SELL' && exitOffer <= tpLevel) {
         const pnl = openPosition.entryPrice - tpLevel;
-        trades.push({ direction: openPosition.direction, entryTs: openPosition.entryTs, entryPrice: openPosition.entryPrice, exitTs: s.ts, exitPrice: tpLevel, profitLoss: pnl, exitReason: 'tp' });
+        trades.push({
+          direction: openPosition.direction,
+          entryTs: openPosition.entryTs,
+          entryPrice: openPosition.entryPrice,
+          exitTs: s.ts,
+          exitPrice: tpLevel,
+          profitLoss: pnl,
+          exitReason: 'tp',
+          entryRules: er,
+        });
         openPosition = null;
         closedByTpSl = true;
       } else if (slLevel != null && openPosition.direction === 'BUY' && exitBid <= slLevel) {
         const pnl = slLevel - openPosition.entryPrice;
-        trades.push({ direction: openPosition.direction, entryTs: openPosition.entryTs, entryPrice: openPosition.entryPrice, exitTs: s.ts, exitPrice: slLevel, profitLoss: pnl, exitReason: 'sl' });
+        trades.push({
+          direction: openPosition.direction,
+          entryTs: openPosition.entryTs,
+          entryPrice: openPosition.entryPrice,
+          exitTs: s.ts,
+          exitPrice: slLevel,
+          profitLoss: pnl,
+          exitReason: 'sl',
+          entryRules: er,
+        });
         openPosition = null;
         closedByTpSl = true;
       } else if (slLevel != null && openPosition.direction === 'SELL' && exitOffer >= slLevel) {
         const pnl = openPosition.entryPrice - slLevel;
-        trades.push({ direction: openPosition.direction, entryTs: openPosition.entryTs, entryPrice: openPosition.entryPrice, exitTs: s.ts, exitPrice: slLevel, profitLoss: pnl, exitReason: 'sl' });
+        trades.push({
+          direction: openPosition.direction,
+          entryTs: openPosition.entryTs,
+          entryPrice: openPosition.entryPrice,
+          exitTs: s.ts,
+          exitPrice: slLevel,
+          profitLoss: pnl,
+          exitReason: 'sl',
+          entryRules: er,
+        });
         openPosition = null;
         closedByTpSl = true;
       }
@@ -791,13 +1068,15 @@ export function runBacktest(
       if (closedByTpSl) {
         prevRulesPass = false; // allow opening again on next pass
         prevBlocked = false;
+        prevCanOpen = false;
         continue;
       }
     }
 
-    // Close when rules stop passing – only if no TP/SL (with TP/SL we hold until TP or SL hits)
-    const hasTpSl = !!(config.takeProfit || config.stopLoss);
-    if (!hasTpSl && !pass && blocked && openPosition) {
+    // Close when rules stop passing – only if no TP/SL (with TP/SL we hold until TP or SL hits); only while dealing is open.
+    const tpSlMerged = openPosition ? getTpSlConfig(openPosition.ruleSet, config) : config;
+    const hasTpSl = !!(tpSlMerged.takeProfit || tpSlMerged.stopLoss);
+    if (!hasTpSl && !pass && blocked && openPosition && dealingOpen) {
       const exitPrice = openPosition.direction === 'BUY' ? s.bid : s.offer;
       const entryPrice = openPosition.entryPrice;
       const pnl = openPosition.direction === 'BUY'
@@ -811,17 +1090,27 @@ export function runBacktest(
         exitPrice,
         profitLoss: pnl,
         exitReason: 'rules',
+        entryRules: openPosition.entryRulesSnapshot.length > 0 ? openPosition.entryRulesSnapshot : undefined,
       });
       openPosition = null;
     }
 
-    // Open when rules start passing and we don't have a position
-    if (pass && !blocked && !prevRulesPass) {
-      openPosition = { direction, entryTs: s.ts, entryPrice: direction === 'BUY' ? s.offer : s.bid };
+    // Open when rules + dealing session allow (rising edge); closes still use pass / TP/SL above
+    if (canOpenHere && !blocked && !prevCanOpen) {
+      const direction = triggeredRuleSet ? triggeredRuleSet.direction : legacyDirection;
+      const entryPrice = direction === 'BUY' ? s.offer : s.bid;
+      openPosition = {
+        direction,
+        entryTs: s.ts,
+        entryPrice,
+        ruleSet: triggeredRuleSet,
+        entryRulesSnapshot: snapshotEntryRules(triggeredRuleSet),
+      };
     }
 
     prevRulesPass = pass;
     prevBlocked = blocked;
+    prevCanOpen = canOpenHere;
   }
 
   // Always close at end of period (intraday day-end or carry-over block-end)
@@ -839,6 +1128,7 @@ export function runBacktest(
       exitPrice,
       profitLoss: pnl,
       exitReason: 'endOfPeriod',
+      entryRules: openPosition.entryRulesSnapshot.length > 0 ? openPosition.entryRulesSnapshot : undefined,
     });
     openPosition = null;
   }
@@ -861,13 +1151,12 @@ export function runBacktest(
   const totalGainLossPounds = denom > 0 ? totalGainLoss * denom : undefined;
   const avgTradePnlPounds = (denom > 0 && trades.length > 0) ? (totalGainLoss / trades.length) * denom : undefined;
 
-  const ruleBlockerCounts: Array<{ left: string; op: string; right: string; soleBlockerCount: number }> = [];
-  for (let i = 0; i < enabledRules.length; i++) {
-    const count = soleBlockerCounts.get(i) ?? 0;
-    if (count > 0) {
-      const r = enabledRules[i];
-      ruleBlockerCounts.push({ left: r.left, op: r.op, right: r.right, soleBlockerCount: count });
-    }
+  const ruleBlockerCounts: RuleBlockerCountRow[] = [];
+  for (const [key, count] of soleBlockerCounts.entries()) {
+    if (count <= 0) continue;
+    const parsed = parseBlockerAggregateKey(key);
+    if (!parsed) continue;
+    ruleBlockerCounts.push({ ...parsed, soleBlockerCount: count });
   }
   ruleBlockerCounts.sort((a, b) => b.soleBlockerCount - a.soleBlockerCount);
 

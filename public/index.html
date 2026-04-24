@@ -127,6 +127,20 @@
       </div>
     </div>
   </div>
+  <div id="tradeChartModal" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 hidden p-3" aria-hidden="true">
+    <div id="tradeChartModalPanel" class="bg-slate-900 border border-slate-600 rounded-xl shadow-2xl flex flex-col overflow-hidden max-w-[96vw] max-h-[94vh] resize min-w-[min(420px,96vw)] min-h-[320px] w-[min(900px,96vw)] h-[min(580px,94vh)]" style="resize: both;">
+      <div class="px-3 py-2 border-b border-slate-700 flex items-center justify-between gap-2 shrink-0">
+        <h2 id="tradeChartModalTitle" class="text-sm font-semibold text-slate-200">Trade chart</h2>
+        <button type="button" id="tradeChartModalClose" class="text-slate-400 hover:text-slate-200 text-xl leading-none px-2 py-0.5 rounded hover:bg-slate-800" aria-label="Close">&times;</button>
+      </div>
+      <div id="tradeChartModalMeta" class="px-3 py-2 text-[11px] font-mono text-slate-400 border-b border-slate-800 space-y-1 shrink-0 leading-relaxed"></div>
+      <div id="tradeChartModalRules" class="px-3 py-2 text-[11px] border-b border-slate-800 shrink-0 max-h-[28vh] overflow-y-auto leading-relaxed hidden"></div>
+      <div id="tradeChartCanvasWrap" class="flex-1 min-h-[180px] relative bg-slate-950/80 overflow-hidden min-w-0">
+        <canvas id="tradeChartCanvas" class="absolute inset-0 w-full h-full block cursor-crosshair"></canvas>
+      </div>
+      <p id="tradeChartModalHint" class="px-3 py-1.5 text-[10px] text-slate-500 shrink-0 border-t border-slate-800">Mid price from recording. Drag the window corner to resize.</p>
+    </div>
+  </div>
   <div id="analyseProgressModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
     <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-xl w-full max-w-sm mx-4 overflow-hidden">
       <div class="px-4 py-3 border-b border-slate-700">
@@ -266,7 +280,7 @@
               <dt class="text-slate-500" data-tooltip="Current vs previous tick (up/down/flat)">Trend</dt><dd id="nowTrend" class="font-mono text-xs">—</dd>
               <dt class="text-slate-500" data-tooltip="Offer price – price to buy at">Buy</dt><dd id="nowBuy" class="font-mono text-emerald-500">—</dd>
               <dt class="text-slate-500" data-tooltip="Bid price – price to sell at">Sell</dt><dd id="nowSell" class="font-mono text-red-500">—</dd>
-              <dt class="text-slate-500" data-tooltip="Buy price at market/day start (midnight in market TZ)">Day start</dt><dd id="nowDayStart" class="font-mono text-slate-400">—</dd>
+              <dt class="text-slate-500" data-tooltip="Mid at open of IG daily candle (UTC range query; candle chosen for today Europe/London when available)">Day start</dt><dd id="nowDayStart" class="font-mono text-slate-400">—</dd>
               <dt class="text-slate-500" data-tooltip="Difference between buy and sell price">Spread</dt><dd id="nowSpread" class="font-mono text-slate-200">—</dd>
               <dt class="text-slate-500" data-tooltip="Time of last price update from the stream (trade time, same as rules)">Time</dt><dd id="nowTime" class="font-mono text-slate-400 text-xs">—</dd>
               <dt class="text-slate-500" data-tooltip="IG client sentiment: Bull = long &gt; short, Bear = short &gt; long, Neutral = within 5%. From IG API.">Sentiment</dt><dd id="nowSentiment" class="font-mono text-xs">—</dd>
@@ -298,6 +312,13 @@
             <input type="date" id="testRulesFromDate" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono w-28">
             <span>to</span>
             <input type="date" id="testRulesToDate" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono w-28">
+          </div>
+          <div class="flex flex-col gap-1">
+            <span class="text-slate-500 text-[11px]">Rule sets to analyse:</span>
+            <div class="flex items-center gap-4">
+              <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="testRulesBacktestBuy" checked class="rounded bg-slate-800 border-slate-600 text-emerald-500"><span class="text-emerald-400">BUY</span></label>
+              <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="testRulesBacktestSell" checked class="rounded bg-slate-800 border-slate-600 text-emerald-500"><span class="text-red-400">SELL</span></label>
+            </div>
           </div>
           <div class="flex flex-col gap-1">
             <span class="text-slate-500 text-[11px]">Analysis mode:</span>
@@ -332,23 +353,23 @@
           <h4 class="text-slate-400 font-medium mb-1.5">Backtest report</h4>
           <dl id="testRulesReportBody" class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-slate-300"></dl>
           <div id="testRulesBlockerSection" class="hidden mt-2 pt-2 border-t border-slate-700">
-            <h5 class="text-slate-500 font-medium mb-1" data-tooltip="Times this rule was the only one failing when a deal could have opened">Sole blockers (trim candidates)</h5>
+            <h5 class="text-slate-500 font-medium mb-1" data-tooltip="Sample counts where you were flat and rules failed: for each row, that condition was the only failing rule (legacy list or BUY/SELL set). Market-closed blocks are not counted here.">Sole blockers (trim candidates)</h5>
             <ul id="testRulesBlockerList" class="text-slate-400 space-y-0.5"></ul>
           </div>
           <div id="testRulesTradeListSection" class="hidden mt-2 pt-2 border-t border-slate-700">
-            <h5 class="text-slate-500 font-medium mb-1">Trades (day, close time)</h5>
+            <h5 class="text-slate-500 font-medium mb-1" data-tooltip="Each line shows how the backtest closed: TP/SL = hit levels; EOD = forced at last tick of the day/period (P/L is not capped to your £ target); Rules = conditions dropped.">Trades (entry → exit, close)</h5>
             <ul id="testRulesTradeList" class="text-slate-400 space-y-0.5 font-mono text-[11px]"></ul>
           </div>
         </div>
       </section>
-      <section id="tradingRulesPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[320px] hidden">
+      <section id="tradingRulesBuyPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[320px] hidden">
         <div class="flex items-center justify-between gap-2 mb-2">
-          <h3 class="text-sm font-semibold text-slate-400" data-tooltip="When running: engine places deals when conditions are met. Manual trading disabled.">Trading rules</h3>
+          <h3 class="text-sm font-semibold text-emerald-400" data-tooltip="BUY rules – engine evaluates these first. When running: places deals when conditions met.">BUY rules</h3>
           <button type="button" id="tradingRulesToggle" class="px-2 py-1 rounded text-xs font-medium transition-colors" title="Start/stop rules engine">Stop</button>
         </div>
         <p id="tradingRulesEngineStatus" class="text-xs text-slate-500 mb-2" data-tooltip="Running = engine evaluates rules and can place deals. Stopped = manual trading only.">Engine: Stopped</p>
         <p id="tradingRulesLockedMsg" class="text-xs text-amber-400 mb-2 hidden" data-tooltip="Rules cannot be edited while the engine is running">Rules locked – stop the engine to edit</p>
-        <div class="space-y-2 text-sm">
+        <div class="space-y-2 text-sm mb-3">
           <div class="flex items-center gap-2">
             <input type="checkbox" id="tradingRulesConfirmBeforePlace" checked class="rounded bg-slate-800 border-slate-600 text-emerald-500 focus:ring-emerald-500">
             <label for="tradingRulesConfirmBeforePlace" class="text-slate-500" data-tooltip="When unchecked, deals place automatically without confirmation dialog">Confirm before placing</label>
@@ -365,22 +386,127 @@
             <input type="number" id="tradingRulesPauseOnLoss" min="0" max="86400" value="0" placeholder="0" class="w-20 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Seconds to pause after a losing trade. 0 = disabled.">
             <span class="text-slate-500 text-xs shrink-0">sec</span>
           </div>
-          <div id="tradingRulesList" class="space-y-2">
-            <p class="text-xs text-slate-500">All conditions must be met (AND). No deal if a position or order already exists.</p>
-            <div id="tradingRulesHeader" class="rules-grid px-2 pb-1 mb-1 text-xs text-slate-500 border-b border-slate-700/50">
-              <span data-tooltip="Drag to reorder rules">⋮⋮</span>
-              <span data-tooltip="Enable/disable rule (engine must be stopped)">On</span>
-              <span>Left</span>
-              <span>Compare</span>
-              <span>Right</span>
-              <span data-tooltip="Condition met right now">✓</span>
-              <span></span>
-            </div>
-            <div id="tradingRulesItems" class="space-y-2"></div>
-            <button type="button" id="tradingRulesAdd" class="text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-slate-800">+ Add rule</button>
-          </div>
-          <p id="tradingRulesStatus" class="text-xs text-slate-500 mt-1" data-tooltip="Shows whether conditions are met (not an error – just current state)">—</p>
         </div>
+        <p class="text-xs text-slate-500 mb-2" data-tooltip="When both running: BUY evaluated first, then SELL. Each panel has its own Start.">When both running: BUY first, then SELL.</p>
+        <div class="space-y-2">
+          <div id="tradingRulesBuyHeader" class="rules-grid px-2 pb-1 text-xs text-slate-500 border-b border-slate-700/50">
+            <span data-tooltip="Drag to reorder">⋮⋮</span><span>On</span><span>Live</span><span>Op</span><span>Ref</span><span>✓</span><span></span>
+          </div>
+          <p class="text-[11px] text-slate-500 px-0.5 -mt-1 mb-1" data-tooltip="Engine still evaluates live op reference. The line under each rule restates it probe-first when it helps.">Rules are grouped by probe horizon. Drag rows between groups if needed.</p>
+          <div id="tradingRulesBuyGroups" class="space-y-3">
+            <div class="rounded-lg border border-slate-700/70 bg-slate-950/40 p-2">
+              <div class="flex items-center justify-between gap-2 mb-1.5">
+                <span class="text-xs font-medium text-violet-400/90">Long probe</span>
+                <button type="button" class="text-xs px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-600" data-add-rule-group="long" data-rules-panel="buy">+ Add</button>
+              </div>
+              <div id="tradingRulesBuyLong" class="space-y-2 min-h-[6px]" data-rules-group="long" data-rules-panel="buy"></div>
+            </div>
+            <div class="rounded-lg border border-slate-700/70 bg-slate-950/40 p-2">
+              <div class="flex items-center justify-between gap-2 mb-1.5">
+                <span class="text-xs font-medium text-amber-500/90">Medium probe</span>
+                <button type="button" class="text-xs px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-600" data-add-rule-group="medium" data-rules-panel="buy">+ Add</button>
+              </div>
+              <div id="tradingRulesBuyMedium" class="space-y-2 min-h-[6px]" data-rules-group="medium" data-rules-panel="buy"></div>
+            </div>
+            <div class="rounded-lg border border-slate-700/70 bg-slate-950/40 p-2">
+              <div class="flex items-center justify-between gap-2 mb-1.5">
+                <span class="text-xs font-medium text-cyan-500/90">Short probe</span>
+                <button type="button" class="text-xs px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-600" data-add-rule-group="short" data-rules-panel="buy">+ Add</button>
+              </div>
+              <div id="tradingRulesBuyShort" class="space-y-2 min-h-[6px]" data-rules-group="short" data-rules-panel="buy"></div>
+            </div>
+            <div class="rounded-lg border border-slate-700/70 bg-slate-950/40 p-2">
+              <div class="flex items-center justify-between gap-2 mb-1.5">
+                <span class="text-xs font-medium text-slate-400">Other</span>
+                <span class="text-[10px] text-slate-600 hidden sm:inline">time, sentiment, cross-probe, fixed…</span>
+                <button type="button" class="text-xs px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-600 shrink-0" data-add-rule-group="other" data-rules-panel="buy">+ Add</button>
+              </div>
+              <div id="tradingRulesBuyOther" class="space-y-2 min-h-[6px]" data-rules-group="other" data-rules-panel="buy"></div>
+            </div>
+          </div>
+          <div class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-xs items-center pt-2 mt-2 border-t border-slate-700/50">
+            <span class="text-slate-500">Size</span><input type="text" id="rulesBuySize" placeholder="1" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono">
+            <span class="text-slate-500">Take profit</span><input type="text" id="rulesBuyTp" placeholder="—" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono">
+            <span class="text-slate-500">Stop loss</span><input type="text" id="rulesBuySl" placeholder="—" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono">
+            <span class="text-slate-500">TP/SL in</span><select id="rulesBuyTpSlMode" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 text-xs w-24" data-tooltip="Value = gain/loss in currency, Rate = price level, % = percent from entry"><option value="value">Value (gain/loss)</option><option value="rate">Rate (price)</option><option value="pct">%</option></select>
+            <span class="text-slate-500 text-xs" data-tooltip="Estimated gain/loss if TP or SL triggers">Est. TP/SL</span>
+            <span id="rulesBuyEstTpSl" class="text-xs font-mono text-slate-400">—</span>
+          </div>
+        </div>
+        <p id="tradingRulesStatus" class="text-xs text-slate-500 mt-2" data-tooltip="Shows whether conditions are met (not an error – just current state)">—</p>
+      </section>
+      <section id="tradingRulesSellPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[320px] hidden">
+        <div class="flex items-center justify-between gap-2 mb-2">
+          <h3 class="text-sm font-semibold text-red-400" data-tooltip="SELL rules – evaluated after BUY. Same structure as BUY panel.">SELL rules</h3>
+          <button type="button" id="tradingRulesToggleSell" class="px-2 py-1 rounded text-xs font-medium transition-colors" title="Start/stop rules engine">Stop</button>
+        </div>
+        <p id="tradingRulesEngineStatusSell" class="text-xs text-slate-500 mb-2" data-tooltip="Running = engine evaluates rules and can place deals. Stopped = manual trading only.">Engine: Stopped</p>
+        <p id="tradingRulesLockedMsgSell" class="text-xs text-amber-400 mb-2 hidden" data-tooltip="Rules cannot be edited while the engine is running">Rules locked – stop the engine to edit</p>
+        <div class="space-y-2 text-sm mb-3">
+          <div class="flex items-center gap-2">
+            <input type="checkbox" id="tradingRulesConfirmBeforePlaceSell" checked class="rounded bg-slate-800 border-slate-600 text-red-500 focus:ring-red-500">
+            <label for="tradingRulesConfirmBeforePlaceSell" class="text-slate-500" data-tooltip="When unchecked, deals place automatically without confirmation dialog">Confirm before placing</label>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <input type="checkbox" id="tradingRulesAutoStopSell" checked class="rounded bg-slate-800 border-slate-600 text-red-500 focus:ring-red-500">
+            <label for="tradingRulesAutoStopSell" class="text-slate-500 shrink-0" data-tooltip="When enabled, engine auto-stops N minutes before market close (or midnight for 24/7)">Auto-stop engine</label>
+            <label for="tradingRulesAutoStopMinutesSell" class="text-slate-500 text-xs shrink-0">min before:</label>
+            <input type="number" id="tradingRulesAutoStopMinutesSell" min="0" max="1440" value="60" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Minutes before market close (or midnight for 24/7) to stop the engine. Default 60.">
+            <span id="tradingRulesAutoStopTimeSell" class="text-xs font-mono text-slate-400" data-tooltip="Local time when engine will auto-stop">—</span>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <label for="tradingRulesPauseOnLossSell" class="text-slate-500 shrink-0" data-tooltip="When a trade closes with a loss, stop the engine for this many seconds before resuming">Pause on loss</label>
+            <input type="number" id="tradingRulesPauseOnLossSell" min="0" max="86400" value="0" placeholder="0" class="w-20 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Seconds to pause after a losing trade. 0 = disabled.">
+            <span class="text-slate-500 text-xs shrink-0">sec</span>
+          </div>
+        </div>
+        <p class="text-xs text-slate-500 mb-2" data-tooltip="When both running: BUY evaluated first, then SELL. Each panel has its own Start.">When both running: BUY first, then SELL.</p>
+        <div class="space-y-2">
+          <div id="tradingRulesSellHeader" class="rules-grid px-2 pb-1 text-xs text-slate-500 border-b border-slate-700/50">
+            <span data-tooltip="Drag to reorder">⋮⋮</span><span>On</span><span>Live</span><span>Op</span><span>Ref</span><span>✓</span><span></span>
+          </div>
+          <p class="text-[11px] text-slate-500 px-0.5 -mt-1 mb-1" data-tooltip="Engine still evaluates live op reference. The line under each rule restates it probe-first when it helps.">Rules are grouped by probe horizon. Drag rows between groups if needed.</p>
+          <div id="tradingRulesSellGroups" class="space-y-3">
+            <div class="rounded-lg border border-slate-700/70 bg-slate-950/40 p-2">
+              <div class="flex items-center justify-between gap-2 mb-1.5">
+                <span class="text-xs font-medium text-violet-400/90">Long probe</span>
+                <button type="button" class="text-xs px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-600" data-add-rule-group="long" data-rules-panel="sell">+ Add</button>
+              </div>
+              <div id="tradingRulesSellLong" class="space-y-2 min-h-[6px]" data-rules-group="long" data-rules-panel="sell"></div>
+            </div>
+            <div class="rounded-lg border border-slate-700/70 bg-slate-950/40 p-2">
+              <div class="flex items-center justify-between gap-2 mb-1.5">
+                <span class="text-xs font-medium text-amber-500/90">Medium probe</span>
+                <button type="button" class="text-xs px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-600" data-add-rule-group="medium" data-rules-panel="sell">+ Add</button>
+              </div>
+              <div id="tradingRulesSellMedium" class="space-y-2 min-h-[6px]" data-rules-group="medium" data-rules-panel="sell"></div>
+            </div>
+            <div class="rounded-lg border border-slate-700/70 bg-slate-950/40 p-2">
+              <div class="flex items-center justify-between gap-2 mb-1.5">
+                <span class="text-xs font-medium text-cyan-500/90">Short probe</span>
+                <button type="button" class="text-xs px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-600" data-add-rule-group="short" data-rules-panel="sell">+ Add</button>
+              </div>
+              <div id="tradingRulesSellShort" class="space-y-2 min-h-[6px]" data-rules-group="short" data-rules-panel="sell"></div>
+            </div>
+            <div class="rounded-lg border border-slate-700/70 bg-slate-950/40 p-2">
+              <div class="flex items-center justify-between gap-2 mb-1.5">
+                <span class="text-xs font-medium text-slate-400">Other</span>
+                <span class="text-[10px] text-slate-600 hidden sm:inline">time, sentiment, cross-probe, fixed…</span>
+                <button type="button" class="text-xs px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-600 shrink-0" data-add-rule-group="other" data-rules-panel="sell">+ Add</button>
+              </div>
+              <div id="tradingRulesSellOther" class="space-y-2 min-h-[6px]" data-rules-group="other" data-rules-panel="sell"></div>
+            </div>
+          </div>
+          <div class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-xs items-center pt-2 mt-2 border-t border-slate-700/50">
+            <span class="text-slate-500">Size</span><input type="text" id="rulesSellSize" placeholder="1" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono">
+            <span class="text-slate-500">Take profit</span><input type="text" id="rulesSellTp" placeholder="—" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono">
+            <span class="text-slate-500">Stop loss</span><input type="text" id="rulesSellSl" placeholder="—" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono">
+            <span class="text-slate-500">TP/SL in</span><select id="rulesSellTpSlMode" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 text-xs w-24" data-tooltip="Value = gain/loss in currency, Rate = price level, % = percent from entry"><option value="value">Value (gain/loss)</option><option value="rate">Rate (price)</option><option value="pct">%</option></select>
+            <span class="text-slate-500 text-xs" data-tooltip="Estimated gain/loss if TP or SL triggers">Est. TP/SL</span>
+            <span id="rulesSellEstTpSl" class="text-xs font-mono text-slate-400">—</span>
+          </div>
+        </div>
+        <p id="tradingRulesStatusSell" class="text-xs text-slate-500 mt-2" data-tooltip="Shows whether conditions are met (not an error – just current state)">—</p>
       </section>
       <section id="positionsPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[260px] hidden">
         <h3 class="text-sm font-semibold text-slate-400 mb-2">Positions</h3>

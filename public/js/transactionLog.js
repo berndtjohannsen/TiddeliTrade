@@ -1,7 +1,7 @@
 /**
  * Transaction log panel – scrollable list, total, reset. Persisted server-side.
  */
-import { formatMoney, formatTimeWithTz, playSuccessSound } from './utils.js';
+import { formatMoney, formatTimeWithTz } from './utils.js';
 
 export function initTransactionLog(socket) {
   var listEl = document.getElementById('transactionLogList');
@@ -44,10 +44,25 @@ export function initTransactionLog(socket) {
     } else {
       listEl.innerHTML = list.map(renderTransaction).join('');
     }
-    var total = list.reduce(function (sum, tx) { return sum + (tx.type === 'open' ? 0 : (tx.profitLoss || 0)); }, 0);
-    var currency = list.length > 0 && list[0].currency ? list[0].currency : '';
-    totalEl.textContent = formatMoney(total, currency);
-    totalEl.className = 'font-mono font-semibold ' + (total >= 0 ? 'text-emerald-500' : 'text-red-500');
+    var totalsByCur = {};
+    list.forEach(function (tx) {
+      if (tx.type === 'open') return;
+      var c = (tx.currency && String(tx.currency).trim()) ? String(tx.currency).trim() : '—';
+      totalsByCur[c] = (totalsByCur[c] || 0) + (tx.profitLoss || 0);
+    });
+    var curKeys = Object.keys(totalsByCur);
+    if (curKeys.length === 0) {
+      totalEl.textContent = '—';
+    } else if (curKeys.length === 1) {
+      totalEl.textContent = formatMoney(totalsByCur[curKeys[0]], curKeys[0]);
+    } else {
+      curKeys.sort();
+      totalEl.textContent = curKeys.map(function (c) { return formatMoney(totalsByCur[c], c); }).join(' + ');
+    }
+    var singleTotal = curKeys.length === 1 ? totalsByCur[curKeys[0]] : null;
+    totalEl.className =
+      'font-mono font-semibold ' +
+      (curKeys.length === 1 ? (singleTotal >= 0 ? 'text-emerald-500' : 'text-red-500') : 'text-slate-300');
   }
 
   function load() {
@@ -58,7 +73,7 @@ export function initTransactionLog(socket) {
 
   socket.on('transaction_added', function (tx) {
     if (!tx) return;
-    if (tx.type !== 'open' && typeof tx.profitLoss === 'number' && tx.profitLoss > 0) playSuccessSound();
+    // No sound here: profitable closes (TP/SL, sync) were easy to mistake for "a deal"; deal chime stays in deal.js on deal_placed (rules).
     fetch('/api/transactions').then(function (r) { return r.json(); }).then(render).catch(function () {});
   });
 

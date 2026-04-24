@@ -428,11 +428,11 @@ export function initDeal(socket, state, log) {
     }
   }
 
-  function buildDealParams() {
+  function buildDealParams(overrides) {
     var epic = epicSelect ? epicSelect.value : '';
     if (!epic) {
       showDealMessage('Select an instrument first');
-      return null;
+      return { ok: false, reason: 'Select an instrument first' };
     }
     clearDealMessage();
     var directionEl = document.getElementById('dealDirection');
@@ -440,94 +440,105 @@ export function initDeal(socket, state, log) {
     var takeProfitEl = document.getElementById('dealTakeProfit');
     var stopLossEl = document.getElementById('dealStopLoss');
     var closeAtEl = document.getElementById('dealCloseAt');
-    var size = sizeEl ? sizeEl.value.trim() : '';
+    var tpSlModeEl = document.getElementById('dealTpSlMode');
+
+    var direction = (overrides && overrides.direction) ? overrides.direction : (directionEl ? directionEl.value : 'BUY');
+    var size = (overrides && overrides.ruleSet && overrides.ruleSet.dealSize) ? overrides.ruleSet.dealSize : (sizeEl ? sizeEl.value.trim() : '');
     if (!size) {
       size = (sizeEl && sizeEl.placeholder) ? sizeEl.placeholder : '1';
     }
+    var tpRaw = (overrides && overrides.ruleSet && overrides.ruleSet.takeProfit) ? overrides.ruleSet.takeProfit : (takeProfitEl ? takeProfitEl.value.trim() : '');
+    var slRaw = (overrides && overrides.ruleSet && overrides.ruleSet.stopLoss) ? overrides.ruleSet.stopLoss : (stopLossEl ? stopLossEl.value.trim() : '');
+    var mode = (overrides && overrides.ruleSet && overrides.ruleSet.tpSlMode) ? overrides.ruleSet.tpSlMode : (tpSlModeEl ? tpSlModeEl.value : 'value');
+    var closeAtVal = (overrides && overrides.ruleSet) ? undefined : (closeAtEl && closeAtEl.value ? closeAtEl.value : undefined);
     var sizeNum = parseFloat(size);
     if (state.currentMinDealSize != null && !isNaN(sizeNum) && sizeNum < state.currentMinDealSize) {
-      showDealMessage('Size ' + size + ' is below minimum (' + state.currentMinDealSize + ')');
-      return null;
+      var belowMinMsg = 'Size ' + size + ' is below minimum (' + state.currentMinDealSize + ')';
+      showDealMessage(belowMinMsg);
+      return { ok: false, reason: belowMinMsg };
     }
-    var tpSlMode = document.getElementById('dealTpSlMode');
-    var mode = tpSlMode ? tpSlMode.value : 'value';
-    var tpRaw = takeProfitEl ? takeProfitEl.value.trim() : '';
-    var slRaw = stopLossEl ? stopLossEl.value.trim() : '';
-    var entryPrice = directionEl && directionEl.value === 'BUY' ? state.currentOffer : state.currentBid;
+    var entryPrice = direction === 'BUY' ? state.currentOffer : state.currentBid;
     var takeProfit = tpRaw ? parseFloat(tpRaw) : undefined;
     var stopLoss = slRaw ? parseFloat(slRaw) : undefined;
     var needsPrices = (mode === 'pct' || mode === 'value') && (tpRaw || slRaw);
     if (needsPrices && (entryPrice == null || isNaN(entryPrice) || entryPrice <= 0)) {
-      showDealMessage('Current prices required for TP/SL in ' + (mode === 'pct' ? '%' : 'value') + ' mode');
-      return null;
+      var priceReqMsg = 'Current prices required for TP/SL in ' + (mode === 'pct' ? '%' : 'value') + ' mode';
+      showDealMessage(priceReqMsg);
+      return { ok: false, reason: priceReqMsg };
     }
     if (mode === 'pct' && entryPrice != null && !isNaN(entryPrice) && entryPrice > 0) {
       if (takeProfit != null && !isNaN(takeProfit)) {
-        takeProfit = directionEl && directionEl.value === 'BUY'
+        takeProfit = direction === 'BUY'
           ? entryPrice * (1 + takeProfit / 100)
           : entryPrice * (1 - takeProfit / 100);
       }
       if (stopLoss != null && !isNaN(stopLoss)) {
-        stopLoss = directionEl && directionEl.value === 'BUY'
+        stopLoss = direction === 'BUY'
           ? entryPrice * (1 - stopLoss / 100)
           : entryPrice * (1 + stopLoss / 100);
       }
     } else if (mode === 'value' && entryPrice != null && !isNaN(entryPrice) && sizeNum > 0 && state.currentContractSize > 0) {
       var denom = sizeNum * state.currentContractSize;
       if (takeProfit != null && !isNaN(takeProfit) && takeProfit > 0) {
-        takeProfit = directionEl && directionEl.value === 'BUY'
+        takeProfit = direction === 'BUY'
           ? entryPrice + takeProfit / denom
           : entryPrice - takeProfit / denom;
       }
       if (stopLoss != null && !isNaN(stopLoss) && stopLoss > 0) {
-        stopLoss = directionEl && directionEl.value === 'BUY'
+        stopLoss = direction === 'BUY'
           ? entryPrice - stopLoss / denom
           : entryPrice + stopLoss / denom;
       }
     }
     var params = {
       epic: epic,
-      direction: directionEl ? directionEl.value : 'BUY',
+      direction: direction,
       size: size,
       takeProfit: takeProfit != null && !isNaN(takeProfit) ? String(takeProfit) : undefined,
       stopLoss: stopLoss != null && !isNaN(stopLoss) ? String(stopLoss) : undefined,
-      closeAt: closeAtEl && closeAtEl.value ? closeAtEl.value : undefined,
+      closeAt: closeAtVal,
       bid: (state.currentBid != null && !isNaN(state.currentBid)) ? state.currentBid : undefined,
       offer: (state.currentOffer != null && !isNaN(state.currentOffer)) ? state.currentOffer : undefined
     };
     if (!params.takeProfit) delete params.takeProfit;
     if (!params.stopLoss) delete params.stopLoss;
     if (!params.closeAt) delete params.closeAt;
-    return params;
+    return { ok: true, params: params };
   }
 
-  function buildDealParamsAndShowConfirm() {
-    var params = buildDealParams();
-    if (params) {
-      showDealConfirmModal(params);
+  function buildDealParamsAndShowConfirm(overrides) {
+    var r = buildDealParams(overrides);
+    if (r.ok) {
+      showDealConfirmModal(r.params);
+      if (overrides && overrides.ruleSet) {
+        log('Rules engine: opened deal confirm (' + r.params.direction + ' ' + r.params.size + ' ' + r.params.epic + ')');
+      }
       return true;
     }
+    log('Deal not opened: ' + r.reason);
     return false;
   }
 
   var lastDealFromRulesEngine = false;
   var dealInProgress = false;
 
-  function placeDealDirect() {
+  function placeDealDirect(overrides) {
     if (dealInProgress) {
       log('Deal already in progress, skipping duplicate');
       return false;
     }
-    var params = buildDealParams();
-    if (params) {
-      dealInProgress = true;
-      state.dealInProgress = true;
-      lastDealFromRulesEngine = true;
-      log('Rules engine placing deal: ' + params.direction + ' ' + params.size + ' ' + params.epic);
-      socket.emit('placeDeal', params);
-      return true;
+    var built = buildDealParams(overrides);
+    if (!built.ok) {
+      log('Rules engine: deal not sent — ' + built.reason);
+      return false;
     }
-    return false;
+    var params = built.params;
+    dealInProgress = true;
+    state.dealInProgress = true;
+    lastDealFromRulesEngine = true;
+    log('Rules engine: submitting deal to server (' + params.direction + ' ' + params.size + ' ' + params.epic + ')');
+    socket.emit('placeDeal', params);
+    return true;
   }
 
   if (dealForm) {
@@ -544,6 +555,7 @@ export function initDeal(socket, state, log) {
       return;
     }
     if (pendingDealParams) {
+      lastDealFromRulesEngine = false;
       dealInProgress = true;
       state.dealInProgress = true;
       log('Placing deal: ' + pendingDealParams.direction + ' ' + pendingDealParams.size + ' ' + pendingDealParams.epic);
@@ -621,6 +633,7 @@ export function initDeal(socket, state, log) {
   socket.on('disconnect', function () {
     dealInProgress = false;
     state.dealInProgress = false;
+    lastDealFromRulesEngine = false;
   });
 
   return {

@@ -12,6 +12,8 @@ export interface Transaction {
   timestamp: string;
   /** 'open' = deal placed, 'closed' = position closed. Omit for backward compat (treated as closed). */
   type?: 'open' | 'closed';
+  /** IG deal id – used to avoid duplicate log rows for the same close/open. */
+  dealId?: string;
   epic: string;
   instrumentName?: string;
   direction: 'BUY' | 'SELL';
@@ -50,9 +52,19 @@ function save(state: TransactionLogState): void {
 /**
  * Append a transaction and persist. Rolls to keep only the most recent MAX_TRANSACTIONS.
  * For closed trades, pass exit and profitLoss. For open (deal placed), omit them and set type: 'open'.
+ * Returns null if a row with the same dealId and type already exists (duplicate guard).
  */
-export function appendTransaction(tx: Omit<Transaction, 'id'>): Transaction {
+export function appendTransaction(tx: Omit<Transaction, 'id'>): Transaction | null {
   const state = loadRaw();
+  const did = (tx.dealId || '').trim();
+  if (did) {
+    const txKind = tx.type === 'open' ? 'open' : 'closed';
+    const dup = state.transactions.some((t) => {
+      const tKind = t.type === 'open' ? 'open' : 'closed';
+      return tKind === txKind && (t.dealId || '').trim() === did;
+    });
+    if (dup) return null;
+  }
   const id = `tx-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   const full: Transaction = { ...tx, id };
   state.transactions.push(full);
@@ -66,7 +78,7 @@ export function appendTransaction(tx: Omit<Transaction, 'id'>): Transaction {
 /**
  * Log when a deal is placed (position opened). Use appendTransaction for closed positions.
  */
-export function appendTransactionOpen(tx: Omit<Transaction, 'id' | 'exit' | 'profitLoss'>): Transaction {
+export function appendTransactionOpen(tx: Omit<Transaction, 'id' | 'exit' | 'profitLoss'>): Transaction | null {
   return appendTransaction({ ...tx, type: 'open' });
 }
 

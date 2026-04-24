@@ -53,8 +53,28 @@ export interface UserConfig {
     tradingRulesRunning?: boolean;
     /** When false, engine places deals automatically without confirmation dialog */
     tradingRulesConfirmBeforePlace?: boolean;
-    /** Rules to evaluate: left (live value) op right (reference). All enabled must pass. No deal if position/order exists. */
+    /** Rules to evaluate: left (live value) op right (reference). All enabled must pass. No deal if position/order exists. @deprecated Use ruleSets instead. */
     tradingRules?: Array<{ left: string; op: string; right: string; enabled?: boolean }>;
+    /** Per-direction rule sets: BUY rules + deal params, SELL rules + deal params. Evaluation order: BUY first, then SELL. */
+    ruleSets?: {
+      buy?: {
+        /** @deprecated Prefer ruleGroups; still derived in UI for evaluation */
+        rules?: Array<{ left: string; op: string; right: string; enabled?: boolean }>;
+        ruleGroups?: { short?: unknown[]; medium?: unknown[]; long?: unknown[]; other?: unknown[] };
+        dealSize?: string;
+        takeProfit?: string;
+        stopLoss?: string;
+        tpSlMode?: string;
+      };
+      sell?: {
+        rules?: Array<{ left: string; op: string; right: string; enabled?: boolean }>;
+        ruleGroups?: { short?: unknown[]; medium?: unknown[]; long?: unknown[]; other?: unknown[] };
+        dealSize?: string;
+        takeProfit?: string;
+        stopLoss?: string;
+        tpSlMode?: string;
+      };
+    };
     /** Auto-stop engine: when true, engine stops N minutes before market close (or midnight for 24/7). Default true. */
     tradingRulesAutoStopEnabled?: boolean;
     /** Minutes before close/midnight to auto-stop. Default 60 (1h). */
@@ -89,11 +109,29 @@ export interface InstrumentSettings {
   orderCloseAt?: string;
   orderStopAt?: string;
   tradingRules?: Array<{ left: string; op: string; right: string; enabled?: boolean }>;
+  ruleSets?: {
+    buy?: {
+      rules?: Array<{ left: string; op: string; right: string; enabled?: boolean }>;
+      ruleGroups?: { short?: unknown[]; medium?: unknown[]; long?: unknown[]; other?: unknown[] };
+      dealSize?: string;
+      takeProfit?: string;
+      stopLoss?: string;
+      tpSlMode?: string;
+    };
+    sell?: {
+      rules?: Array<{ left: string; op: string; right: string; enabled?: boolean }>;
+      ruleGroups?: { short?: unknown[]; medium?: unknown[]; long?: unknown[]; other?: unknown[] };
+      dealSize?: string;
+      takeProfit?: string;
+      stopLoss?: string;
+      tpSlMode?: string;
+    };
+  };
   tradingRulesRunning?: boolean;
   tradingRulesConfirmBeforePlace?: boolean;
-    tradingRulesAutoStopEnabled?: boolean;
-    tradingRulesAutoStopBeforeMinutes?: number;
-    tradingRulesPauseOnLossSeconds?: number;
+  tradingRulesAutoStopEnabled?: boolean;
+  tradingRulesAutoStopBeforeMinutes?: number;
+  tradingRulesPauseOnLossSeconds?: number;
 }
 
 const DEFAULT_CONFIG: UserConfig = {

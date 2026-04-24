@@ -615,6 +615,8 @@ export interface MarketTradingInfo {
   defaultCloseAt: string | null;
   /** True if market trades 24/7 (e.g. crypto) – no weekend exclusion for probes. */
   is24_7: boolean;
+  /** IG opening hours per day (see dealing schedule builder). Omitted when API fails. */
+  marketTimes?: Array<{ openTime?: string; closeTime?: string }>;
 }
 
 export interface ClientSentiment {
@@ -662,28 +664,61 @@ export async function getClientSentiment(
   return { longPct, shortPct };
 }
 
+/** Pull marketTimes from instrument; openingHours is canonical per IG docs. */
+function extractMarketTimesFromInstrument(
+  instrument: unknown
+): Array<{ openTime?: string; closeTime?: string }> | undefined {
+  if (!instrument || typeof instrument !== 'object') return undefined;
+  const inst = instrument as Record<string, unknown>;
+  const fromNested = (obj: unknown): Array<{ openTime?: string; closeTime?: string }> | undefined => {
+    if (!obj || typeof obj !== 'object') return undefined;
+    const mt = (obj as { marketTimes?: unknown }).marketTimes;
+    if (Array.isArray(mt) && mt.length > 0) return mt as Array<{ openTime?: string; closeTime?: string }>;
+    return undefined;
+  };
+  return fromNested(inst.openingHours) ?? fromNested(inst.expiryDetails);
+}
+
 /**
  * Fetch market times and derive defaultCloseAt + is24_7. Single API call.
- * is24_7: true when marketTimes has 7 days (all week) or no close times.
+ * is24_7: true only when every row has no close time (IG omits close for always-on markets). A 7-day Mon–Sun schedule is not 24/7.
  */
 export async function getMarketTradingInfo(session: IgSession, epic: string): Promise<MarketTradingInfo> {
   const url = `${baseUrl()}/gateway/deal/markets/${encodeURIComponent(epic)}`;
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: { ...authHeaders(session), 'Version': '3' },
-  });
-  if (!res.ok) return { defaultCloseAt: null, is24_7: false };
-  const data = (await res.json()) as {
-    instrument?: {
-      expiryDetails?: { marketTimes?: Array<{ openTime?: string; closeTime?: string }> };
-    };
+  const fetchJson = async (version: string) => {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { ...authHeaders(session), Version: version },
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as { instrument?: unknown };
   };
-  const marketTimes = data.instrument?.expiryDetails?.marketTimes;
+  let data = await fetchJson('4');
+  let marketTimes = data ? extractMarketTimesFromInstrument(data.instrument) : undefined;
+  if (!data || !marketTimes?.length) {
+    const alt = await fetchJson('3');
+    if (alt) {
+      const mt = extractMarketTimesFromInstrument(alt.instrument);
+      if (mt && mt.length > 0) {
+        data = alt;
+        marketTimes = mt;
+      } else if (!data) {
+        data = alt;
+        marketTimes = mt;
+      }
+    }
+  }
+  if (!data) return { defaultCloseAt: null, is24_7: false };
   const is24_7 =
     Array.isArray(marketTimes) &&
-    (marketTimes.length >= 7 || marketTimes.every((m) => !(m.closeTime?.trim() ?? '')));
+    marketTimes.length > 0 &&
+    marketTimes.every((m) => !(m.closeTime?.trim() ?? ''));
   const defaultCloseAt = computeDefaultCloseAt(marketTimes);
-  return { defaultCloseAt, is24_7 };
+  return {
+    defaultCloseAt,
+    is24_7,
+    marketTimes: Array.isArray(marketTimes) ? marketTimes.map((m) => ({ openTime: m.openTime, closeTime: m.closeTime })) : undefined,
+  };
 }
 
 function computeDefaultCloseAt(marketTimes: Array<{ openTime?: string; closeTime?: string }> | undefined): string | null {
@@ -1074,27 +1109,48 @@ export async function getHistoricalPrices(
   };
 }
 
+/** Format date for IG /prices from= to= query (must align with snapshotTimeUTC, i.e. UTC — not server local time). */
+function fmtUtcForPricesQuery(d: Date): string {
+  return (
+    d.getUTCFullYear() +
+    '-' +
+    String(d.getUTCMonth() + 1).padStart(2, '0') +
+    '-' +
+    String(d.getUTCDate()).padStart(2, '0') +
+    'T' +
+    String(d.getUTCHours()).padStart(2, '0') +
+    ':' +
+    String(d.getUTCMinutes()).padStart(2, '0') +
+    ':' +
+    String(d.getUTCSeconds()).padStart(2, '0')
+  );
+}
+
+function londonCalendarDateKey(ms: number): string {
+  return new Date(ms).toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+}
+
+function openPriceMid(open?: { bid?: number; ask?: number }): number | null {
+  if (!open) return null;
+  const b = typeof open.bid === 'number' ? open.bid : parseFloat(String(open.bid ?? ''));
+  const a = typeof open.ask === 'number' ? open.ask : parseFloat(String(open.ask ?? ''));
+  if (!isNaN(b) && !isNaN(a)) return (b + a) / 2;
+  if (!isNaN(a)) return a;
+  if (!isNaN(b)) return b;
+  return null;
+}
+
 /**
- * Get the Buy (ask) price at market/day start. Uses DAY resolution; returns openPrice.ask of the most recent daily candle.
- * For 24/7 markets this is midnight (IG uses UTC for snapshot times).
+ * Day-open level for probes/rules: open of the IG daily candle, aligned with platform charts.
+ * Uses DAY resolution; from/to are UTC (was incorrectly using server local time before).
+ * Picks the candle for today's Europe/London calendar date when present, else the latest candle.
+ * Returns mid (bid+ask)/2 when both exist — matches chart open better than ask alone.
  */
 export async function getDayStartPrice(session: IgSession, epic: string): Promise<number | null> {
   const toDate = new Date();
-  const fromDate = new Date(toDate.getTime() - 3 * 24 * 60 * 60 * 1000);
-  const fmt = (d: Date) =>
-    d.getFullYear() +
-    '-' +
-    String(d.getMonth() + 1).padStart(2, '0') +
-    '-' +
-    String(d.getDate()).padStart(2, '0') +
-    'T' +
-    String(d.getHours()).padStart(2, '0') +
-    ':' +
-    String(d.getMinutes()).padStart(2, '0') +
-    ':' +
-    String(d.getSeconds()).padStart(2, '0');
-  const from = fmt(fromDate);
-  const to = fmt(toDate);
+  const fromDate = new Date(toDate.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const from = fmtUtcForPricesQuery(fromDate);
+  const to = fmtUtcForPricesQuery(toDate);
   const url = `${baseUrl()}/gateway/deal/prices/${encodeURIComponent(epic)}?resolution=DAY&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&pageSize=0`;
   const res = await fetch(url, {
     method: 'GET',
@@ -1109,12 +1165,17 @@ export async function getDayStartPrice(session: IgSession, epic: string): Promis
   };
   const prices = data.prices ?? [];
   if (prices.length === 0) return null;
-  // API order is unspecified; pick the candle with the most recent snapshotTimeUTC (today's or latest trading day)
   const withTs = prices
     .map((p) => ({ p, ts: p.snapshotTimeUTC ? new Date(p.snapshotTimeUTC).getTime() : 0 }))
     .filter((x) => x.ts > 0);
   if (withTs.length === 0) return null;
-  const mostRecent = withTs.reduce((a, b) => (a.ts >= b.ts ? a : b));
-  const ask = typeof mostRecent.p.openPrice?.ask === 'number' ? mostRecent.p.openPrice.ask : parseFloat(String(mostRecent.p.openPrice?.ask ?? ''));
-  return !isNaN(ask) ? ask : null;
+  const todayLondon = londonCalendarDateKey(Date.now());
+  const todayCandles = withTs.filter((x) => londonCalendarDateKey(x.ts) === todayLondon);
+  const chosen = (
+    todayCandles.length > 0
+      ? todayCandles.reduce((a, b) => (a.ts >= b.ts ? a : b))
+      : withTs.reduce((a, b) => (a.ts >= b.ts ? a : b))
+  ).p;
+  const mid = openPriceMid(chosen.openPrice);
+  return mid;
 }

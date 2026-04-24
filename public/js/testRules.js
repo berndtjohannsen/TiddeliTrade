@@ -112,6 +112,291 @@ export function initTestRules(socket, state, log) {
   var analyseProgressModal = document.getElementById('analyseProgressModal');
   var analyseProgressText = document.getElementById('analyseProgressText');
   var analyseProgressStop = document.getElementById('analyseProgressStop');
+  var tradeChartModal = document.getElementById('tradeChartModal');
+  var tradeChartModalClose = document.getElementById('tradeChartModalClose');
+  var tradeChartModalTitle = document.getElementById('tradeChartModalTitle');
+  var tradeChartModalMeta = document.getElementById('tradeChartModalMeta');
+  var tradeChartCanvas = document.getElementById('tradeChartCanvas');
+  var tradeChartCanvasWrap = document.getElementById('tradeChartCanvasWrap');
+  var tradeChartModalHint = document.getElementById('tradeChartModalHint');
+  var tradeChartModalPanel = document.getElementById('tradeChartModalPanel');
+  var tradeChartModalRules = document.getElementById('tradeChartModalRules');
+  var testRulesTradeList = document.getElementById('testRulesTradeList');
+  var lastTrades = [];
+  var lastTradePlMult = 1;
+  var lastTradeUsePounds = false;
+  var lastAnalyseEpic = '';
+  var lastChartReqSeq = 0;
+  var chartResizeObserver = null;
+
+  function tradeBoundsLocalDays(entryTs, exitTs) {
+    var t0 = Math.min(entryTs, exitTs);
+    var t1 = Math.max(entryTs, exitTs);
+    var d0 = new Date(t0);
+    var start = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate(), 0, 0, 0, 0).getTime();
+    var d1 = new Date(t1);
+    var end = new Date(d1.getFullYear(), d1.getMonth(), d1.getDate(), 23, 59, 59, 999).getTime();
+    var PAD_MS = 3 * 60 * 60 * 1000;
+    return { start: start - PAD_MS, end: end + PAD_MS };
+  }
+
+  function escapeHtml(s) {
+    if (s == null) return '';
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function formatDurationMs(ms) {
+    if (ms < 1000) return ms + ' ms';
+    var s = Math.floor(ms / 1000);
+    if (s < 60) return s + 's';
+    var m = Math.floor(s / 60);
+    var rs = s % 60;
+    if (m < 60) return m + 'm ' + rs + 's';
+    var h = Math.floor(m / 60);
+    var rm = m % 60;
+    return h + 'h ' + rm + 'm';
+  }
+
+  function exitReasonLabel(er) {
+    if (er === 'tp') return 'TP';
+    if (er === 'sl') return 'SL';
+    if (er === 'rules') return 'Rules';
+    if (er === 'endOfPeriod') return 'EOD';
+    return er || '—';
+  }
+
+  function drawTradeChartCanvas(samples, trade) {
+    var canvas = tradeChartCanvas;
+    var wrapEl = tradeChartCanvasWrap;
+    if (!canvas || !wrapEl || !trade) return;
+    var ctx = canvas.getContext('2d');
+    var w = wrapEl.clientWidth;
+    var h = wrapEl.clientHeight;
+    if (w < 10 || h < 10) return;
+    var dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.floor(w * dpr);
+    canvas.height = Math.floor(h * dpr);
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#020617';
+    ctx.fillRect(0, 0, w, h);
+    if (!samples || samples.length < 2) {
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '13px system-ui,sans-serif';
+      ctx.fillText('No recorded samples in this time range.', 16, 36);
+      return;
+    }
+    var padL = 54;
+    var padR = 14;
+    var padT = 22;
+    var padB = 36;
+    var plotW = w - padL - padR;
+    var plotH = h - padT - padB;
+    var t0 = samples[0].ts;
+    var t1 = samples[samples.length - 1].ts;
+    var tSpan = t1 - t0 || 1;
+    var mids = [];
+    for (var si = 0; si < samples.length; si++) mids.push(samples[si].mid);
+    var yMin = Math.min.apply(null, mids);
+    var yMax = Math.max.apply(null, mids);
+    var yPad = (yMax - yMin) * 0.08 || 0.01;
+    yMin -= yPad;
+    yMax += yPad;
+    var ySpan = yMax - yMin || 1;
+    function xAt(ts) {
+      return padL + ((ts - t0) / tSpan) * plotW;
+    }
+    function yAt(price) {
+      return padT + ((yMax - price) / ySpan) * plotH;
+    }
+    ctx.strokeStyle = '#1e293b';
+    ctx.lineWidth = 1;
+    for (var gi = 0; gi <= 4; gi++) {
+      var yy = padT + (gi / 4) * plotH;
+      ctx.beginPath();
+      ctx.moveTo(padL, yy);
+      ctx.lineTo(padL + plotW, yy);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = '#0ea5e9';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (var j = 0; j < samples.length; j++) {
+      var sx = xAt(samples[j].ts);
+      var sy = yAt(samples[j].mid);
+      if (j === 0) ctx.moveTo(sx, sy);
+      else ctx.lineTo(sx, sy);
+    }
+    ctx.stroke();
+    function drawMarker(ts, color, label) {
+      if (ts < t0 || ts > t1) return;
+      var x = xAt(ts);
+      ctx.strokeStyle = color;
+      ctx.setLineDash([5, 5]);
+      ctx.beginPath();
+      ctx.moveTo(x, padT);
+      ctx.lineTo(x, padT + plotH);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = color;
+      ctx.font = '11px system-ui,sans-serif';
+      ctx.fillText(label, Math.min(x + 3, w - padR - 48), padT + 14);
+    }
+    drawMarker(trade.entryTs, '#34d399', 'Open');
+    drawMarker(trade.exitTs, '#fbbf24', 'Close');
+    ctx.fillStyle = '#64748b';
+    ctx.font = '10px ui-monospace,monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(yMax.toFixed(2), 4, padT + 10);
+    ctx.fillText(yMin.toFixed(2), 4, padT + plotH);
+    ctx.textAlign = 'center';
+    ctx.fillText(new Date(t0).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }), padL + plotW * 0.25, h - 10);
+    ctx.fillText(new Date(t1).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }), padL + plotW * 0.75, h - 10);
+  }
+
+  function closeTradeChartModal() {
+    if (tradeChartModalRules) {
+      tradeChartModalRules.innerHTML = '';
+      tradeChartModalRules.classList.add('hidden');
+    }
+    if (tradeChartModal) {
+      tradeChartModal.classList.add('hidden');
+      tradeChartModal.setAttribute('aria-hidden', 'true');
+    }
+    if (chartResizeObserver && tradeChartCanvasWrap) {
+      chartResizeObserver.disconnect();
+      chartResizeObserver = null;
+    }
+    document.removeEventListener('keydown', tradeChartEscapeHandler);
+  }
+  function tradeChartEscapeHandler(e) {
+    if (e.key === 'Escape') closeTradeChartModal();
+  }
+
+  function openTradeChartModal(trade, index) {
+    if (!tradeChartModal || !tradeChartModalMeta) return;
+    var epic = lastAnalyseEpic || (epicSelect && epicSelect.value) || state.savedEpic || '';
+    if (!epic) {
+      appendLog('Select an instrument (epic) before opening trade chart');
+      return;
+    }
+    lastChartReqSeq += 1;
+    var reqSeq = lastChartReqSeq;
+    tradeChartModal.classList.remove('hidden');
+    tradeChartModal.setAttribute('aria-hidden', 'false');
+    document.addEventListener('keydown', tradeChartEscapeHandler);
+    if (tradeChartModalTitle) tradeChartModalTitle.textContent = 'Trade #' + (index + 1) + ' — ' + trade.direction;
+    var dur = formatDurationMs(trade.exitTs - trade.entryTs);
+    var pnl = (trade.profitLoss || 0) * lastTradePlMult;
+    var pnlStr = lastTradeUsePounds ? (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + ' $' : (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + ' pts';
+    var pnlClass = pnl >= 0 ? 'text-emerald-400' : 'text-red-400';
+    tradeChartModalMeta.innerHTML =
+      '<div><span class="text-slate-500">Epic</span> ' + epic + '</div>' +
+      '<div><span class="text-slate-500">Entry</span> ' + formatTimeWithTz(new Date(trade.entryTs).toISOString()) + ' @ ' + (trade.entryPrice != null ? Number(trade.entryPrice).toFixed(2) : '—') +
+      ' &nbsp;|&nbsp; <span class="text-slate-500">Exit</span> ' + formatTimeWithTz(new Date(trade.exitTs).toISOString()) + ' @ ' + (trade.exitPrice != null ? Number(trade.exitPrice).toFixed(2) : '—') + '</div>' +
+      '<div><span class="text-slate-500">P/L</span> <span class="' + pnlClass + '">' + pnlStr + '</span>' +
+      ' &nbsp;|&nbsp; <span class="text-slate-500">Duration</span> ' + dur +
+      ' &nbsp;|&nbsp; <span class="text-slate-500">Close</span> ' + exitReasonLabel(trade.exitReason) + '</div>';
+    if (tradeChartModalRules) {
+      tradeChartModalRules.classList.remove('hidden');
+      if (trade.entryRules && trade.entryRules.length > 0) {
+        tradeChartModalRules.innerHTML =
+          '<div class="text-slate-500 mb-1">Entry rules (all must have passed)</div>' +
+          '<ul class="list-disc pl-4 space-y-0.5 text-slate-300">' +
+          trade.entryRules
+            .map(function (r) {
+              return (
+                '<li><span class="font-mono text-[11px]">' +
+                escapeHtml(r.left) +
+                ' <span class="text-slate-500">' +
+                escapeHtml(r.op) +
+                '</span> ' +
+                escapeHtml(r.right) +
+                '</span></li>'
+              );
+            })
+            .join('') +
+          '</ul>';
+      } else {
+        tradeChartModalRules.innerHTML =
+          '<div class="text-slate-500">Entry rules are not available for this result. Run analysis again to store rule lines on each trade.</div>';
+      }
+    }
+    if (tradeChartModalHint) {
+      tradeChartModalHint.textContent =
+        'Recorded mid price. Range = local calendar day(s) covering the trade, plus 3 h before and after that window (where samples exist).';
+    }
+    drawTradeChartCanvas([], trade);
+    if (chartResizeObserver) chartResizeObserver.disconnect();
+    if (tradeChartCanvasWrap && typeof ResizeObserver !== 'undefined') {
+      chartResizeObserver = new ResizeObserver(function () {
+        var s = tradeChartCanvasWrap._chartSamples;
+        var tr = tradeChartCanvasWrap._chartTrade;
+        if (tr) drawTradeChartCanvas(Array.isArray(s) ? s : [], tr);
+      });
+      chartResizeObserver.observe(tradeChartCanvasWrap);
+    }
+    tradeChartCanvasWrap._chartTrade = trade;
+    tradeChartCanvasWrap._chartSamples = null;
+    var b = tradeBoundsLocalDays(trade.entryTs, trade.exitTs);
+    socket.emit('trade_chart_samples', { epic: epic, fromTs: b.start, toTs: b.end, reqId: reqSeq });
+  }
+
+  socket.on('trade_chart_samples_result', function (data) {
+    if (!data || data.reqId !== lastChartReqSeq) return;
+    if (data.error) {
+      if (tradeChartModalMeta) {
+        tradeChartModalMeta.innerHTML = '<div class="text-amber-400">' + data.error + '</div>';
+      }
+      drawTradeChartCanvas([], { entryTs: 0, exitTs: 0 });
+      return;
+    }
+    var samples = data.samples || [];
+    var trade = tradeChartCanvasWrap && tradeChartCanvasWrap._chartTrade;
+    if (tradeChartModalHint && data.thinned) {
+      tradeChartModalHint.textContent =
+        'Recorded mid (downsampled for display). Same time range as above. Drag corner to resize.';
+    }
+    if (tradeChartCanvasWrap) tradeChartCanvasWrap._chartSamples = samples;
+    if (trade) drawTradeChartCanvas(samples, trade);
+  });
+
+  if (tradeChartModalClose) tradeChartModalClose.addEventListener('click', closeTradeChartModal);
+  if (tradeChartModal) {
+    tradeChartModal.addEventListener('click', function (e) {
+      if (e.target === tradeChartModal) closeTradeChartModal();
+    });
+  }
+  if (tradeChartModalPanel) {
+    tradeChartModalPanel.addEventListener('click', function (e) {
+      e.stopPropagation();
+    });
+  }
+  if (testRulesTradeList) {
+    testRulesTradeList.addEventListener('click', function (e) {
+      var li = e.target && e.target.closest ? e.target.closest('li[data-trade-index]') : null;
+      if (!li) return;
+      var ix = parseInt(li.getAttribute('data-trade-index'), 10);
+      if (isNaN(ix) || !lastTrades[ix]) return;
+      openTradeChartModal(lastTrades[ix], ix);
+    });
+    testRulesTradeList.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      var li = e.target && e.target.closest ? e.target.closest('li[data-trade-index]') : null;
+      if (!li) return;
+      e.preventDefault();
+      var ix = parseInt(li.getAttribute('data-trade-index'), 10);
+      if (isNaN(ix) || !lastTrades[ix]) return;
+      openTradeChartModal(lastTrades[ix], ix);
+    });
+  }
 
   function showReport(report, usedTpSl) {
     if (!reportBody || !reportEl) return;
@@ -160,7 +445,8 @@ export function initTestRules(socket, state, log) {
         var opSymbols = { lte: '\u2264', gte: '\u2265', lt: '<', gt: '>', eq: '=' };
         blockerList.innerHTML = r.ruleBlockerCounts.map(function (b) {
           var op = opSymbols[b.op] || b.op;
-          return '<li class="font-mono text-[11px]">' + b.left + ' ' + op + ' ' + b.right + ': <span class="text-amber-400">' + b.soleBlockerCount + '</span></li>';
+          var dir = b.direction ? '<span class="text-slate-500">' + b.direction + '</span> ' : '';
+          return '<li class="font-mono text-[11px]">' + dir + b.left + ' ' + op + ' ' + b.right + ': <span class="text-amber-400">' + b.soleBlockerCount + '</span></li>';
         }).join('');
         blockerSection.classList.remove('hidden');
       } else {
@@ -173,16 +459,41 @@ export function initTestRules(socket, state, log) {
       if (r.trades && r.trades.length > 0) {
         var usePounds = r.totalGainLossPounds != null && r.totalGainLoss != null && r.totalGainLoss !== 0;
         var mult = usePounds ? r.totalGainLossPounds / r.totalGainLoss : 1;
-        tradeList.innerHTML = r.trades.map(function (t) {
+        lastTrades = r.trades.slice();
+        lastTradePlMult = mult;
+        lastTradeUsePounds = usePounds;
+        tradeList.innerHTML = r.trades.map(function (t, idx) {
+          var entryTime = formatTimeWithTz(new Date(t.entryTs).toISOString());
           var closeTime = formatTimeWithTz(new Date(t.exitTs).toISOString());
           var plClass = (t.profitLoss || 0) >= 0 ? 'text-emerald-400' : 'text-red-400';
           var val = usePounds ? (t.profitLoss || 0) * mult : (t.profitLoss || 0);
           var plStr = val >= 0 ? '+' + val.toFixed(2) : val.toFixed(2);
           var unit = usePounds ? ' $' : ' pts';
-          return '<li>' + closeTime + ' — ' + t.direction + ' <span class="' + plClass + '">' + plStr + unit + '</span></li>';
+          var er = t.exitReason || '';
+          var tag = er === 'tp' ? 'TP' : er === 'sl' ? 'SL' : er === 'rules' ? 'Rules' : er === 'endOfPeriod' ? 'EOD' : '';
+          var tagHtml = tag ? ' <span class="text-slate-500" title="Close reason">' + tag + '</span>' : '';
+          return (
+            '<li class="cursor-pointer rounded px-1 -mx-1 py-0.5 hover:bg-slate-800/60 focus:outline-none focus:ring-1 focus:ring-sky-500/50" data-trade-index="' +
+            idx +
+            '" role="button" tabindex="0" title="Click for price chart">' +
+            entryTime +
+            ' \u2192 ' +
+            closeTime +
+            ' — ' +
+            t.direction +
+            ' <span class="' +
+            plClass +
+            '">' +
+            plStr +
+            unit +
+            '</span>' +
+            tagHtml +
+            '</li>'
+          );
         }).join('');
         tradeListSection.classList.remove('hidden');
       } else {
+        lastTrades = [];
         tradeListSection.classList.add('hidden');
       }
     }
@@ -220,6 +531,12 @@ export function initTestRules(socket, state, log) {
     } else if (data && data.report) {
       showReport(data.report, !!data.usedTpSl);
       appendLog('Analysis complete: ' + data.report.tradeCount + ' trades, P/L ' + data.report.totalGainLoss.toFixed(2));
+      var simNote = 'Test rules: those trades are simulated from recorded prices — no orders sent to IG.';
+      appendLog(simNote);
+      if (typeof log === 'function') log(simNote);
+      if (data.dealingScheduleSource === 'default' && !state.is24_7Market) {
+        appendLog('Note: IG did not return usable marketTimes — using default UK Mon–Fri 08:00–21:59 (Europe/London). Log in for exact IG hours per epic.');
+      }
     }
   });
 
@@ -390,19 +707,22 @@ export function initTestRules(socket, state, log) {
         return;
       }
       var cfg = getRulesForBacktest();
-      if (!cfg.rules || cfg.rules.length === 0) {
-        appendLog('Add at least one trading rule');
-        showError('Add at least one trading rule');
+      var hasRules = cfg.ruleSets && cfg.ruleSets.some(function (rs) { return rs.rules && rs.rules.length > 0; });
+      if (!hasRules) {
+        appendLog('Add at least one rule (BUY or SELL)');
+        showError('Add at least one rule (BUY or SELL)');
         return;
       }
-      var tpEl = document.getElementById('dealTakeProfit');
-      var slEl = document.getElementById('dealStopLoss');
-      var modeEl = document.getElementById('dealTpSlMode');
-      var sizeEl = document.getElementById('dealSize');
-      var takeProfit = tpEl && tpEl.value.trim() ? tpEl.value.trim() : null;
-      var stopLoss = slEl && slEl.value.trim() ? slEl.value.trim() : null;
-      var tpSlMode = (modeEl && modeEl.value) || 'rate';
-      var dealSize = (sizeEl && sizeEl.value.trim()) || '1';
+      if (!cfg.backtestRuleSets || cfg.backtestRuleSets.length === 0) {
+        appendLog('Select at least one rule set (BUY or SELL) to analyse');
+        showError('Select at least one rule set');
+        return;
+      }
+      var firstSet = cfg.ruleSets && cfg.ruleSets[0];
+      var takeProfit = firstSet && firstSet.takeProfit ? firstSet.takeProfit : null;
+      var stopLoss = firstSet && firstSet.stopLoss ? firstSet.stopLoss : null;
+      var tpSlMode = firstSet && firstSet.tpSlMode ? firstSet.tpSlMode : 'rate';
+      var dealSize = firstSet && firstSet.dealSize ? firstSet.dealSize : '1';
       var contractSize = (state.currentContractSize != null && state.currentContractSize > 0) ? state.currentContractSize : 1;
 
       var modeRadio = document.querySelector('input[name="testRulesAnalysisMode"]:checked');
@@ -434,13 +754,15 @@ export function initTestRules(socket, state, log) {
       appendLog('Analysing recording' + rangeMsg + ' (' + (intradayOnly ? 'intraday' : 'carry over') + ')…');
       var daysCount = selectedDays.length > 0 ? selectedDays.length : null;
       showAnalyseProgress(daysCount);
+      lastAnalyseEpic = epic;
       socket.emit('analyse_recording', {
         epic: epic,
         intradayOnly: intradayOnly,
         fromDate: selectedDays.length === 0 ? fromDate : null,
         toDate: selectedDays.length === 0 ? toDate : null,
         selectedDays: selectedDays.length > 0 ? selectedDays : null,
-        rules: cfg.rules,
+        ruleSets: cfg.ruleSets,
+        backtestRuleSets: cfg.backtestRuleSets,
         probeShortMinutes: cfg.probeShortMinutes,
         probeMediumMinutes: cfg.probeMediumMinutes,
         probeLongMinutes: cfg.probeLongMinutes,

@@ -8,7 +8,12 @@ import { registerSocketHandlers } from './socket/handlers';
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, {
+  /** Default 20s is tight when the browser is busy handling many price ticks + rules UI. */
+  pingTimeout: 120000,
+  pingInterval: 25000,
+  maxHttpBufferSize: 1e7,
+});
 
 app.use(express.json());
 app.use(express.static(path.join(process.cwd(), 'public')));
