@@ -49,8 +49,27 @@ import {
   dealingWeekFromMarketTimes,
   defaultDealingWeekLondonMonFri,
   type BacktestConfig,
+  type BacktestReport,
+  type BacktestDaySummary,
+  type RuleBlockerCountRow,
   type RuleSetConfig,
+  buildDynamicSlReportMeta,
+  dayKeyFromTimestamp,
 } from '../services/rulesBacktest';
+import {
+  clearDynamicStopLossTracking,
+  getDynamicStopLossStatuses,
+  onDynamicStopLossPriceTick,
+  onDynamicStopLossPositionPoll,
+  registerDynamicStopLoss,
+  resolveDynamicStopLossSettings,
+  resolveDynamicStopLossForBacktest,
+  type DynamicStopLossOverride,
+  shouldOmitTakeProfitForDeal,
+  syncDynamicStopLossWithPositions,
+  unregisterDynamicStopLoss,
+} from '../services/dynamicStopLoss';
+import { analyzeSampleQuality, type SampleQualityReport } from '../services/sampleQuality';
 
 let scheduledCloses: ScheduledCloseEntry[] = [];
 let recordingStatusTimer: ReturnType<typeof setInterval> | null = null;
@@ -184,6 +203,7 @@ async function pollAndEmitPositionsImpl(
     for (const prev of previousPositions) {
       const id = prev.dealId;
       if (currentDealIds.has(id)) continue;
+      unregisterDynamicStopLoss(id);
       if (recentlyClosedByUs[id] && now - recentlyClosedByUs[id] < RECENTLY_CLOSED_TTL_MS) continue;
       const size = prev.size ?? 0;
       if (size > 0) {
@@ -201,9 +221,28 @@ async function pollAndEmitPositionsImpl(
       return { ...p, closeAt: sched ? new Date(sched.closeAt).toISOString() : undefined };
     });
     io.emit('positions', enriched);
+    const cfg = loadConfig();
+    const streamEpic = cfg.epic || '';
+    if (streamEpic) syncDynamicStopLossWithPositions(positions, streamEpic, cfg);
+    onDynamicStopLossPositionPoll(
+      session,
+      enriched.map((p) => ({
+        dealId: p.dealId,
+        epic: p.epic,
+        bid: p.bid,
+        offer: p.offer,
+        level: p.level,
+        size: p.size,
+        contractSize: p.contractSize,
+        stopLevel: p.stopLevel,
+      })),
+      (msg) => io.emit('log', msg)
+    );
+    io.emit('dynamic_stop_loss_status', getDynamicStopLossStatuses());
     return positions;
   } catch {
     io.emit('positions', []);
+    io.emit('dynamic_stop_loss_status', []);
     return [];
   }
 }
@@ -382,15 +421,21 @@ async function recordTransactionFromPosition(
       ? normalizeCurrency(closeConfirmation.profitCurrency, accountCurrency)
       : undefined;
 
+    /** Quote CCY for P&L when raw move matches IG profit (price diff is in quote units, not account). */
+    const quoteCurrencyForFx =
+      (market?.currencyCode?.trim() && normalizeCurrency(market.currencyCode.trim(), accountCurrency)) ||
+      (igProfitCurrency && igProfitCurrency !== accCur ? igProfitCurrency : '') ||
+      instrumentCurrency;
+
     if (igProfit != null) {
       const profitMatchesRaw = Math.abs(igProfit - rawProfitInDealCurrency) < 0.01;
-      if (profitMatchesRaw && accCur && instrumentCurrency !== accCur && rate != null && !isNaN(rate) && rate > 0) {
+      if (profitMatchesRaw && accCur && quoteCurrencyForFx !== accCur && rate != null && !isNaN(rate) && rate > 0) {
         profitLoss = igProfit * rate;
         currency = accCur;
       } else if (igProfitCurrency === accCur) {
         profitLoss = igProfit;
         currency = accCur;
-      } else if (instrumentCurrency !== accCur && rate != null && !isNaN(rate) && rate > 0) {
+      } else if (quoteCurrencyForFx !== accCur && rate != null && !isNaN(rate) && rate > 0) {
         profitLoss = igProfit * rate;
         currency = accCur;
       } else {
@@ -590,6 +635,7 @@ export function registerSocketHandlers(io: Server): void {
       clearInterval(ordersPollTimer);
       ordersPollTimer = null;
     }
+    clearDynamicStopLossTracking();
     engineStatus = 'stopped';
     io.emit('status', engineStatus);
     io.emit('account', null);
@@ -597,6 +643,7 @@ export function registerSocketHandlers(io: Server): void {
     io.emit('positions', []);
     io.emit('working_orders', []);
     io.emit('scheduled_closes', []);
+    io.emit('dynamic_stop_loss_status', []);
     if (recordingStatusTimer) {
       clearInterval(recordingStatusTimer);
       recordingStatusTimer = null;
@@ -739,6 +786,17 @@ export function registerSocketHandlers(io: Server): void {
             if (now - lastPriceSocketEmitTs < PRICE_SOCKET_EMIT_MIN_MS) return;
             lastPriceSocketEmitTs = now;
             io.emit('price_update', data);
+            if (currentSession && data && typeof data.bid === 'number' && typeof data.offer === 'number') {
+              const epicNow = loadConfig().epic || epic;
+              onDynamicStopLossPriceTick(
+                currentSession,
+                epicNow,
+                data.bid,
+                data.offer,
+                (msg) => io.emit('log', msg)
+              );
+              io.emit('dynamic_stop_loss_status', getDynamicStopLossStatuses());
+            }
           },
           (msg) => io.emit('log', msg)
         );
@@ -904,17 +962,32 @@ export function registerSocketHandlers(io: Server): void {
     });
 
     /** Mid/bid/offer series for trade chart (Test rules modal). Downsampled if huge. */
-    socket.on('trade_chart_samples', (params: { epic?: string; fromTs?: number; toTs?: number; reqId?: number }) => {
+    socket.on('trade_chart_samples', (params: { epic?: string; fromTs?: number; toTs?: number; days?: string[]; reqId?: number }) => {
       const reqId = typeof params?.reqId === 'number' ? params.reqId : 0;
       const epic = (params?.epic || '').trim();
+      const days = Array.isArray(params?.days) ? params.days.filter((d) => typeof d === 'string' && d.length > 0) : [];
       const fromTs = params?.fromTs;
       const toTs = params?.toTs;
-      if (!epic || typeof fromTs !== 'number' || typeof toTs !== 'number' || !Number.isFinite(fromTs) || !Number.isFinite(toTs) || toTs < fromTs) {
-        socket.emit('trade_chart_samples_result', { reqId, error: 'Invalid epic or time range' });
+      if (!epic) {
+        socket.emit('trade_chart_samples_result', { reqId, error: 'Invalid epic' });
         return;
       }
       const MAX_POINTS = 8000;
-      const raw = getRecordedSamplesFiltered(epic, { fromTs, toTs });
+      let raw: ReturnType<typeof getRecordedSamplesFiltered>;
+      if (days.length > 0) {
+        raw = getRecordedSamplesFiltered(epic, { days });
+      } else if (
+        typeof fromTs === 'number' &&
+        typeof toTs === 'number' &&
+        Number.isFinite(fromTs) &&
+        Number.isFinite(toTs) &&
+        toTs >= fromTs
+      ) {
+        raw = getRecordedSamplesFiltered(epic, { fromTs, toTs });
+      } else {
+        socket.emit('trade_chart_samples_result', { reqId, error: 'Invalid epic or time range' });
+        return;
+      }
       if (raw.length === 0) {
         socket.emit('trade_chart_samples_result', { reqId, samples: [], count: 0, thinned: false });
         return;
@@ -1001,6 +1074,16 @@ export function registerSocketHandlers(io: Server): void {
       tpSlMode?: 'value' | 'rate' | 'pct';
       dealSize?: string;
       contractSize?: number;
+      dynamicSlBuy?: DynamicStopLossOverride;
+      dynamicSlSell?: DynamicStopLossOverride;
+      stopAfterLossBuy?: boolean;
+      stopAfterLossSell?: boolean;
+      autoStopEnabledBuy?: boolean;
+      autoStopEnabledSell?: boolean;
+      autoStopBeforeMinutesBuy?: number;
+      autoStopBeforeMinutesSell?: number;
+      pauseOnLossSecondsBuy?: number;
+      pauseOnLossSecondsSell?: number;
     }) => {
       const epic = (params?.epic || '').trim();
       if (!epic) {
@@ -1009,33 +1092,14 @@ export function registerSocketHandlers(io: Server): void {
       }
       const fromDate = params?.fromDate?.trim();
       const toDate = params?.toDate?.trim();
-      const selectedDays = Array.isArray(params?.selectedDays) ? params.selectedDays : null;
-      let samples: Array<{ epic: string; ts: number; bid: number; offer: number; spread: number; longPct: number | null; shortPct: number | null }>;
-      if (selectedDays && selectedDays.length > 0) {
-        samples = getRecordedSamplesFiltered(epic, { days: selectedDays });
-      } else if (fromDate || toDate) {
-        const fromTs = fromDate ? new Date(fromDate + 'T00:00:00').getTime() : undefined;
-        const toTs = toDate ? new Date(toDate + 'T23:59:59.999').getTime() : undefined;
-        samples = getRecordedSamplesFiltered(epic, { fromTs, toTs });
-      } else {
-        samples = getRecordedSamples(epic);
-      }
-      if (samples.length === 0) {
-        socket.emit('analyse_recording_report', { error: 'No recorded samples for ' + epic + (fromDate || toDate || selectedDays?.length ? ' in date range' : '') });
-        return;
-      }
+      const selectedDaysRaw = Array.isArray(params?.selectedDays) ? params.selectedDays : null;
+      const selectedDays = selectedDaysRaw
+        ? Array.from(new Set(selectedDaysRaw.map((d) => (d || '').trim()).filter(Boolean))).sort()
+        : null;
       const intradayOnly = params.intradayOnly !== false;
-      const MAX_INTRADAY_SAMPLES = 700000;
+      const dateFilterUsed = !!(fromDate || toDate || (selectedDays && selectedDays.length > 0));
+      const noDataMsgSuffix = dateFilterUsed ? ' in date range' : '';
       const MAX_CARRYOVER_SAMPLES = 150000;
-      const maxSamples = intradayOnly ? MAX_INTRADAY_SAMPLES : MAX_CARRYOVER_SAMPLES;
-      if (samples.length > maxSamples) {
-        socket.emit('analyse_recording_report', {
-          error: intradayOnly
-            ? `Too many samples (${samples.length.toLocaleString()}). Select fewer days (max ~${(maxSamples / 86400).toFixed(0)} days).`
-            : `Too many samples for carry-over mode (${samples.length.toLocaleString()}). Max ~${(maxSamples / 86400).toFixed(0)} days – select fewer days.`,
-        });
-        return;
-      }
       const usePerDay = intradayOnly;
       const cfg = loadConfig();
       const inst = epic && cfg.ui?.instruments?.[epic] ? cfg.ui.instruments[epic] : null;
@@ -1067,6 +1131,39 @@ export function registerSocketHandlers(io: Server): void {
         dealingScheduleSource = 'default';
       }
 
+      const ui = cfg.ui;
+      const resolveAutoStopEnabled = (
+        instVal: boolean | undefined,
+        legacyInst: boolean | undefined,
+        uiSide: boolean | undefined,
+        uiLegacy: boolean | undefined
+      ): boolean => {
+        if (instVal != null) return instVal !== false;
+        if (legacyInst != null) return legacyInst !== false;
+        if (uiSide != null) return uiSide !== false;
+        if (uiLegacy != null) return uiLegacy !== false;
+        return true;
+      };
+      const resolveAutoStopMinutes = (
+        instVal: number | undefined,
+        legacyInst: number | undefined,
+        uiSide: number | undefined,
+        uiLegacy: number | undefined
+      ): number => {
+        const pick = instVal ?? legacyInst ?? uiSide ?? uiLegacy;
+        return typeof pick === 'number' && !isNaN(pick) && pick >= 0 ? Math.min(pick, 1440) : 60;
+      };
+
+      const resolvePauseOnLossSeconds = (
+        instVal: number | undefined,
+        legacyInst: number | undefined,
+        uiLegacy: number | undefined
+      ): number => {
+        const pick = instVal ?? legacyInst ?? uiLegacy;
+        if (typeof pick !== 'number' || isNaN(pick) || pick < 0) return 0;
+        return Math.min(pick, 86400);
+      };
+
       const config: BacktestConfig = {
         rules: useRuleSets ? undefined : (Array.isArray(params.rules) ? params.rules : []),
         ruleSets: useRuleSets ? (ruleSets as RuleSetConfig[]) : undefined,
@@ -1081,43 +1178,454 @@ export function registerSocketHandlers(io: Server): void {
         dealSize: defaultDealSize,
         contractSize: typeof params.contractSize === 'number' ? params.contractSize : 1,
         dealingWeekLondon,
+        dynamicStopLossBuy: resolveDynamicStopLossForBacktest(epic, cfg, 'rules-buy', params.dynamicSlBuy),
+        dynamicStopLossSell: resolveDynamicStopLossForBacktest(epic, cfg, 'rules-sell', params.dynamicSlSell),
+        stopAfterLossBuy: typeof params.stopAfterLossBuy === 'boolean'
+          ? params.stopAfterLossBuy
+          : (inst?.tradingRulesStopAfterLossBuy ?? ui?.tradingRulesStopAfterLossBuy) === true,
+        stopAfterLossSell: typeof params.stopAfterLossSell === 'boolean'
+          ? params.stopAfterLossSell
+          : (inst?.tradingRulesStopAfterLossSell ?? ui?.tradingRulesStopAfterLossSell) === true,
+        autoStopEnabledBuy: typeof params.autoStopEnabledBuy === 'boolean'
+          ? params.autoStopEnabledBuy
+          : resolveAutoStopEnabled(
+              inst?.tradingRulesAutoStopEnabledBuy,
+              inst?.tradingRulesAutoStopEnabled,
+              ui?.tradingRulesAutoStopEnabledBuy,
+              ui?.tradingRulesAutoStopEnabled
+            ),
+        autoStopEnabledSell: typeof params.autoStopEnabledSell === 'boolean'
+          ? params.autoStopEnabledSell
+          : resolveAutoStopEnabled(
+              inst?.tradingRulesAutoStopEnabledSell,
+              inst?.tradingRulesAutoStopEnabled,
+              ui?.tradingRulesAutoStopEnabledSell,
+              ui?.tradingRulesAutoStopEnabled
+            ),
+        autoStopBeforeMinutesBuy: typeof params.autoStopBeforeMinutesBuy === 'number'
+          ? Math.min(Math.max(params.autoStopBeforeMinutesBuy, 0), 1440)
+          : resolveAutoStopMinutes(
+              inst?.tradingRulesAutoStopBeforeMinutesBuy,
+              inst?.tradingRulesAutoStopBeforeMinutes,
+              ui?.tradingRulesAutoStopBeforeMinutesBuy,
+              ui?.tradingRulesAutoStopBeforeMinutes
+            ),
+        autoStopBeforeMinutesSell: typeof params.autoStopBeforeMinutesSell === 'number'
+          ? Math.min(Math.max(params.autoStopBeforeMinutesSell, 0), 1440)
+          : resolveAutoStopMinutes(
+              inst?.tradingRulesAutoStopBeforeMinutesSell,
+              inst?.tradingRulesAutoStopBeforeMinutes,
+              ui?.tradingRulesAutoStopBeforeMinutesSell,
+              ui?.tradingRulesAutoStopBeforeMinutes
+            ),
+        pauseOnLossSecondsBuy: typeof params.pauseOnLossSecondsBuy === 'number'
+          ? Math.min(Math.max(params.pauseOnLossSecondsBuy, 0), 86400)
+          : resolvePauseOnLossSeconds(
+              inst?.tradingRulesPauseOnLossSecondsBuy,
+              inst?.tradingRulesPauseOnLossSeconds,
+              ui?.tradingRulesPauseOnLossSeconds
+            ),
+        pauseOnLossSecondsSell: typeof params.pauseOnLossSecondsSell === 'number'
+          ? Math.min(Math.max(params.pauseOnLossSecondsSell, 0), 86400)
+          : resolvePauseOnLossSeconds(
+              inst?.tradingRulesPauseOnLossSecondsSell,
+              inst?.tradingRulesPauseOnLossSeconds,
+              ui?.tradingRulesPauseOnLossSeconds
+            ),
       };
-      const workerPath = path.resolve(process.cwd(), 'dist', 'workers', 'backtestWorker.js');
-      const worker = new Worker(workerPath, {
-        workerData: { samples, config, usePerDay },
-      });
-      let resolved = false;
-      function emitResult(err?: string, report?: unknown) {
-        if (resolved) return;
-        resolved = true;
-        activeAnalyseBySocket.delete(socket.id);
-        worker.terminate().catch(() => {});
-        if (err) {
-          socket.emit('analyse_recording_report', { error: err });
-        } else if (report) {
-          const hasLegacyTpSl = !!(config.takeProfit || config.stopLoss);
-          const hasRuleSetTpSl = config.ruleSets?.some((rs) => rs.takeProfit || rs.stopLoss);
-          const usedTpSl = hasLegacyTpSl || !!hasRuleSetTpSl;
-          socket.emit('analyse_recording_report', {
-            report,
-            usedTpSl,
-            dealingScheduleGated: !effectiveIs24_7,
-            dealingScheduleSource,
-          });
-        }
+
+      function getDaysToAnalyse(): string[] {
+        if (selectedDays && selectedDays.length > 0) return selectedDays;
+        const allDays = getRecordedDays(epic);
+        if (!fromDate && !toDate) return allDays;
+        return allDays.filter((d) => {
+          if (fromDate && d < fromDate) return false;
+          if (toDate && d > toDate) return false;
+          return true;
+        });
       }
-      activeAnalyseBySocket.set(socket.id, (e) => emitResult(e || 'Cancelled'));
-      worker.on('message', (msg: { report?: unknown; error?: string; progress?: { processed: number; total: number } }) => {
-        if (msg.error) emitResult(msg.error);
-        else if (msg.report) emitResult(undefined, msg.report);
-        else if (msg.progress) socket.emit('analyse_recording_progress', msg.progress);
-      });
-      worker.on('error', (err) => emitResult(err.message || 'Backtest worker error'));
-      worker.on('exit', (code) => {
-        if (code !== 0 && !resolved) {
-          emitResult(`Backtest worker exited (code ${code}). Try fewer days or increase Node memory.`);
+
+      function blockerRowKey(row: Pick<RuleBlockerCountRow, 'left' | 'op' | 'right'> & { direction?: 'BUY' | 'SELL' }): string {
+        return row.direction
+          ? `${row.direction}\u0001${row.left}\u0001${row.op}\u0001${row.right}`
+          : `legacy\u0001${row.left}\u0001${row.op}\u0001${row.right}`;
+      }
+
+      function parseBlockerAggregateKey(key: string): Omit<RuleBlockerCountRow, 'soleBlockerCount'> | null {
+        const parts = key.split('\u0001');
+        if (parts.length !== 4) return null;
+        const [tag, left, op, right] = parts;
+        if (tag === 'legacy') return { left, op, right };
+        if (tag === 'BUY' || tag === 'SELL') return { left, op, right, direction: tag };
+        return null;
+      }
+
+      function mergeBlockerAggregateMap(blockerAggregate: Map<string, number>): RuleBlockerCountRow[] {
+        const out: RuleBlockerCountRow[] = [];
+        for (const [key, count] of blockerAggregate.entries()) {
+          if (count <= 0) continue;
+          const parsed = parseBlockerAggregateKey(key);
+          if (!parsed) continue;
+          out.push({ ...parsed, soleBlockerCount: count });
         }
+        out.sort((a, b) => b.soleBlockerCount - a.soleBlockerCount);
+        return out;
+      }
+
+      function buildAnalysedDaySummariesFromTrades(
+        days: string[],
+        trades: BacktestReport['trades'],
+        pnlDenom: number
+      ): BacktestDaySummary[] {
+        const tradesByDay = new Map<string, BacktestReport['trades']>();
+        for (const t of trades) {
+          const day = dayKeyFromTimestamp(t.entryTs);
+          const list = tradesByDay.get(day);
+          if (list) list.push(t);
+          else tradesByDay.set(day, [t]);
+        }
+        return days.map((day) => {
+          const sampleCount = getRecordedSamplesFiltered(epic, { days: [day] }).length;
+          const dayTrades = tradesByDay.get(day) ?? [];
+          const totalGainLoss = dayTrades.reduce((sum, tr) => sum + tr.profitLoss, 0);
+          return {
+            day,
+            sampleCount,
+            tradeCount: dayTrades.length,
+            totalGainLoss,
+            totalGainLossPounds: pnlDenom > 0 ? totalGainLoss * pnlDenom : undefined,
+            ...(sampleCount === 0 ? { status: 'noSamples' as const } : {}),
+          };
+        });
+      }
+
+      function emitFinalReport(report: BacktestReport, sampleQuality?: SampleQualityReport): void {
+        const hasLegacyTpSl = !!(config.takeProfit || config.stopLoss);
+        const hasRuleSetTpSl = config.ruleSets?.some((rs) => rs.takeProfit || rs.stopLoss);
+        const usedTpSl = hasLegacyTpSl || !!hasRuleSetTpSl;
+        const usedDynamicSl = !!(config.dynamicStopLossBuy || config.dynamicStopLossSell);
+        const dslMeta = buildDynamicSlReportMeta(config);
+        const trades = report.trades ?? [];
+        const analysedDays = report.analysedDays;
+        const reportOut: BacktestReport = { ...report, ...dslMeta, trades };
+        socket.emit('analyse_recording_report', {
+          report: reportOut,
+          trades,
+          analysedDays,
+          analysedDayKeys: analysedDays?.map((d) => d.day) ?? [],
+          sampleQuality,
+          usedTpSl,
+          usedDynamicSl,
+          dealingScheduleGated: !effectiveIs24_7,
+          dealingScheduleSource,
+        });
+      }
+
+      if (usePerDay) {
+        const days = getDaysToAnalyse();
+        if (days.length === 0) {
+          socket.emit('analyse_recording_report', { error: 'No recorded samples for ' + epic + noDataMsgSuffix });
+          return;
+        }
+        let cancelled = false;
+        let currentWorker: Worker | null = null;
+        const workerPath = path.resolve(process.cwd(), 'dist', 'workers', 'backtestWorker.js');
+        activeAnalyseBySocket.set(socket.id, () => {
+          cancelled = true;
+          if (currentWorker) currentWorker.terminate().catch(() => {});
+        });
+        const allTrades: BacktestReport['trades'] = [];
+        let totalGainLoss = 0;
+        let totalSamples = 0;
+        let openAtEndTotal = 0;
+        let startTs = 0;
+        let endTs = 0;
+        const blockerAggregate = new Map<string, number>();
+        const analysedDays: BacktestDaySummary[] = [];
+        const size = parseFloat(config.dealSize || '1') || 1;
+        const contractSize = (config.contractSize != null && config.contractSize > 0) ? config.contractSize : 1;
+        const pnlDenom = size * contractSize;
+        socket.emit('analyse_recording_progress', { processed: 0, total: days.length });
+        for (let i = 0; i < days.length; i++) {
+          if (cancelled) {
+            activeAnalyseBySocket.delete(socket.id);
+            socket.emit('analyse_recording_report', { error: 'Cancelled' });
+            return;
+          }
+          const day = days[i];
+          const daySamples = getRecordedSamplesFiltered(epic, { days: [day] });
+          if (daySamples.length > 0) {
+            const dayReport = await new Promise<BacktestReport>((resolve, reject) => {
+              const worker = new Worker(workerPath, { workerData: { samples: daySamples, config, usePerDay: false } });
+              currentWorker = worker;
+              let resolved = false;
+              worker.on('message', (msg: { report?: unknown; error?: string }) => {
+                if (resolved) return;
+                if (msg.error) {
+                  resolved = true;
+                  currentWorker = null;
+                  worker.terminate().catch(() => {});
+                  reject(new Error(msg.error));
+                } else if (msg.report) {
+                  resolved = true;
+                  currentWorker = null;
+                  worker.terminate().catch(() => {});
+                  resolve(msg.report as BacktestReport);
+                }
+              });
+              worker.on('error', (err) => {
+                if (resolved) return;
+                resolved = true;
+                currentWorker = null;
+                worker.terminate().catch(() => {});
+                reject(err);
+              });
+              worker.on('exit', (code) => {
+                if (resolved) return;
+                resolved = true;
+                currentWorker = null;
+                if (cancelled) reject(new Error('Cancelled'));
+                else if (code !== 0) reject(new Error(`Backtest worker exited (code ${code}). Try fewer days or increase Node memory.`));
+                else reject(new Error('Backtest worker exited without report'));
+              });
+            });
+            allTrades.push(...dayReport.trades);
+            totalGainLoss += dayReport.totalGainLoss;
+            totalSamples += dayReport.sampleCount;
+            openAtEndTotal += dayReport.openAtEnd ?? 0;
+            if (dayReport.ruleBlockerCounts) {
+              for (const b of dayReport.ruleBlockerCounts) {
+                const k = blockerRowKey(b);
+                blockerAggregate.set(k, (blockerAggregate.get(k) ?? 0) + b.soleBlockerCount);
+              }
+            }
+            if (dayReport.startTs && (startTs === 0 || dayReport.startTs < startTs)) startTs = dayReport.startTs;
+            if (dayReport.endTs && dayReport.endTs > endTs) endTs = dayReport.endTs;
+            analysedDays.push({
+              day,
+              sampleCount: dayReport.sampleCount,
+              tradeCount: dayReport.tradeCount,
+              totalGainLoss: dayReport.totalGainLoss,
+              totalGainLossPounds: pnlDenom > 0 ? dayReport.totalGainLoss * pnlDenom : undefined,
+            });
+          } else {
+            analysedDays.push({
+              day,
+              sampleCount: 0,
+              tradeCount: 0,
+              totalGainLoss: 0,
+              status: 'noSamples',
+            });
+          }
+          socket.emit('analyse_recording_progress', { processed: i + 1, total: days.length });
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+        activeAnalyseBySocket.delete(socket.id);
+        if (totalSamples === 0) {
+          socket.emit('analyse_recording_report', { error: 'No recorded samples for ' + epic + noDataMsgSuffix });
+          return;
+        }
+        const winningTrades = allTrades.filter((t) => t.profitLoss > 0).length;
+        const losingTrades = allTrades.filter((t) => t.profitLoss < 0).length;
+        const denom = pnlDenom;
+        const totalGainLossPounds = denom > 0 ? totalGainLoss * denom : undefined;
+        const avgTradePnlPounds = (denom > 0 && allTrades.length > 0) ? (totalGainLoss / allTrades.length) * denom : undefined;
+        const closeReasonCounts = {
+          tp: allTrades.filter((t) => t.exitReason === 'tp').length,
+          sl: allTrades.filter((t) => t.exitReason === 'sl').length,
+          dsl: allTrades.filter((t) => t.exitReason === 'dsl').length,
+          rules: allTrades.filter((t) => t.exitReason === 'rules').length,
+          endOfPeriod: allTrades.filter((t) => t.exitReason === 'endOfPeriod').length,
+        };
+        const ruleBlockerCounts = mergeBlockerAggregateMap(blockerAggregate);
+        const qualitySamples = getRecordedSamplesFiltered(epic, { days });
+        const sampleQuality = analyzeSampleQuality(qualitySamples);
+        emitFinalReport({
+          trades: allTrades,
+          totalGainLoss,
+          totalGainLossPounds,
+          tradeCount: allTrades.length,
+          winningTrades,
+          losingTrades,
+          winRate: allTrades.length > 0 ? (winningTrades / allTrades.length) * 100 : 0,
+          avgTradePnl: allTrades.length > 0 ? totalGainLoss / allTrades.length : 0,
+          avgTradePnlPounds,
+          sampleCount: totalSamples,
+          startTs,
+          endTs,
+          openAtEnd: openAtEndTotal,
+          daysAnalysed: days.length,
+          closeReasonCounts,
+          ruleBlockerCounts: ruleBlockerCounts.length > 0 ? ruleBlockerCounts : undefined,
+          dynamicStopLossApplied: !!(config.dynamicStopLossBuy || config.dynamicStopLossSell),
+          analysedDays,
+        }, sampleQuality);
+        return;
+      }
+
+      const days = getDaysToAnalyse();
+      if (days.length === 0) {
+        socket.emit('analyse_recording_report', { error: 'No recorded samples for ' + epic + noDataMsgSuffix });
+        return;
+      }
+      function groupConsecutiveDays(daysSorted: string[]): string[][] {
+        if (daysSorted.length === 0) return [];
+        const blocks: string[][] = [];
+        let current: string[] = [daysSorted[0]];
+        for (let i = 1; i < daysSorted.length; i++) {
+          const prev = new Date(current[current.length - 1]);
+          const next = new Date(daysSorted[i]);
+          const prevNext = new Date(prev);
+          prevNext.setDate(prevNext.getDate() + 1);
+          if (next.getTime() === prevNext.getTime()) current.push(daysSorted[i]);
+          else {
+            blocks.push(current);
+            current = [daysSorted[i]];
+          }
+        }
+        blocks.push(current);
+        return blocks;
+      }
+      const blocks = groupConsecutiveDays(days);
+      const nonConsecutiveWarning =
+        blocks.length > 1
+          ? `Days were not consecutive. Split into ${blocks.length} block(s); positions closed at end of each block.`
+          : undefined;
+      const workerPath = path.resolve(process.cwd(), 'dist', 'workers', 'backtestWorker.js');
+      let cancelled = false;
+      let currentWorker: Worker | null = null;
+      activeAnalyseBySocket.set(socket.id, () => {
+        cancelled = true;
+        if (currentWorker) currentWorker.terminate().catch(() => {});
       });
+      const allTrades: BacktestReport['trades'] = [];
+      let totalGainLoss = 0;
+      let totalSamples = 0;
+      let openAtEndTotal = 0;
+      let startTs = 0;
+      let endTs = 0;
+      const blockerAggregate = new Map<string, number>();
+      let daysProcessed = 0;
+      socket.emit('analyse_recording_progress', { processed: 0, total: days.length });
+      for (const blockDays of blocks) {
+        if (cancelled) {
+          activeAnalyseBySocket.delete(socket.id);
+          socket.emit('analyse_recording_report', { error: 'Cancelled' });
+          return;
+        }
+        const blockSamples = getRecordedSamplesFiltered(epic, { days: blockDays });
+        if (blockSamples.length === 0) {
+          daysProcessed += blockDays.length;
+          socket.emit('analyse_recording_progress', { processed: daysProcessed, total: days.length });
+          continue;
+        }
+        if (blockSamples.length > MAX_CARRYOVER_SAMPLES) {
+          activeAnalyseBySocket.delete(socket.id);
+          socket.emit('analyse_recording_report', {
+            error: `Too many samples in one consecutive carry-over block (${blockSamples.length.toLocaleString()}). Select fewer consecutive days.`,
+          });
+          return;
+        }
+        const report = await new Promise<BacktestReport>((resolve, reject) => {
+          const worker = new Worker(workerPath, { workerData: { samples: blockSamples, config, usePerDay: false } });
+          currentWorker = worker;
+          let resolved = false;
+          worker.on('message', (msg: { report?: unknown; error?: string }) => {
+            if (resolved) return;
+            if (msg.error) {
+              resolved = true;
+              currentWorker = null;
+              worker.terminate().catch(() => {});
+              reject(new Error(msg.error));
+            } else if (msg.report) {
+              resolved = true;
+              currentWorker = null;
+              worker.terminate().catch(() => {});
+              resolve(msg.report as BacktestReport);
+            }
+          });
+          worker.on('error', (err) => {
+            if (resolved) return;
+            resolved = true;
+            currentWorker = null;
+            worker.terminate().catch(() => {});
+            reject(err);
+          });
+          worker.on('exit', (code) => {
+            if (resolved) return;
+            resolved = true;
+            currentWorker = null;
+            if (cancelled) reject(new Error('Cancelled'));
+            else if (code !== 0) reject(new Error(`Backtest worker exited (code ${code}). Try fewer days or increase Node memory.`));
+            else reject(new Error('Backtest worker exited without report'));
+          });
+        }).catch((err: Error) => {
+          throw err;
+        });
+        allTrades.push(...report.trades);
+        totalGainLoss += report.totalGainLoss;
+        totalSamples += report.sampleCount;
+        openAtEndTotal += report.openAtEnd ?? 0;
+        if (report.ruleBlockerCounts) {
+          for (const b of report.ruleBlockerCounts) {
+            const k = blockerRowKey(b);
+            blockerAggregate.set(k, (blockerAggregate.get(k) ?? 0) + b.soleBlockerCount);
+          }
+        }
+        if (report.startTs && (startTs === 0 || report.startTs < startTs)) startTs = report.startTs;
+        if (report.endTs && report.endTs > endTs) endTs = report.endTs;
+        daysProcessed += blockDays.length;
+        socket.emit('analyse_recording_progress', { processed: daysProcessed, total: days.length });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      activeAnalyseBySocket.delete(socket.id);
+      if (cancelled) {
+        socket.emit('analyse_recording_report', { error: 'Cancelled' });
+        return;
+      }
+      if (totalSamples === 0) {
+        socket.emit('analyse_recording_report', { error: 'No recorded samples for ' + epic + noDataMsgSuffix });
+        return;
+      }
+      const winningTrades = allTrades.filter((t) => t.profitLoss > 0).length;
+      const losingTrades = allTrades.filter((t) => t.profitLoss < 0).length;
+      const size = parseFloat(config.dealSize || '1') || 1;
+      const contractSize = (config.contractSize != null && config.contractSize > 0) ? config.contractSize : 1;
+      const denom = size * contractSize;
+      const totalGainLossPounds = denom > 0 ? totalGainLoss * denom : undefined;
+      const avgTradePnlPounds = (denom > 0 && allTrades.length > 0) ? (totalGainLoss / allTrades.length) * denom : undefined;
+      const closeReasonCounts = {
+        tp: allTrades.filter((t) => t.exitReason === 'tp').length,
+        sl: allTrades.filter((t) => t.exitReason === 'sl').length,
+        dsl: allTrades.filter((t) => t.exitReason === 'dsl').length,
+        rules: allTrades.filter((t) => t.exitReason === 'rules').length,
+        endOfPeriod: allTrades.filter((t) => t.exitReason === 'endOfPeriod').length,
+      };
+      const ruleBlockerCounts = mergeBlockerAggregateMap(blockerAggregate);
+      const qualitySamples = getRecordedSamplesFiltered(epic, { days });
+      const sampleQuality = analyzeSampleQuality(qualitySamples);
+      const analysedDays = buildAnalysedDaySummariesFromTrades(days, allTrades, denom);
+      emitFinalReport({
+        trades: allTrades,
+        totalGainLoss,
+        totalGainLossPounds,
+        tradeCount: allTrades.length,
+        winningTrades,
+        losingTrades,
+        winRate: allTrades.length > 0 ? (winningTrades / allTrades.length) * 100 : 0,
+        avgTradePnl: allTrades.length > 0 ? totalGainLoss / allTrades.length : 0,
+        avgTradePnlPounds,
+        sampleCount: totalSamples,
+        startTs,
+        endTs,
+        openAtEnd: openAtEndTotal,
+        daysAnalysed: days.length,
+        closeReasonCounts,
+        nonConsecutiveWarning,
+        ruleBlockerCounts: ruleBlockerCounts.length > 0 ? ruleBlockerCounts : undefined,
+        dynamicStopLossApplied: !!(config.dynamicStopLossBuy || config.dynamicStopLossSell),
+        analysedDays,
+      }, sampleQuality);
     });
 
     socket.on('analyse_cancel', () => {
@@ -1292,7 +1800,7 @@ export function registerSocketHandlers(io: Server): void {
       }
     });
 
-    socket.on('placeDeal', async (params: { epic: string; direction: string; size: string; takeProfit?: string; stopLoss?: string; closeAt?: string; bid?: number; offer?: number }) => {
+    socket.on('placeDeal', async (params: { epic: string; direction: string; size: string; takeProfit?: string; stopLoss?: string; closeAt?: string; bid?: number; offer?: number; source?: string }) => {
       if (!currentSession) {
         socket.emit('deal_error', 'Not logged in');
         return;
@@ -1318,8 +1826,9 @@ export function registerSocketHandlers(io: Server): void {
       const cfg = loadConfig();
       let expiry = cfg.defaultExpiry || 'DFB';
       let currencyCode = cfg.currencyCode || 'GBP';
+      let market: Awaited<ReturnType<typeof getMarketDetails>> = null;
       try {
-        const market = await getMarketDetails(currentSession, epic);
+        market = await getMarketDetails(currentSession, epic);
         if (market) {
           expiry = market.expiry;
           if (market.currencyCode) currencyCode = market.currencyCode;
@@ -1329,8 +1838,12 @@ export function registerSocketHandlers(io: Server): void {
       } catch {
         expiry = inferExpiry(epic, cfg.defaultExpiry);
       }
-      const takeProfit = params.takeProfit?.trim() ? parseFloat(params.takeProfit) : undefined;
+      const dslScope = params.source === 'rules' ? (direction === 'SELL' ? 'rules-sell' : 'rules-buy') : 'manual';
+      const dslSettings = resolveDynamicStopLossSettings(epic, cfg, dslScope);
+      const omitTp = shouldOmitTakeProfitForDeal(epic, cfg, dslScope);
+      let takeProfit = params.takeProfit?.trim() ? parseFloat(params.takeProfit) : undefined;
       const stopLoss = params.stopLoss?.trim() ? parseFloat(params.stopLoss) : undefined;
+      if (omitTp) takeProfit = undefined;
       const closeAtIso = params.closeAt?.trim();
       const bid = typeof params.bid === 'number' && !isNaN(params.bid) ? params.bid : undefined;
       const offer = typeof params.offer === 'number' && !isNaN(params.offer) ? params.offer : undefined;
@@ -1338,6 +1851,10 @@ export function registerSocketHandlers(io: Server): void {
 
       const dealRef = 'TT-' + Date.now();
       try {
+        if (dslSettings) {
+          const srcLabel = params.source === 'rules' ? 'rules deal' : 'deal';
+          io.emit('log', 'Dynamic stop loss (' + srcLabel + '): no take profit; trailing from +' + dslSettings.triggerProfit);
+        }
         const result = await createPosition(currentSession, {
           epic,
           direction,
@@ -1363,7 +1880,12 @@ export function registerSocketHandlers(io: Server): void {
         }
 
         io.emit('log', 'Deal placed: ' + result.dealReference);
-        socket.emit('deal_placed', { dealReference: result.dealReference });
+        socket.emit('deal_placed', {
+          dealReference: result.dealReference,
+          dealId: conf.dealId || undefined,
+          epic,
+          direction,
+        });
         let placedPosition: Awaited<ReturnType<typeof getPositions>>[number] | undefined;
         if (currentSession) {
           try {
@@ -1390,6 +1912,26 @@ export function registerSocketHandlers(io: Server): void {
             });
             if (tx) io.emit('transaction_added', tx);
           } catch { /* ignore */ }
+        }
+
+        if (dslSettings) {
+          const regId = placedPosition?.dealId ?? conf.dealId;
+          const entry = placedPosition?.level ?? entryPrice ?? 0;
+          const sizeNum = placedPosition?.size ?? parseFloat(size);
+          const cs = market?.contractSize ?? 1;
+          if (regId && entry > 0 && sizeNum > 0) {
+            registerDynamicStopLoss({
+              dealId: regId,
+              epic,
+              direction,
+              entryPrice: entry,
+              size: sizeNum,
+              contractSize: cs,
+              settings: dslSettings,
+              initialStopLevel: placedPosition?.stopLevel ?? null,
+            });
+            io.emit('dynamic_stop_loss_status', getDynamicStopLossStatuses());
+          }
         }
 
         if (closeAtIso) {
@@ -1463,9 +2005,14 @@ export function registerSocketHandlers(io: Server): void {
       } catch {
         expiry = inferExpiry(epic, cfg.defaultExpiry);
       }
-      const takeProfit = params.takeProfit?.trim() ? parseFloat(params.takeProfit) : undefined;
+      const omitTp = shouldOmitTakeProfitForDeal(epic, cfg, 'manual');
+      const takeProfitRaw = params.takeProfit?.trim() ? parseFloat(params.takeProfit) : undefined;
+      const takeProfit = omitTp ? undefined : takeProfitRaw && !isNaN(takeProfitRaw) ? takeProfitRaw : undefined;
       const stopLoss = params.stopLoss?.trim() ? parseFloat(params.stopLoss) : undefined;
       const stopAtIso = params.stopAt?.trim();
+      if (omitTp && takeProfitRaw != null && !isNaN(takeProfitRaw)) {
+        io.emit('log', 'Dynamic stop loss enabled: take profit omitted on working order');
+      }
       let timeInForce: 'GOOD_TILL_CANCELLED' | 'GOOD_TILL_DATE' = 'GOOD_TILL_CANCELLED';
       let goodTillDate: string | undefined;
       if (stopAtIso) {
@@ -1488,7 +2035,7 @@ export function registerSocketHandlers(io: Server): void {
           type: 'LIMIT',
           timeInForce,
           goodTillDate,
-          takeProfit: takeProfit && !isNaN(takeProfit) ? takeProfit : undefined,
+          takeProfit,
           stopLoss: stopLoss && !isNaN(stopLoss) ? stopLoss : undefined,
           dealReference: dealRef,
         });

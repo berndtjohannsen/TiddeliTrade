@@ -2,7 +2,7 @@
  * Log window and log function.
  * Returns the log function after setting up resize handle.
  */
-import { formatTimeWithTz } from './utils.js';
+import { formatLogTimestamp } from './utils.js';
 
 export function initLog() {
   var logContent = document.getElementById('logContent');
@@ -48,9 +48,9 @@ export function initLog() {
   function log(msg) {
     if (!logContent) return;
     var entry = document.createElement('div');
-    entry.textContent = '[' + formatTimeWithTz(new Date().toISOString()) + '] ' + msg;
-    logContent.appendChild(entry);
-    if (logWindow) logWindow.scrollTop = logWindow.scrollHeight;
+    entry.textContent = '[' + formatLogTimestamp(new Date().toISOString()) + '] ' + msg;
+    logContent.prepend(entry);
+    if (logWindow) logWindow.scrollTop = 0;
   }
   return log;
 }

@@ -55,3 +55,116 @@
   opacity: 1;
   visibility: visible;
 }
+
+/* Chart modal — visible resize grip (bottom-right) */
+#tradeChartModalPanel {
+  box-sizing: border-box;
+  z-index: 1;
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+}
+#tradeChartCanvasWrap {
+  flex: 1 1 0;
+  min-height: 180px;
+  height: 0;
+  position: relative;
+}
+#tradeChartModalBackdrop {
+  z-index: 0;
+}
+.chart-resize-grip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 36px;
+  height: 36px;
+  cursor: nwse-resize;
+  touch-action: none;
+  z-index: 30;
+  border-bottom-right-radius: 0.75rem;
+  background-color: rgba(51, 65, 85, 0.85);
+  border-top: 1px solid rgba(100, 116, 139, 0.5);
+  border-left: 1px solid rgba(100, 116, 139, 0.5);
+  background-image: linear-gradient(
+    135deg,
+    transparent 0 34%,
+    #94a3b8 34% 38%,
+    transparent 38% 50%,
+    #94a3b8 50% 54%,
+    transparent 54% 66%,
+    #94a3b8 66% 70%,
+    transparent 70%
+  );
+}
+.chart-resize-grip:hover,
+.chart-resize-grip:active {
+  background-color: rgba(71, 85, 105, 0.95);
+}
+.chart-modal-header {
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.chart-modal-header:active {
+  cursor: grabbing;
+}
+.chart-modal-header button {
+  cursor: pointer;
+}
+
+/* Trade tab — row-based layout */
+.trade-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  width: 100%;
+  align-items: start;
+}
+.trade-layout-probes,
+.trade-layout-log {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+.trade-layout-rules {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  min-width: 0;
+}
+@media (min-width: 960px) {
+  .trade-layout-rules {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+.trade-layout-live {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  min-width: 0;
+}
+@media (min-width: 640px) {
+  .trade-layout-live {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+.trade-layout-manual {
+  grid-column: 1 / -1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+}
+@media (min-width: 640px) {
+  .trade-layout-manual {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+.trade-manual-heading {
+  grid-column: 1 / -1;
+}

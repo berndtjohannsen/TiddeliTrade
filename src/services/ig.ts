@@ -181,10 +181,23 @@ export interface MarketDetails {
   exchangeRateToAccount?: number;
 }
 
+/** Normalize IG currency codes for comparison (e.g. SK → SEK). */
+function normCurrencyCode(raw: string | undefined): string {
+  const u = (raw || '').trim().toUpperCase();
+  if (u === 'SK') return 'SEK';
+  return u;
+}
+
+function rateFromCurrencyRow(c: { exchangeRate?: number; baseExchangeRate?: number }): number | undefined {
+  const rate = c.exchangeRate ?? c.baseExchangeRate;
+  if (rate == null || isNaN(Number(rate)) || Number(rate) <= 0) return undefined;
+  return Number(rate);
+}
+
 /** Try batch markets endpoint for exchange rate when single-epic endpoint omits it. */
 async function getExchangeRateFromBatch(session: IgSession, epic: string, currencyCode: string): Promise<number | undefined> {
   const accountCurrency = (session.currencyIsoCode || '').trim().toUpperCase();
-  if (!accountCurrency || currencyCode.toUpperCase() === accountCurrency) return undefined;
+  if (!accountCurrency || normCurrencyCode(currencyCode) === normCurrencyCode(accountCurrency)) return undefined;
   try {
     const url = `${baseUrl()}/gateway/deal/markets?epics=${encodeURIComponent(epic)}&filter=ALL`;
     const res = await fetch(url, {
@@ -240,8 +253,9 @@ export async function getMarketDetails(session: IgSession, epic: string): Promis
     snapshot?: { scalingFactor?: number };
   };
   const expiry = data.instrument?.expiry ?? '';
-  const defaultCurrency = data.instrument?.currencies?.find((c) => c.isDefault);
-  const currencyCode = defaultCurrency?.code || data.instrument?.currencies?.[0]?.code || '';
+  const currencies = data.instrument?.currencies || [];
+  const defaultCurrency = currencies.find((c) => c.isDefault);
+  let currencyCode = (defaultCurrency?.code || currencies[0]?.code || '').trim();
   const minDealSize = data.dealingRules?.minDealSize?.value;
   const contractSizeRaw = data.instrument?.contractSize;
   const contractSize = contractSizeRaw ? parseFloat(contractSizeRaw) : 1;
@@ -251,20 +265,42 @@ export async function getMarketDetails(session: IgSession, epic: string): Promis
   const valueOfOnePip = valueOfOnePipRaw != null ? parseFloat(String(valueOfOnePipRaw)) : undefined;
   const scalingFactor = data.snapshot?.scalingFactor;
   const accountCurrency = session.currencyIsoCode || '';
+  const accN = normCurrencyCode(accountCurrency);
+  const dealN = normCurrencyCode(currencyCode);
   let exchangeRateToAccount: number | undefined;
-  if (accountCurrency && currencyCode !== accountCurrency) {
-    const accUpper = accountCurrency.trim().toUpperCase();
-    const accountCur = data.instrument?.currencies?.find((c) => {
-      const code = (c.code || '').trim().toUpperCase();
-      return code === accUpper || (code === 'SK' && accUpper === 'SEK') || (code === 'SEK' && accUpper === 'SK');
+  if (accN && dealN && dealN !== accN) {
+    const accountCur = currencies.find((c) => {
+      const code = normCurrencyCode(c.code);
+      return code === accN;
     });
-    const rate = accountCur?.exchangeRate ?? accountCur?.baseExchangeRate;
-    if (rate != null && !isNaN(Number(rate)) && Number(rate) > 0) {
-      exchangeRateToAccount = Number(rate);
+    const rate = accountCur ? rateFromCurrencyRow(accountCur) : undefined;
+    if (rate != null) {
+      exchangeRateToAccount = rate;
     }
     if (exchangeRateToAccount == null) {
       exchangeRateToAccount = await getExchangeRateFromBatch(session, epic, currencyCode);
     }
+  }
+  // IG may mark default instrument currency as the account CCY even when the quote ladder is in another CCY
+  // (e.g. Spot Gold in USD on a SEK account). Then dealN === accN and no rate was loaded — pick another row.
+  if ((!exchangeRateToAccount || exchangeRateToAccount <= 0) && accN && currencies.length > 1) {
+    const foreign = currencies.find((c) => {
+      const cn = normCurrencyCode(c.code);
+      if (!cn || cn === accN) return false;
+      return rateFromCurrencyRow(c) != null;
+    });
+    if (foreign?.code) {
+      const r = rateFromCurrencyRow(foreign);
+      if (r != null) {
+        exchangeRateToAccount = r;
+        if (dealN === accN) {
+          currencyCode = foreign.code.trim();
+        }
+      }
+    }
+  }
+  if (accN && normCurrencyCode(currencyCode) !== accN && (exchangeRateToAccount == null || exchangeRateToAccount <= 0)) {
+    exchangeRateToAccount = await getExchangeRateFromBatch(session, epic, currencyCode);
   }
   if (!expiry) return null;
   return {
@@ -1011,6 +1047,46 @@ export async function closePosition(
     throw new Error(errMsg);
   }
 
+  return { dealReference: resBody.dealReference || '' };
+}
+
+/**
+ * Update stop (and optionally limit) on an open OTC position.
+ * PUT /gateway/deal/positions/otc/{dealId} | Version: 2
+ */
+export async function updatePositionStop(
+  session: IgSession,
+  dealId: string,
+  params: { stopLevel: number; limitLevel?: number | null }
+): Promise<{ dealReference: string }> {
+  const id = dealId?.trim();
+  if (!id) throw new Error('updatePositionStop: dealId required');
+  const stopLevel = params.stopLevel;
+  if (stopLevel == null || isNaN(stopLevel)) throw new Error('updatePositionStop: stopLevel required');
+
+  const url = `${baseUrl()}/gateway/deal/positions/otc/${encodeURIComponent(id)}`;
+  const body: Record<string, unknown> = { stopLevel };
+  if (params.limitLevel != null && !isNaN(params.limitLevel)) {
+    body.limitLevel = params.limitLevel;
+  }
+
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: { ...authHeaders(session), 'Version': '2', 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  const resBody = (await res.json().catch(() => ({}))) as {
+    errorCode?: string;
+    errorMessage?: string;
+    dealReference?: string;
+  };
+  if (!res.ok) {
+    const errMsg = resBody.errorCode
+      ? `${resBody.errorCode}: ${resBody.errorMessage || ''}`
+      : `Update position failed: ${res.status}`;
+    throw new Error(errMsg.trim());
+  }
   return { dealReference: resBody.dealReference || '' };
 }
 

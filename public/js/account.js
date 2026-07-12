@@ -1,20 +1,15 @@
 /**
- * Account display, setDealEnabled, setPositionsEnabled.
+ * Account display and workspace connection state.
  */
-export function initAccount(socket, state, setBaseEnabled, setPositionsEnabled, setOrdersPanelEnabled, clearDealMessage, setProbesPanelEnabled, setTransactionLogPanelEnabled) {
+export function initAccount(socket, state, setBaseEnabled, clearDealMessage, onWorkspaceConnectionChange) {
   var accountInfo = document.getElementById('accountInfo');
   var mainPlaceholder = document.getElementById('mainPlaceholder');
-  var splashPanel = document.getElementById('splashPanel');
-  var dealPanel = document.getElementById('dealPanel');
   var splashHint = document.getElementById('splashHint');
   var watchlistSelect = document.getElementById('watchlistSelect');
   var epicSelect = document.getElementById('epicSelect');
 
   setBaseEnabled(false);
-  setPositionsEnabled(false);
-  if (setOrdersPanelEnabled) setOrdersPanelEnabled(false);
-  if (setProbesPanelEnabled) setProbesPanelEnabled(false);
-  if (setTransactionLogPanelEnabled) setTransactionLogPanelEnabled(false);
+  if (onWorkspaceConnectionChange) onWorkspaceConnectionChange(false);
 
   function updateProfileBadge() {
     var badge = document.getElementById('profileBadge');
@@ -44,16 +39,11 @@ export function initAccount(socket, state, setBaseEnabled, setPositionsEnabled, 
         updateProfileBadge();
       }).catch(function () { state.activeProfile = 'demo'; updateProfileBadge(); });
       if (mainPlaceholder) { mainPlaceholder.textContent = ''; mainPlaceholder.classList.add('hidden'); }
-      if (splashPanel) splashPanel.classList.remove('hidden');
-      if (dealPanel) dealPanel.classList.add('hidden');
       if (splashHint) { splashHint.textContent = 'Press Start to connect'; splashHint.classList.remove('text-red-500'); }
       if (watchlistSelect) watchlistSelect.classList.add('hidden');
       if (epicSelect) epicSelect.disabled = true;
       setBaseEnabled(false);
-      setPositionsEnabled(false);
-      if (setOrdersPanelEnabled) setOrdersPanelEnabled(false);
-      if (setProbesPanelEnabled) setProbesPanelEnabled(false);
-      if (setTransactionLogPanelEnabled) setTransactionLogPanelEnabled(false);
+      if (onWorkspaceConnectionChange) onWorkspaceConnectionChange(false);
       state.currentMinDealSize = null;
       state.currentDealCurrency = '';
       state.currentContractSize = 1;
@@ -81,15 +71,10 @@ export function initAccount(socket, state, setBaseEnabled, setPositionsEnabled, 
     accountInfo.textContent = 'Account: ' + data.accountId + env + ': ' + (data.accountType || '');
     accountInfo.classList.remove('hidden');
     if (mainPlaceholder) mainPlaceholder.textContent = '';
-    if (splashPanel) splashPanel.classList.add('hidden');
-    if (dealPanel) dealPanel.classList.remove('hidden');
     if (watchlistSelect) watchlistSelect.classList.remove('hidden');
     if (epicSelect) epicSelect.disabled = false;
     setBaseEnabled(true);
-    setPositionsEnabled(true);
-    if (setOrdersPanelEnabled) setOrdersPanelEnabled(true);
-    if (setProbesPanelEnabled) setProbesPanelEnabled(true);
-    if (setTransactionLogPanelEnabled) setTransactionLogPanelEnabled(true);
+    if (onWorkspaceConnectionChange) onWorkspaceConnectionChange(true);
     socket.emit('getWatchlists');
     fetch('/api/config').then(function (r) { return r.json(); }).then(function (cfg) {
       var sizeEl = document.getElementById('dealSize');

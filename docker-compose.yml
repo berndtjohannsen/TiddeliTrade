@@ -1,0 +1,24 @@
+# TiddeliTrade — Docker / Portainer stack
+#
+# Local dev (unchanged): npm run dev:watch  →  http://localhost:3001
+# Container:              docker compose up  →  http://localhost:3002
+#
+# Do not run both instances at once (same IG session / port conflict if mapped to 3001).
+
+services:
+  tiddelitrade:
+    build: .
+    image: tiddelitrade:local
+    container_name: tiddelitrade
+    ports:
+      - "3002:3000"
+    environment:
+      PORT: "3000"
+      TIDDELI_DATA_DIR: /app/data
+      # Optional credential overrides (Settings UI / config.json also work):
+      # IG_API_KEY: ""
+      # IG_USERNAME: ""
+      # IG_PASSWORD: ""
+    volumes:
+      - ./docker-data:/app/data
+    restart: unless-stopped

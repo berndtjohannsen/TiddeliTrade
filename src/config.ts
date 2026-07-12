@@ -79,8 +79,16 @@ export interface UserConfig {
     tradingRulesAutoStopEnabled?: boolean;
     /** Minutes before close/midnight to auto-stop. Default 60 (1h). */
     tradingRulesAutoStopBeforeMinutes?: number;
+    tradingRulesAutoStopEnabledBuy?: boolean;
+    tradingRulesAutoStopEnabledSell?: boolean;
+    tradingRulesAutoStopBeforeMinutesBuy?: number;
+    tradingRulesAutoStopBeforeMinutesSell?: number;
+    tradingRulesStopAfterLossBuy?: boolean;
+    tradingRulesStopAfterLossSell?: boolean;
     /** Seconds to pause engine after a losing trade. 0 = disabled. */
     tradingRulesPauseOnLossSeconds?: number;
+    tradingRulesPauseOnLossSecondsBuy?: number;
+    tradingRulesPauseOnLossSecondsSell?: number;
     /** Deal form settings (persisted for rules trading) */
     dealDirection?: string;
     dealSize?: string;
@@ -88,6 +96,18 @@ export interface UserConfig {
     dealTakeProfit?: string;
     dealStopLoss?: string;
     dealCloseAt?: string;
+    /** Dynamic stop loss: trail profit via IG stop; no take profit while enabled. */
+    dealDynamicStopLossEnabled?: boolean;
+    dealDynamicStopLossTrigger?: number | string;
+    dealDynamicStopLossLock?: number | string;
+    dealDynamicStopLossMinStep?: number | string;
+    dealDynamicStopLossUpdateSec?: number | string;
+    rulesDynamicStopLossEnabledBuy?: boolean;
+    rulesDynamicStopLossTriggerBuy?: number | string;
+    rulesDynamicStopLossLockBuy?: number | string;
+    rulesDynamicStopLossEnabledSell?: boolean;
+    rulesDynamicStopLossTriggerSell?: number | string;
+    rulesDynamicStopLossLockSell?: number | string;
     /** Per-instrument settings (deal, order, rules). Key = epic. */
     instruments?: Record<string, InstrumentSettings>;
   };
@@ -101,6 +121,17 @@ export interface InstrumentSettings {
   dealTakeProfit?: string;
   dealStopLoss?: string;
   dealCloseAt?: string;
+  dealDynamicStopLossEnabled?: boolean;
+  dealDynamicStopLossTrigger?: number | string;
+  dealDynamicStopLossLock?: number | string;
+  dealDynamicStopLossMinStep?: number | string;
+  dealDynamicStopLossUpdateSec?: number | string;
+  rulesDynamicStopLossEnabledBuy?: boolean;
+  rulesDynamicStopLossTriggerBuy?: number | string;
+  rulesDynamicStopLossLockBuy?: number | string;
+  rulesDynamicStopLossEnabledSell?: boolean;
+  rulesDynamicStopLossTriggerSell?: number | string;
+  rulesDynamicStopLossLockSell?: number | string;
   orderDirection?: string;
   orderSize?: string;
   orderTpSlMode?: string;
@@ -131,7 +162,79 @@ export interface InstrumentSettings {
   tradingRulesConfirmBeforePlace?: boolean;
   tradingRulesAutoStopEnabled?: boolean;
   tradingRulesAutoStopBeforeMinutes?: number;
+  tradingRulesAutoStopEnabledBuy?: boolean;
+  tradingRulesAutoStopEnabledSell?: boolean;
+  tradingRulesAutoStopBeforeMinutesBuy?: number;
+  tradingRulesAutoStopBeforeMinutesSell?: number;
   tradingRulesPauseOnLossSeconds?: number;
+  tradingRulesPauseOnLossSecondsBuy?: number;
+  tradingRulesPauseOnLossSecondsSell?: number;
+  /** When true, a BUY-rules deal that closes at a loss stops the BUY engine until restarted. */
+  tradingRulesStopAfterLossBuy?: boolean;
+  /** When true, a SELL-rules deal that closes at a loss stops the SELL engine until restarted. */
+  tradingRulesStopAfterLossSell?: boolean;
+  /** Saved Research backtest profiles for this instrument. */
+  backtestProfiles?: BacktestProfile[];
+}
+
+/** Named snapshot of strategy + analyse options + last simulated result. */
+export interface BacktestProfile {
+  id: string;
+  name: string;
+  savedAt: number;
+  strategy: BacktestProfileStrategy;
+  analyseOptions: BacktestProfileAnalyseOptions;
+  lastResult?: BacktestProfileLastResult;
+}
+
+export interface BacktestProfileStrategy {
+  ruleSets: {
+    buy: BacktestProfileRuleSide;
+    sell: BacktestProfileRuleSide;
+  };
+  dynamicSl: {
+    buy: BacktestProfileDynamicSl;
+    sell: BacktestProfileDynamicSl;
+  };
+  probeShortMinutes: number;
+  probeMediumMinutes: number;
+  probeLongMinutes: number;
+}
+
+export interface BacktestProfileRuleSide {
+  ruleGroups?: {
+    short?: Array<{ left: string; op: string; right: string; enabled?: boolean }>;
+    medium?: Array<{ left: string; op: string; right: string; enabled?: boolean }>;
+    long?: Array<{ left: string; op: string; right: string; enabled?: boolean }>;
+    other?: Array<{ left: string; op: string; right: string; enabled?: boolean }>;
+  };
+  dealSize?: string;
+  takeProfit?: string | null;
+  stopLoss?: string | null;
+  tpSlMode?: string;
+}
+
+export interface BacktestProfileDynamicSl {
+  enabled: boolean;
+  trigger?: string | null;
+  lock?: string | null;
+}
+
+export interface BacktestProfileAnalyseOptions {
+  selectedDays?: string[] | null;
+  fromDate?: string | null;
+  toDate?: string | null;
+  intradayOnly: boolean;
+  backtestRuleSets: ('BUY' | 'SELL')[];
+}
+
+export interface BacktestProfileLastResult {
+  totalGainLoss: number;
+  totalGainLossPounds?: number;
+  daysAnalysed?: number;
+  tradeCount: number;
+  winRate?: number;
+  runAt: number;
 }
 
 const DEFAULT_CONFIG: UserConfig = {

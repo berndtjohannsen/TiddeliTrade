@@ -16,6 +16,10 @@ const io = new Server(server, {
 });
 
 app.use(express.json());
+app.use('/js', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
 app.use(express.static(path.join(process.cwd(), 'public')));
 
 app.use('/api', apiRoutes);

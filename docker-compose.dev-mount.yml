@@ -1,0 +1,11 @@
+# Share repo-root data with the container (same config + DB as local npm dev).
+# Only run ONE of: npm dev OR docker — not both at once.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev-mount.yml up --build
+
+services:
+  tiddelitrade:
+    environment:
+      TIDDELI_DATA_DIR: /app/host-data
+    volumes:
+      - .:/app/host-data

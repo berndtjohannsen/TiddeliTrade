@@ -3,6 +3,13 @@
  * One price point: when market reaches it, either notify (Alarm) or trade (Execute).
  */
 import { formatMoney, formatTimeWithTz } from './utils.js';
+import {
+  applyDynamicTpFromConfig,
+  isDynamicTpEnabled,
+  manualDynamicTpConfigPayload,
+  syncDynamicTpUi,
+  updateDynamicTpStatusDisplay
+} from './dynamicTpUi.js';
 
 export function initOrder(socket, state, log) {
   var orderPanel = document.getElementById('orderPanel');
@@ -61,7 +68,17 @@ export function initOrder(socket, state, log) {
     var s = getOrderSettings();
     fetch('/api/config').then(function (r) { return r.json(); }).then(function (cfg) {
       var instruments = (cfg.ui && cfg.ui.instruments) ? { ...cfg.ui.instruments } : {};
-      instruments[epic] = { ...(instruments[epic] || {}), orderDirection: s.orderDirection, orderSize: s.orderSize, orderTpSlMode: s.orderTpSlMode, orderTakeProfit: s.orderTakeProfit, orderStopLoss: s.orderStopLoss, orderCloseAt: s.orderCloseAt || undefined, orderStopAt: s.orderStopAt || undefined };
+      instruments[epic] = {
+        ...(instruments[epic] || {}),
+        orderDirection: s.orderDirection,
+        orderSize: s.orderSize,
+        orderTpSlMode: s.orderTpSlMode,
+        orderTakeProfit: s.orderTakeProfit,
+        orderStopLoss: s.orderStopLoss,
+        orderCloseAt: s.orderCloseAt || undefined,
+        orderStopAt: s.orderStopAt || undefined,
+        ...manualDynamicTpConfigPayload()
+      };
       return fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -91,6 +108,7 @@ export function initOrder(socket, state, log) {
       if (slEl && s.orderStopLoss != null) slEl.value = s.orderStopLoss;
       if (closeAtEl && s.orderCloseAt) closeAtEl.value = s.orderCloseAt;
       if (stopAtEl && s.orderStopAt) stopAtEl.value = s.orderStopAt;
+      applyDynamicTpFromConfig(inst, ui);
       updateOrderTpSlPlaceholders();
     }).catch(function () {});
   }
@@ -153,7 +171,9 @@ export function initOrder(socket, state, log) {
     }
     document.getElementById('orderConfirmPrice').textContent = params.price != null ? params.price : '—';
     document.getElementById('orderConfirmSize').textContent = params.size ? params.size + (state.currentDealCurrency ? ' ' + state.currentDealCurrency : '') : '—';
-    document.getElementById('orderConfirmTakeProfit').textContent = params.takeProfit || '—';
+    document.getElementById('orderConfirmTakeProfit').textContent = isDynamicTpEnabled('manual')
+      ? '— (dynamic stop loss)'
+      : (params.takeProfit || '—');
     document.getElementById('orderConfirmStopLoss').textContent = params.stopLoss || '—';
     document.getElementById('orderConfirmCloseAt').textContent = params.closeAt ? formatTimeWithTz(params.closeAt) : '—';
     document.getElementById('orderConfirmStopAt').textContent = params.stopAt ? formatTimeWithTz(params.stopAt) : '—';
@@ -414,9 +434,36 @@ export function initOrder(socket, state, log) {
         closeAt: closeAt,
         stopAt: stopAt
       };
+      if (isDynamicTpEnabled('manual')) delete params.takeProfit;
       showOrderConfirmModal(params);
     });
   }
+
+  var orderDynamicStopLoss = document.getElementById('orderDynamicStopLoss');
+  if (orderDynamicStopLoss) {
+    orderDynamicStopLoss.addEventListener('change', function () {
+      syncDynamicTpUi('order');
+      saveOrderSettings();
+    });
+  }
+  ['orderDynamicStopLossTrigger', 'orderDynamicStopLossLock'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) {
+      el.addEventListener('change', function () {
+        syncDynamicTpUi('order');
+        saveOrderSettings();
+      });
+      el.addEventListener('input', function () {
+        syncDynamicTpUi('order');
+        saveOrderSettings();
+      });
+    }
+  });
+
+  socket.on('dynamic_stop_loss_status', function (list) {
+    state.dynamicStopLossStatus = Array.isArray(list) ? list : [];
+    updateDynamicTpStatusDisplay(state);
+  });
 
   loadOrderSettings();
 

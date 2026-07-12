@@ -9,9 +9,13 @@
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen">
   <header class="flex items-center justify-between gap-4 px-4 py-3 bg-slate-900 border-b border-slate-800">
-    <div class="flex items-center gap-2">
+    <div class="flex items-center gap-3 flex-wrap">
       <span class="text-sm font-semibold text-slate-400" id="version">TiddeliTrade ver: —</span>
       <span id="profileBadge" class="hidden px-2 py-0.5 rounded text-xs font-semibold" data-tooltip="Account mode – switch in Settings">—</span>
+      <nav id="appNav" class="flex items-center gap-1 rounded-lg bg-slate-800/80 p-0.5 border border-slate-700/80" role="tablist" aria-label="Workspace">
+        <button type="button" id="appNavTrade" role="tab" aria-selected="true" data-tooltip="Live trading: probes, rules engines, deals, positions">Trade</button>
+        <button type="button" id="appNavResearch" role="tab" aria-selected="false" data-tooltip="Record prices and run simulated backtests (no IG orders)">Research</button>
+      </nav>
     </div>
     <div class="flex flex-col gap-1 flex-1 justify-center max-w-xs">
       <div class="flex items-center gap-2">
@@ -127,18 +131,30 @@
       </div>
     </div>
   </div>
-  <div id="tradeChartModal" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 hidden p-3" aria-hidden="true">
-    <div id="tradeChartModalPanel" class="bg-slate-900 border border-slate-600 rounded-xl shadow-2xl flex flex-col overflow-hidden max-w-[96vw] max-h-[94vh] resize min-w-[min(420px,96vw)] min-h-[320px] w-[min(900px,96vw)] h-[min(580px,94vh)]" style="resize: both;">
-      <div class="px-3 py-2 border-b border-slate-700 flex items-center justify-between gap-2 shrink-0">
-        <h2 id="tradeChartModalTitle" class="text-sm font-semibold text-slate-200">Trade chart</h2>
-        <button type="button" id="tradeChartModalClose" class="text-slate-400 hover:text-slate-200 text-xl leading-none px-2 py-0.5 rounded hover:bg-slate-800" aria-label="Close">&times;</button>
+  <div id="tradeChartModal" class="fixed inset-0 z-[60] hidden" aria-hidden="true">
+    <div id="tradeChartModalBackdrop" class="absolute inset-0 bg-black/70"></div>
+    <div id="tradeChartModalPanel" class="bg-slate-900 border border-slate-600 rounded-xl shadow-2xl flex flex-col overflow-hidden max-w-[96vw] max-h-[94vh] min-w-[min(420px,96vw)] min-h-[320px] w-[min(900px,96vw)] h-[min(580px,94vh)]">
+      <div id="tradeChartModalHeader" class="px-3 py-2 border-b border-slate-700 flex items-center justify-between gap-2 shrink-0 chart-modal-header">
+        <h2 id="tradeChartModalTitle" class="text-sm font-semibold text-slate-200 truncate min-w-0">Trade chart</h2>
+        <div class="flex items-center gap-1 shrink-0">
+          <button type="button" id="tradeChartSizeDown" class="w-7 h-7 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-base leading-none" title="Smaller chart window" aria-label="Smaller chart window">−</button>
+          <button type="button" id="tradeChartSizeUp" class="w-7 h-7 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-base leading-none" title="Larger chart window" aria-label="Larger chart window">+</button>
+          <button type="button" id="tradeChartModalClose" class="text-slate-400 hover:text-slate-200 text-xl leading-none px-2 py-0.5 rounded hover:bg-slate-800" aria-label="Close">&times;</button>
+        </div>
       </div>
       <div id="tradeChartModalMeta" class="px-3 py-2 text-[11px] font-mono text-slate-400 border-b border-slate-800 space-y-1 shrink-0 leading-relaxed"></div>
       <div id="tradeChartModalRules" class="px-3 py-2 text-[11px] border-b border-slate-800 shrink-0 max-h-[28vh] overflow-y-auto leading-relaxed hidden"></div>
-      <div id="tradeChartCanvasWrap" class="flex-1 min-h-[180px] relative bg-slate-950/80 overflow-hidden min-w-0">
-        <canvas id="tradeChartCanvas" class="absolute inset-0 w-full h-full block cursor-crosshair"></canvas>
+      <div id="tradeChartModalOverlays" class="px-3 py-1.5 text-[10px] border-b border-slate-800 shrink-0 flex flex-wrap items-center gap-x-2 gap-y-1 hidden">
+        <span class="text-slate-500 shrink-0">Lines:</span>
+        <div id="tradeChartOverlayChecks" class="flex flex-wrap gap-x-3 gap-y-1"></div>
       </div>
-      <p id="tradeChartModalHint" class="px-3 py-1.5 text-[10px] text-slate-500 shrink-0 border-t border-slate-800">Mid price from recording. Drag the window corner to resize.</p>
+      <div id="tradeChartHoverBar" class="px-3 py-1 text-[10px] font-mono text-sky-300/90 border-b border-slate-800 shrink-0 hidden whitespace-nowrap overflow-x-auto"></div>
+      <div id="tradeChartCanvasWrap" class="flex-1 min-h-[180px] relative bg-slate-950/80 overflow-hidden min-w-0">
+        <canvas id="tradeChartCanvas" class="absolute inset-0 w-full h-full block pointer-events-none"></canvas>
+        <canvas id="tradeChartCanvasOverlay" class="absolute inset-0 w-full h-full block cursor-crosshair"></canvas>
+      </div>
+      <p id="tradeChartModalHint" class="px-3 py-1.5 pr-10 text-[10px] text-slate-500 shrink-0 border-t border-slate-800 rounded-b-xl bg-slate-900">Drag title bar to move. +/− or ↘ to resize. Amber/gray bands = recording gaps; yellow dot = price jump.</p>
+      <div id="tradeChartResizeGrip" class="chart-resize-grip" title="Drag to resize" aria-label="Drag to resize chart window"></div>
     </div>
   </div>
   <div id="analyseProgressModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
@@ -156,6 +172,40 @@
         </div>
         <p class="text-xs text-slate-500">This may take several minutes for many days.</p>
         <button type="button" id="analyseProgressStop" class="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-medium transition-colors">Stop</button>
+      </div>
+    </div>
+  </div>
+  <div id="backtestProfileSaveModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-xl w-full max-w-sm mx-4 overflow-hidden">
+      <div class="px-4 py-3 border-b border-slate-700">
+        <h2 class="text-lg font-semibold text-slate-200">Save profile</h2>
+      </div>
+      <div class="p-4 space-y-3 text-sm">
+        <p id="backtestProfileSaveIntro" class="text-slate-300">Save this backtest run as a profile?</p>
+        <p id="backtestProfileSaveSummary" class="hidden text-slate-400 text-xs font-mono"></p>
+        <div>
+          <label for="backtestProfileSaveName" class="block text-slate-500 text-xs mb-1">Profile name</label>
+          <input type="text" id="backtestProfileSaveName" class="w-full rounded-lg bg-slate-800 border border-slate-600 text-slate-200 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-violet-500/50" autocomplete="off" spellcheck="false">
+        </div>
+        <p id="backtestProfileSaveError" class="hidden text-red-400 text-xs"></p>
+      </div>
+      <div class="px-4 py-3 border-t border-slate-700 flex gap-2 justify-end">
+        <button type="button" id="backtestProfileSaveCancel" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium transition-colors">Cancel</button>
+        <button type="button" id="backtestProfileSaveOk" class="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium transition-colors">Save profile</button>
+      </div>
+    </div>
+  </div>
+  <div id="backtestProfileDeleteModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-xl w-full max-w-sm mx-4 overflow-hidden">
+      <div class="px-4 py-3 border-b border-slate-700">
+        <h2 class="text-lg font-semibold text-slate-200">Delete profile</h2>
+      </div>
+      <div class="p-4 text-sm text-slate-300">
+        <p>Delete profile <span id="backtestProfileDeleteName" class="font-mono text-slate-100">—</span>?</p>
+      </div>
+      <div class="px-4 py-3 border-t border-slate-700 flex gap-2 justify-end">
+        <button type="button" id="backtestProfileDeleteCancel" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium transition-colors">Cancel</button>
+        <button type="button" id="backtestProfileDeleteOk" class="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-medium transition-colors">Delete</button>
       </div>
     </div>
   </div>
@@ -211,8 +261,10 @@
     </div>
   </div>
   <main class="p-4 pb-16">
-    <div class="flex flex-wrap gap-4 items-start">
-      <section id="probesPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[320px] hidden">
+    <div class="flex flex-col gap-4 items-stretch w-full">
+      <p id="mainPlaceholder" class="text-slate-500 text-sm">Start to connect and log in.</p>
+      <div id="tradeViewRoot" class="trade-layout hidden">
+      <section id="probesPanel" class="trade-layout-probes bg-slate-900 border border-slate-800 rounded-xl p-4 w-full min-w-0 hidden">
         <div class="flex items-center gap-2 mb-2">
           <h3 class="text-sm font-semibold text-slate-400" data-tooltip="Price statistics over configurable periods">Probes</h3>
           <div class="flex items-center gap-2">
@@ -288,81 +340,8 @@
           </div>
         </div>
       </section>
-      <section id="testRulesPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[320px] hidden">
-        <h3 class="text-sm font-semibold text-slate-400 mb-2">Test rules</h3>
-        <div class="flex flex-wrap items-center gap-2 mb-2">
-          <button type="button" id="testRulesRecordBtn" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-slate-700" data-tooltip="Record price data to database at 1/sec for later replay. Requires streaming and instrument selected.">Record</button>
-          <button type="button" id="testRulesButton2" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Run backtest on recorded samples using current rules and probe periods">Analyse recording</button>
-          <span id="testRulesRecordedCount" class="text-xs text-slate-500" data-tooltip="Total recorded samples for current instrument in database">—</span>
-        </div>
-        <div class="flex flex-col gap-1 mb-2 text-xs">
-          <div class="flex flex-wrap items-center gap-2">
-            <span class="text-slate-500" data-tooltip="Grouped by instrument; each line shows instrument, then its days below">Days (all instruments)</span>
-            <button type="button" id="testRulesLoadDays" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300" data-tooltip="Load days with recorded data from all instruments">Load days</button>
-            <button type="button" id="testRulesSelectAllDays" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 hidden">Select all</button>
-            <button type="button" id="testRulesClearDays" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 hidden">Clear</button>
-            <button type="button" id="testRulesDeleteSelectedDays" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 hidden" data-tooltip="Delete selected days from the database">Delete selected</button>
-            <span class="text-slate-500">Prune:</span>
-            <input type="number" id="testRulesPruneMinCount" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono w-20 text-xs" min="0" placeholder="3600" data-tooltip="Remove days with fewer than this many samples (e.g. 3600 ≈ 1 hour)">
-            <button type="button" id="testRulesPruneBtn" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300" data-tooltip="Remove days with fewer than the threshold samples">Prune sparse</button>
-          </div>
-          <div id="testRulesDaysList" class="flex flex-col gap-0.5 max-h-36 overflow-y-auto" data-tooltip="Grouped by instrument. Select days for current instrument to analyse."></div>
-          <div class="flex flex-wrap items-center gap-2 text-slate-500">
-            <label for="testRulesFromDate">Or range:</label>
-            <input type="date" id="testRulesFromDate" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono w-28">
-            <span>to</span>
-            <input type="date" id="testRulesToDate" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono w-28">
-          </div>
-          <div class="flex flex-col gap-1">
-            <span class="text-slate-500 text-[11px]">Rule sets to analyse:</span>
-            <div class="flex items-center gap-4">
-              <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="testRulesBacktestBuy" checked class="rounded bg-slate-800 border-slate-600 text-emerald-500"><span class="text-emerald-400">BUY</span></label>
-              <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="testRulesBacktestSell" checked class="rounded bg-slate-800 border-slate-600 text-emerald-500"><span class="text-red-400">SELL</span></label>
-            </div>
-          </div>
-          <div class="flex flex-col gap-1">
-            <span class="text-slate-500 text-[11px]">Analysis mode:</span>
-            <label class="flex items-center gap-2 cursor-pointer">
-              <input type="radio" name="testRulesAnalysisMode" value="intraday" checked class="rounded bg-slate-800 border-slate-600 text-emerald-500">
-              <span class="text-slate-400" data-tooltip="Each day analysed independently. No positions carry over to the next day.">Intraday only</span>
-            </label>
-            <label class="flex items-center gap-2 cursor-pointer">
-              <input type="radio" name="testRulesAnalysisMode" value="carryover" class="rounded bg-slate-800 border-slate-600 text-emerald-500">
-              <span class="text-slate-400" data-tooltip="Positions can span days. Use fewer days for long runs.">Positions carry over</span>
-            </label>
-          </div>
-        </div>
-        <div class="flex flex-col gap-1">
-          <span class="text-xs text-slate-500">Recorded log</span>
-          <div id="testRulesLog" class="h-24 overflow-y-auto rounded-lg bg-slate-800 border border-slate-700 font-mono text-[11px]">
-            <table class="w-full border-collapse">
-              <thead class="sticky top-0 bg-slate-800 z-10">
-                <tr class="text-slate-500 border-b border-slate-700">
-                  <th class="text-left px-2 py-1.5 font-normal">Time</th>
-                  <th class="text-left px-2 py-1.5 font-normal">Buy</th>
-                  <th class="text-left px-2 py-1.5 font-normal">Sell</th>
-                  <th class="text-left px-2 py-1.5 font-normal">Mid</th>
-                  <th class="text-left px-2 py-1.5 font-normal">Spread</th>
-                </tr>
-              </thead>
-              <tbody id="testRulesLogBody" class="text-slate-400"></tbody>
-            </table>
-          </div>
-        </div>
-        <div id="testRulesReport" class="hidden mt-2 rounded-lg bg-slate-800 border border-slate-700 p-2 text-xs">
-          <h4 class="text-slate-400 font-medium mb-1.5">Backtest report</h4>
-          <dl id="testRulesReportBody" class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-slate-300"></dl>
-          <div id="testRulesBlockerSection" class="hidden mt-2 pt-2 border-t border-slate-700">
-            <h5 class="text-slate-500 font-medium mb-1" data-tooltip="Sample counts where you were flat and rules failed: for each row, that condition was the only failing rule (legacy list or BUY/SELL set). Market-closed blocks are not counted here.">Sole blockers (trim candidates)</h5>
-            <ul id="testRulesBlockerList" class="text-slate-400 space-y-0.5"></ul>
-          </div>
-          <div id="testRulesTradeListSection" class="hidden mt-2 pt-2 border-t border-slate-700">
-            <h5 class="text-slate-500 font-medium mb-1" data-tooltip="Each line shows how the backtest closed: TP/SL = hit levels; EOD = forced at last tick of the day/period (P/L is not capped to your £ target); Rules = conditions dropped.">Trades (entry → exit, close)</h5>
-            <ul id="testRulesTradeList" class="text-slate-400 space-y-0.5 font-mono text-[11px]"></ul>
-          </div>
-        </div>
-      </section>
-      <section id="tradingRulesBuyPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[320px] hidden">
+      <div class="trade-layout-rules">
+      <section id="tradingRulesBuyPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-0 w-full hidden">
         <div class="flex items-center justify-between gap-2 mb-2">
           <h3 class="text-sm font-semibold text-emerald-400" data-tooltip="BUY rules – engine evaluates these first. When running: places deals when conditions met.">BUY rules</h3>
           <button type="button" id="tradingRulesToggle" class="px-2 py-1 rounded text-xs font-medium transition-colors" title="Start/stop rules engine">Stop</button>
@@ -385,6 +364,10 @@
             <label for="tradingRulesPauseOnLoss" class="text-slate-500 shrink-0" data-tooltip="When a trade closes with a loss, stop the engine for this many seconds before resuming">Pause on loss</label>
             <input type="number" id="tradingRulesPauseOnLoss" min="0" max="86400" value="0" placeholder="0" class="w-20 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Seconds to pause after a losing trade. 0 = disabled.">
             <span class="text-slate-500 text-xs shrink-0">sec</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <input type="checkbox" id="tradingRulesStopAfterLossBuy" class="rounded bg-slate-800 border-slate-600 text-emerald-500 focus:ring-emerald-500">
+            <label for="tradingRulesStopAfterLossBuy" class="text-slate-500 text-xs" data-tooltip="When a deal opened by this BUY engine closes at a loss, the BUY engine stops until you start it again. Does not affect manual deals.">Stop after loss</label>
           </div>
         </div>
         <p class="text-xs text-slate-500 mb-2" data-tooltip="When both running: BUY evaluated first, then SELL. Each panel has its own Start.">When both running: BUY first, then SELL.</p>
@@ -426,16 +409,30 @@
           </div>
           <div class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-xs items-center pt-2 mt-2 border-t border-slate-700/50">
             <span class="text-slate-500">Size</span><input type="text" id="rulesBuySize" placeholder="1" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono">
-            <span class="text-slate-500">Take profit</span><input type="text" id="rulesBuyTp" placeholder="—" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono">
+            <span class="text-slate-500" data-tooltip="Disabled when BUY dynamic stop loss is on (below)">Take profit</span><input type="text" id="rulesBuyTp" placeholder="—" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono">
             <span class="text-slate-500">Stop loss</span><input type="text" id="rulesBuySl" placeholder="—" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono">
             <span class="text-slate-500">TP/SL in</span><select id="rulesBuyTpSlMode" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 text-xs w-24" data-tooltip="Value = gain/loss in currency, Rate = price level, % = percent from entry"><option value="value">Value (gain/loss)</option><option value="rate">Rate (price)</option><option value="pct">%</option></select>
             <span class="text-slate-500 text-xs" data-tooltip="Estimated gain/loss if TP or SL triggers">Est. TP/SL</span>
             <span id="rulesBuyEstTpSl" class="text-xs font-mono text-slate-400">—</span>
+            <div class="col-span-2 border-t border-slate-700/60 pt-2 mt-1 space-y-2">
+              <div class="flex items-center gap-2">
+                <input type="checkbox" id="tradingRulesDynamicTp" class="rounded bg-slate-800 border-slate-600 text-emerald-500 focus:ring-emerald-500">
+                <label for="tradingRulesDynamicTp" class="text-slate-400 text-xs cursor-pointer" data-tooltip="BUY rules engine only: trail profit via IG stop (no take profit). Separate from SELL rules. App must stay running.">Dynamic stop loss</label>
+              </div>
+              <div id="tradingRulesDynamicTpFields" class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 items-center text-xs hidden">
+                <label for="tradingRulesDynamicTpTrigger" class="text-slate-500" data-tooltip="When unrealized profit reaches this (deal currency), start trailing the stop">Trigger profit</label>
+                <input type="text" id="tradingRulesDynamicTpTrigger" placeholder="e.g. 3" class="px-2 py-1 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-mono placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 outline-none">
+                <label for="tradingRulesDynamicTpLock" class="text-slate-500" data-tooltip="First locked profit once trigger is hit; then trails as profit grows">Lock profit</label>
+                <input type="text" id="tradingRulesDynamicTpLock" placeholder="e.g. 1" class="px-2 py-1 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-mono placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 outline-none">
+                <span class="text-slate-500 col-span-2 text-[10px] leading-snug" data-tooltip="Values in deal currency (same as TP/SL value mode). IG may reject stops too close to market; previous stop is kept.">Profit in deal currency. TP disabled while on.</span>
+              </div>
+              <p id="tradingRulesDynamicTpStatus" class="text-[10px] text-slate-500 font-mono hidden"></p>
+            </div>
           </div>
         </div>
         <p id="tradingRulesStatus" class="text-xs text-slate-500 mt-2" data-tooltip="Shows whether conditions are met (not an error – just current state)">—</p>
       </section>
-      <section id="tradingRulesSellPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[320px] hidden">
+      <section id="tradingRulesSellPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-0 w-full hidden">
         <div class="flex items-center justify-between gap-2 mb-2">
           <h3 class="text-sm font-semibold text-red-400" data-tooltip="SELL rules – evaluated after BUY. Same structure as BUY panel.">SELL rules</h3>
           <button type="button" id="tradingRulesToggleSell" class="px-2 py-1 rounded text-xs font-medium transition-colors" title="Start/stop rules engine">Stop</button>
@@ -458,6 +455,10 @@
             <label for="tradingRulesPauseOnLossSell" class="text-slate-500 shrink-0" data-tooltip="When a trade closes with a loss, stop the engine for this many seconds before resuming">Pause on loss</label>
             <input type="number" id="tradingRulesPauseOnLossSell" min="0" max="86400" value="0" placeholder="0" class="w-20 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Seconds to pause after a losing trade. 0 = disabled.">
             <span class="text-slate-500 text-xs shrink-0">sec</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <input type="checkbox" id="tradingRulesStopAfterLossSell" class="rounded bg-slate-800 border-slate-600 text-red-500 focus:ring-red-500">
+            <label for="tradingRulesStopAfterLossSell" class="text-slate-500 text-xs" data-tooltip="When a deal opened by this SELL engine closes at a loss, the SELL engine stops until you start it again. Does not affect manual deals.">Stop after loss</label>
           </div>
         </div>
         <p class="text-xs text-slate-500 mb-2" data-tooltip="When both running: BUY evaluated first, then SELL. Each panel has its own Start.">When both running: BUY first, then SELL.</p>
@@ -499,30 +500,48 @@
           </div>
           <div class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-xs items-center pt-2 mt-2 border-t border-slate-700/50">
             <span class="text-slate-500">Size</span><input type="text" id="rulesSellSize" placeholder="1" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono">
-            <span class="text-slate-500">Take profit</span><input type="text" id="rulesSellTp" placeholder="—" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono">
+            <span class="text-slate-500" data-tooltip="Disabled when SELL dynamic stop loss is on (below)">Take profit</span><input type="text" id="rulesSellTp" placeholder="—" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono">
             <span class="text-slate-500">Stop loss</span><input type="text" id="rulesSellSl" placeholder="—" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono">
             <span class="text-slate-500">TP/SL in</span><select id="rulesSellTpSlMode" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 text-xs w-24" data-tooltip="Value = gain/loss in currency, Rate = price level, % = percent from entry"><option value="value">Value (gain/loss)</option><option value="rate">Rate (price)</option><option value="pct">%</option></select>
             <span class="text-slate-500 text-xs" data-tooltip="Estimated gain/loss if TP or SL triggers">Est. TP/SL</span>
             <span id="rulesSellEstTpSl" class="text-xs font-mono text-slate-400">—</span>
+            <div class="col-span-2 border-t border-slate-700/60 pt-2 mt-1 space-y-2">
+              <div class="flex items-center gap-2">
+                <input type="checkbox" id="tradingRulesSellDynamicTp" class="rounded bg-slate-800 border-slate-600 text-red-500 focus:ring-red-500">
+                <label for="tradingRulesSellDynamicTp" class="text-slate-400 text-xs cursor-pointer" data-tooltip="SELL rules engine only: trail profit via IG stop (no take profit). Separate from BUY rules. App must stay running.">Dynamic stop loss</label>
+              </div>
+              <div id="tradingRulesSellDynamicTpFields" class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 items-center text-xs hidden">
+                <label for="tradingRulesSellDynamicTpTrigger" class="text-slate-500" data-tooltip="When unrealized profit reaches this (deal currency), start trailing the stop">Trigger profit</label>
+                <input type="text" id="tradingRulesSellDynamicTpTrigger" placeholder="e.g. 3" class="px-2 py-1 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-mono placeholder-slate-500 focus:ring-2 focus:ring-red-500 outline-none">
+                <label for="tradingRulesSellDynamicTpLock" class="text-slate-500" data-tooltip="First locked profit once trigger is hit; then trails as profit grows">Lock profit</label>
+                <input type="text" id="tradingRulesSellDynamicTpLock" placeholder="e.g. 1" class="px-2 py-1 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-mono placeholder-slate-500 focus:ring-2 focus:ring-red-500 outline-none">
+                <span class="text-slate-500 col-span-2 text-[10px] leading-snug" data-tooltip="Values in deal currency (same as TP/SL value mode). IG may reject stops too close to market; previous stop is kept.">Profit in deal currency. TP disabled while on.</span>
+              </div>
+              <p id="tradingRulesSellDynamicTpStatus" class="text-[10px] text-slate-500 font-mono hidden"></p>
+            </div>
           </div>
         </div>
         <p id="tradingRulesStatusSell" class="text-xs text-slate-500 mt-2" data-tooltip="Shows whether conditions are met (not an error – just current state)">—</p>
       </section>
-      <section id="positionsPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[260px] hidden">
+      </div>
+      <div class="trade-layout-live">
+      <section id="positionsPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-0 w-full hidden">
         <h3 class="text-sm font-semibold text-slate-400 mb-2">Positions</h3>
         <div id="positionsList" class="space-y-2 text-sm">
           <p id="positionsEmpty" class="text-slate-500 text-xs">No open positions</p>
         </div>
       </section>
-      <section id="ordersPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[260px] hidden">
+      <section id="ordersPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-0 w-full hidden">
         <h3 class="text-sm font-semibold text-slate-400 mb-2">Orders</h3>
         <div id="ordersList" class="space-y-2 text-sm">
           <p id="ordersEmpty" class="text-slate-500 text-xs">No working orders</p>
         </div>
       </section>
-      <section id="transactionLogPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[640px] max-h-[320px] flex flex-col hidden">
+      </div>
+      <section id="transactionLogPanel" class="trade-layout-log bg-slate-900 border border-slate-800 rounded-xl p-4 w-full min-w-0 min-h-[200px] max-h-[360px] flex flex-col hidden">
         <div class="flex items-center justify-between gap-2 mb-2">
-          <h3 class="text-sm font-semibold text-slate-400" data-tooltip="Closed positions with P&L. Persisted to transactions.json, rolls at 200.">Transaction log</h3>
+          <h3 class="text-sm font-semibold text-slate-400" data-tooltip="Live IG closes only — not simulated backtest trades (see Research tab).">Transaction log</h3>
+          <span class="text-[10px] text-emerald-500/90 font-medium">Live</span>
           <button type="button" id="transactionLogReset" class="px-2 py-1 rounded text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">Reset</button>
         </div>
         <div id="transactionLogList" class="flex-1 min-h-0 overflow-y-auto overflow-x-auto space-y-1 text-xs font-mono"></div>
@@ -531,20 +550,9 @@
           <span id="transactionLogTotal" class="font-mono font-semibold">—</span>
         </div>
       </section>
-      <section id="splashPanel" class="flex-1 min-w-[280px] max-w-[400px] flex flex-col items-center justify-center py-12 px-6 rounded-xl bg-gradient-to-br from-slate-900/80 to-slate-950 border border-slate-800">
-        <div class="flex flex-col items-center gap-6">
-          <svg class="w-28 h-28 text-emerald-500/90 drop-shadow-[0_0_16px_rgba(16,185,129,0.25)]" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-            <path d="M14 56V24l14 16 14-16 14 16 14-16" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-            <circle cx="40" cy="40" r="36" stroke="currentColor" stroke-width="1.5" stroke-opacity="0.2" fill="none"/>
-          </svg>
-          <div class="text-center">
-            <h1 class="text-2xl font-bold tracking-tight text-slate-100">TiddeliTrade</h1>
-            <p class="mt-1 text-sm text-slate-500">IG Index trading with rules</p>
-          </div>
-          <p id="splashHint" class="text-slate-500 text-sm">Press Start to connect</p>
-        </div>
-      </section>
-      <section id="dealPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[200px] max-w-[320px] hidden">
+      <div id="tradeManualSection" class="trade-layout-manual hidden">
+        <p class="trade-manual-heading text-[11px] text-slate-500 col-span-full mb-0">Manual trade — market deals and working orders (disabled while a rules engine is running).</p>
+      <section id="dealPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-0 w-full hidden">
         <div class="flex items-center justify-between mb-2">
           <h3 class="text-sm font-semibold text-slate-400">Deal</h3>
           <span id="dealCurrency" class="text-xs text-slate-500" data-tooltip="Trading currency for this instrument">—</span>
@@ -568,7 +576,7 @@
               <option value="rate">Rate (price)</option>
               <option value="pct">%</option>
             </select>
-            <label for="dealTakeProfit" class="text-slate-500" data-tooltip="Take profit – gain in £, price level, or % (optional)">Take profit</label>
+            <label for="dealTakeProfit" class="text-slate-500" data-tooltip="Take profit – gain in deal currency, price level, or % (optional). Disabled when dynamic stop loss is on.">Take profit</label>
             <div class="flex flex-col gap-0.5">
               <input type="text" id="dealTakeProfit" placeholder="—" class="px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-mono placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 outline-none">
               <span id="dealTpWarning" class="text-xs text-amber-500 hidden">Take profit would result in a loss</span>
@@ -582,6 +590,20 @@
               <input type="datetime-local" id="dealCloseAt" class="flex-1 min-w-0 px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none">
               <button type="button" id="dealCloseAtClear" class="shrink-0 p-1.5 rounded text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition-colors" title="Clear scheduled close" aria-label="Clear scheduled close">×</button>
             </div>
+            <div class="col-span-2 border-t border-slate-700/60 pt-2 mt-1 space-y-2">
+              <div class="flex items-center gap-2">
+                <input type="checkbox" id="dealDynamicStopLoss" class="rounded bg-slate-800 border-slate-600 text-emerald-500 focus:ring-emerald-500">
+                <label for="dealDynamicStopLoss" class="text-slate-400 text-xs cursor-pointer" data-tooltip="Manual deals and orders: trail profit via IG stop (no take profit). Separate from BUY/SELL rules engines. App must stay running.">Dynamic stop loss</label>
+              </div>
+              <div id="dealDynamicStopLossFields" class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 items-center text-xs hidden">
+                <label for="dealDynamicStopLossTrigger" class="text-slate-500" data-tooltip="When unrealized profit reaches this (deal currency), start trailing the stop">Trigger profit</label>
+                <input type="text" id="dealDynamicStopLossTrigger" placeholder="e.g. 3" class="px-2 py-1 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-mono placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 outline-none">
+                <label for="dealDynamicStopLossLock" class="text-slate-500" data-tooltip="First locked profit once trigger is hit; then trails as profit grows">Lock profit</label>
+                <input type="text" id="dealDynamicStopLossLock" placeholder="e.g. 1" class="px-2 py-1 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-mono placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 outline-none">
+                <span class="text-slate-500 col-span-2 text-[10px] leading-snug" data-tooltip="Values in deal currency (same as TP/SL value mode). IG may reject stops too close to market; previous stop is kept.">Profit in deal currency. TP disabled while on.</span>
+              </div>
+              <p id="dealDynamicStopLossStatus" class="text-[10px] text-slate-500 font-mono hidden"></p>
+            </div>
           </div>
           <p id="dealLiveWarning" class="hidden mt-2 text-xs text-amber-400" data-tooltip="Trades will execute on your live IG account">Real money – trades will execute on your live account</p>
           <button type="submit" id="dealPlaceBtn" class="w-full mt-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
@@ -590,7 +612,7 @@
           <p id="dealMessage" class="mt-2 text-sm text-amber-400 hidden break-words min-w-0 max-w-full"></p>
         </form>
       </section>
-      <section id="orderPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-[200px] max-w-[320px] hidden">
+      <section id="orderPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-0 w-full hidden">
         <h3 class="text-sm font-semibold text-slate-400 mb-2">Order</h3>
         <p id="orderEngineActiveMsg" class="text-xs text-amber-400 mb-2 hidden" data-tooltip="Rules engine is running – manual trading disabled">Rules engine running – manual trading disabled</p>
         <form id="orderForm" class="space-y-2 text-sm min-w-0">
@@ -613,7 +635,7 @@
               <option value="rate">Rate (price)</option>
               <option value="pct">%</option>
             </select>
-            <label for="orderTakeProfit" class="text-slate-500" data-tooltip="Take profit level when position fills. Optional.">Take profit</label>
+            <label for="orderTakeProfit" class="text-slate-500" data-tooltip="Take profit when order fills. Disabled when dynamic stop loss is on.">Take profit</label>
             <input type="text" id="orderTakeProfit" placeholder="—" class="px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-mono placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 outline-none">
             <label for="orderStopLoss" class="text-slate-500" data-tooltip="Stop loss level when position fills. Optional.">Stop loss</label>
             <input type="text" id="orderStopLoss" placeholder="—" class="px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-mono placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 outline-none">
@@ -627,6 +649,20 @@
               <input type="datetime-local" id="orderStopAt" class="flex-1 min-w-0 px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none">
               <button type="button" id="orderStopAtClear" class="shrink-0 p-1.5 rounded text-slate-400 hover:text-slate-200 hover:bg-slate-700 transition-colors" title="Clear good till" aria-label="Clear good till">×</button>
             </div>
+            <div class="col-span-2 border-t border-slate-700/60 pt-2 mt-1 space-y-2">
+              <div class="flex items-center gap-2">
+                <input type="checkbox" id="orderDynamicStopLoss" class="rounded bg-slate-800 border-slate-600 text-emerald-500 focus:ring-emerald-500">
+                <label for="orderDynamicStopLoss" class="text-slate-400 text-xs cursor-pointer" data-tooltip="Manual orders: same setting as Deal panel (not BUY/SELL rules). App must stay running.">Dynamic stop loss</label>
+              </div>
+              <div id="orderDynamicStopLossFields" class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 items-center text-xs hidden">
+                <label for="orderDynamicStopLossTrigger" class="text-slate-500" data-tooltip="When unrealized profit reaches this (deal currency), start trailing the stop">Trigger profit</label>
+                <input type="text" id="orderDynamicStopLossTrigger" placeholder="e.g. 3" class="px-2 py-1 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-mono placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 outline-none">
+                <label for="orderDynamicStopLossLock" class="text-slate-500" data-tooltip="First locked profit once trigger is hit; then trails as profit grows">Lock profit</label>
+                <input type="text" id="orderDynamicStopLossLock" placeholder="e.g. 1" class="px-2 py-1 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-mono placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 outline-none">
+                <span class="text-slate-500 col-span-2 text-[10px] leading-snug" data-tooltip="Values in deal currency. Trailing starts when the order fills and becomes a position.">Profit in deal currency. TP disabled while on.</span>
+              </div>
+              <p id="orderDynamicStopLossStatus" class="text-[10px] text-slate-500 font-mono hidden"></p>
+            </div>
           </div>
           <button type="submit" id="orderPlaceBtn" class="w-full mt-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
             Place order
@@ -634,7 +670,122 @@
           <p id="orderMessage" class="mt-2 text-sm text-amber-400 hidden break-words min-w-0 max-w-full"></p>
         </form>
       </section>
-      <p id="mainPlaceholder" class="text-slate-500 text-sm self-center">Start to connect and log in.</p>
+      </div>
+      </div>
+      <div id="researchViewRoot" class="flex flex-wrap gap-4 items-start w-full min-w-0 hidden">
+      <section id="testRulesPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 flex-1 min-w-[320px] max-w-full hidden">
+        <div class="flex flex-wrap items-start justify-between gap-2 mb-2">
+          <div>
+            <h3 class="text-sm font-semibold text-violet-300">Research</h3>
+            <p class="text-[11px] text-slate-500 mt-0.5">Record prices and run simulated backtests — no orders sent to IG.</p>
+          </div>
+          <button type="button" id="researchOpenTradeRulesBtn" class="shrink-0 px-2 py-1 rounded text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 border border-slate-600" data-tooltip="Switch to Trade tab to edit BUY/SELL rules and probe periods">Edit rules on Trade →</button>
+        </div>
+        <p class="text-[10px] text-amber-500/90 mb-2 border border-amber-700/40 rounded px-2 py-1 bg-amber-950/30" data-tooltip="Uses saved rules from the Trade tab. When dynamic stop loss is enabled per direction, backtest simulates trailing stop on 1s samples (may differ from live IG).">Simulated only. Backtest uses Trade-tab rules; dynamic stop loss is simulated when enabled (see report).</p>
+        <div class="flex flex-wrap items-center gap-2 mb-2">
+          <button type="button" id="testRulesRecordBtn" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-slate-700" data-tooltip="Record price data to database at 1/sec for later replay. Requires streaming and instrument selected.">Record</button>
+          <button type="button" id="testRulesButton2" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Run backtest on recorded samples using current rules and probe periods">Analyse recording</button>
+          <span id="testRulesRecordedCount" class="text-xs text-slate-500" data-tooltip="Total recorded samples for current instrument in database">—</span>
+        </div>
+        <div class="flex flex-col gap-1 mb-2 text-xs">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="text-slate-500" data-tooltip="Grouped by instrument; each line shows instrument, then its days below">Days (all instruments)</span>
+            <button type="button" id="testRulesLoadDays" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300" data-tooltip="Load days with recorded data from all instruments">Load days</button>
+            <span class="text-[10px] text-slate-500" data-tooltip="Chart opens recorded mid price for that day — no backtest needed">Chart = price diagram</span>
+            <button type="button" id="testRulesSelectAllDays" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 hidden">Select all</button>
+            <button type="button" id="testRulesClearDays" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 hidden">Clear</button>
+            <button type="button" id="testRulesDeleteSelectedDays" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 hidden" data-tooltip="Delete selected days from the database">Delete selected</button>
+            <span class="text-slate-500">Prune:</span>
+            <input type="number" id="testRulesPruneMinCount" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono w-20 text-xs" min="0" placeholder="3600" data-tooltip="Remove days with fewer than this many samples (e.g. 3600 ≈ 1 hour)">
+            <button type="button" id="testRulesPruneBtn" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300" data-tooltip="Remove days with fewer than the threshold samples">Prune sparse</button>
+          </div>
+          <div id="testRulesDaysList" class="flex flex-col gap-0.5 max-h-36 overflow-y-auto" data-tooltip="Grouped by instrument. Select days for current instrument to analyse."></div>
+          <div class="flex flex-wrap items-center gap-2 text-slate-500">
+            <label for="testRulesFromDate">Or range:</label>
+            <input type="date" id="testRulesFromDate" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono w-28">
+            <span>to</span>
+            <input type="date" id="testRulesToDate" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono w-28">
+          </div>
+          <div class="flex flex-col gap-1">
+            <span class="text-slate-500 text-[11px]">Rule sets to analyse:</span>
+            <div class="flex items-center gap-4">
+              <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="testRulesBacktestBuy" checked class="rounded bg-slate-800 border-slate-600 text-emerald-500"><span class="text-emerald-400">BUY</span></label>
+              <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" id="testRulesBacktestSell" checked class="rounded bg-slate-800 border-slate-600 text-emerald-500"><span class="text-red-400">SELL</span></label>
+            </div>
+          </div>
+          <div class="flex flex-col gap-1">
+            <span class="text-slate-500 text-[11px]">Analysis mode:</span>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="radio" name="testRulesAnalysisMode" value="intraday" checked class="rounded bg-slate-800 border-slate-600 text-emerald-500">
+              <span class="text-slate-400" data-tooltip="Each day analysed independently. No positions carry over to the next day.">Intraday only</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="radio" name="testRulesAnalysisMode" value="carryover" class="rounded bg-slate-800 border-slate-600 text-emerald-500">
+              <span class="text-slate-400" data-tooltip="Positions can span days. Use fewer days for long runs.">Positions carry over</span>
+            </label>
+          </div>
+        </div>
+        <div id="backtestProfilesSection" class="mb-2 flex flex-col gap-1.5 text-xs border border-slate-700/80 rounded-lg p-2 bg-slate-900/60">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="text-slate-400 font-medium">Saved profiles</span>
+            <button type="button" id="backtestProfileSaveBtn" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-[11px]" data-tooltip="Save current Trade rules, probes, and Research analyse options">Save current…</button>
+            <button type="button" id="backtestProfileClearLoadBtn" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 text-[11px] hidden" data-tooltip="Stop using embedded profile rules; analyse from Trade tab again">Use Trade rules</button>
+            <span id="backtestProfileActiveLabel" class="text-violet-400/90 text-[11px] hidden"></span>
+          </div>
+          <ul id="backtestProfilesList" class="flex flex-col gap-0.5 max-h-36 overflow-y-auto text-[11px]"></ul>
+        </div>
+        <div class="flex flex-col gap-1">
+          <span class="text-xs text-slate-500">Recorded log</span>
+          <div id="testRulesLog" class="h-24 overflow-y-auto rounded-lg bg-slate-800 border border-slate-700 font-mono text-[11px]">
+            <table class="w-full border-collapse">
+              <thead class="sticky top-0 bg-slate-800 z-10">
+                <tr class="text-slate-500 border-b border-slate-700">
+                  <th class="text-left px-2 py-1.5 font-normal">Time</th>
+                  <th class="text-left px-2 py-1.5 font-normal">Buy</th>
+                  <th class="text-left px-2 py-1.5 font-normal">Sell</th>
+                  <th class="text-left px-2 py-1.5 font-normal">Mid</th>
+                  <th class="text-left px-2 py-1.5 font-normal">Spread</th>
+                </tr>
+              </thead>
+              <tbody id="testRulesLogBody" class="text-slate-400"></tbody>
+            </table>
+          </div>
+        </div>
+        <div id="testRulesReport" class="hidden mt-2 rounded-lg bg-slate-800 border border-slate-700 p-2 text-xs">
+          <h4 class="text-slate-400 font-medium mb-1.5">Backtest report <span class="text-violet-400/80 font-normal">(simulated)</span></h4>
+          <dl id="testRulesReportBody" class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-slate-300"></dl>
+          <div id="testRulesTradeListSection" class="hidden mt-2 pt-2 border-t-2 border-sky-700/50">
+            <h5 class="text-sky-300/90 font-medium mb-1" data-tooltip="Simulated trades from recorded prices — not your live transaction log. Click a row for the price chart.">
+              Simulated trades <span id="testRulesTradeListCount" class="text-slate-500 font-normal"></span>
+            </h5>
+            <p id="testRulesTradeListHint" class="text-[10px] text-sky-400/90 mb-1 hidden">Click a trade for entry/exit chart, or a no-trade day for that day&apos;s price chart.</p>
+            <ul id="testRulesTradeList" class="text-slate-300 space-y-0.5 font-mono text-[11px] max-h-72 overflow-y-auto min-h-[2.5rem] rounded bg-slate-900/50 border border-slate-700/80 p-1"></ul>
+          </div>
+          <div id="testRulesQualitySection" class="hidden mt-2 pt-2 border-t border-slate-700">
+            <h5 class="text-amber-400/90 font-medium mb-1" data-tooltip="Checks recorded samples for gaps, sparse days, and price glitches before trusting backtest results.">Recording quality</h5>
+            <ul id="testRulesQualitySummary" class="text-amber-200/90 space-y-0.5 text-[11px] leading-relaxed mb-1.5"></ul>
+            <ul id="testRulesQualityDays" class="text-slate-400 space-y-0.5 text-[11px] font-mono hidden"></ul>
+          </div>
+          <div id="testRulesBlockerSection" class="hidden mt-2 pt-2 border-t border-slate-700">
+            <h5 class="text-slate-500 font-medium mb-1" data-tooltip="Sample counts where you were flat and rules failed: for each row, that condition was the only failing rule (legacy list or BUY/SELL set). Market-closed blocks are not counted here.">Sole blockers (trim candidates)</h5>
+            <ul id="testRulesBlockerList" class="text-slate-400 space-y-0.5"></ul>
+          </div>
+        </div>
+      </section>
+      </div>
+      <section id="splashPanel" class="flex-1 min-w-[280px] max-w-[400px] flex flex-col items-center justify-center py-12 px-6 rounded-xl bg-gradient-to-br from-slate-900/80 to-slate-950 border border-slate-800">
+        <div class="flex flex-col items-center gap-6">
+          <svg class="w-28 h-28 text-emerald-500/90 drop-shadow-[0_0_16px_rgba(16,185,129,0.25)]" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M14 56V24l14 16 14-16 14 16 14-16" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="40" cy="40" r="36" stroke="currentColor" stroke-width="1.5" stroke-opacity="0.2" fill="none"/>
+          </svg>
+          <div class="text-center">
+            <h1 class="text-2xl font-bold tracking-tight text-slate-100">TiddeliTrade</h1>
+            <p class="mt-1 text-sm text-slate-500">IG Index trading with rules</p>
+          </div>
+          <p id="splashHint" class="text-slate-500 text-sm">Press Start to connect</p>
+        </div>
+      </section>
     </div>
   </main>
   <div id="logWindow" class="fixed bottom-0 left-0 right-0 flex flex-col bg-slate-950 border-t border-slate-800 font-mono text-[10px] leading-tight text-slate-500" style="height: 48px;" aria-label="Debug log">

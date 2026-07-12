@@ -9,7 +9,11 @@
     "dev": "ts-node src/index.ts",
     "watch": "tsc --watch",
     "dev:watch": "nodemon --config nodemon.json",
-    "kill-port": "node scripts/kill-port.js"
+    "kill-port": "node scripts/kill-port.js",
+    "docker:build": "docker compose build",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f"
   },
   "keywords": [],
   "author": "",

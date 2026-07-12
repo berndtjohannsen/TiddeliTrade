@@ -2,6 +2,15 @@
  * Deal form, market details, confirm/error modals.
  */
 import { formatMoney, formatTimeWithTz, playSuccessSound } from './utils.js';
+import {
+  applyDynamicTpFromConfig,
+  applyDynamicTpUiState,
+  isDynamicTpEnabled,
+  isDynamicTpEnabledForDirection,
+  manualDynamicTpConfigPayload,
+  syncDynamicTpUi,
+  updateDynamicTpStatusDisplay
+} from './dynamicTpUi.js';
 
 export function initDeal(socket, state, log) {
   var dealPanel = document.getElementById('dealPanel');
@@ -14,6 +23,8 @@ export function initDeal(socket, state, log) {
   var dealErrorModal = document.getElementById('dealErrorModal');
   var dealErrorOk = document.getElementById('dealErrorOk');
   var pendingDealParams = null;
+  /** True when confirm modal was opened from the rules engine (Place uses rules placement source). */
+  var pendingDealOpenFromRules = false;
 
   function showDealMessage(msg) {
     if (dealMessageEl) {
@@ -42,9 +53,14 @@ export function initDeal(socket, state, log) {
   }
   function setOrdersPanelEnabled(enabled) {
     var ordersList = document.getElementById('ordersPanel');
-    var orderForm = document.getElementById('orderPanel');
     if (ordersList) ordersList.classList.toggle('hidden', !enabled);
-    if (orderForm) orderForm.classList.toggle('hidden', !enabled);
+  }
+  function setDealPanelVisible(visible) {
+    var manualSection = document.getElementById('tradeManualSection');
+    if (manualSection) manualSection.classList.toggle('hidden', !visible);
+    if (dealPanel) dealPanel.classList.toggle('hidden', !visible);
+    var orderForm = document.getElementById('orderPanel');
+    if (orderForm) orderForm.classList.toggle('hidden', !visible);
   }
 
   socket.on('marketDetails', function (data) {
@@ -88,6 +104,12 @@ export function initDeal(socket, state, log) {
     });
   }
 
+  function updateDealDynamicSlUi() {
+    applyDynamicTpUiState();
+    updateDealEstimateDisplay();
+    updateDynamicTpStatusDisplay(state);
+  }
+
   function getDealSettings() {
     var directionEl = document.getElementById('dealDirection');
     var sizeEl = document.getElementById('dealSize');
@@ -95,7 +117,7 @@ export function initDeal(socket, state, log) {
     var tpEl = document.getElementById('dealTakeProfit');
     var slEl = document.getElementById('dealStopLoss');
     var closeAtEl = document.getElementById('dealCloseAt');
-    return {
+    var base = {
       dealDirection: directionEl ? directionEl.value : 'BUY',
       dealSize: sizeEl ? sizeEl.value.trim() : '',
       dealTpSlMode: modeEl ? modeEl.value : 'value',
@@ -103,6 +125,7 @@ export function initDeal(socket, state, log) {
       dealStopLoss: slEl ? slEl.value.trim() : '',
       dealCloseAt: closeAtEl && closeAtEl.value ? closeAtEl.value : ''
     };
+    return Object.assign(base, manualDynamicTpConfigPayload());
   }
 
   function isCloseAtInPast(closeAtStr) {
@@ -119,7 +142,16 @@ export function initDeal(socket, state, log) {
     if (closeAt && isCloseAtInPast(closeAt)) closeAt = '';
     fetch('/api/config').then(function (r) { return r.json(); }).then(function (cfg) {
       var instruments = (cfg.ui && cfg.ui.instruments) ? { ...cfg.ui.instruments } : {};
-      instruments[epic] = { ...(instruments[epic] || {}), dealDirection: s.dealDirection, dealSize: s.dealSize, dealTpSlMode: s.dealTpSlMode, dealTakeProfit: s.dealTakeProfit, dealStopLoss: s.dealStopLoss, dealCloseAt: (closeAt && closeAt.trim()) ? closeAt : null };
+      instruments[epic] = {
+        ...(instruments[epic] || {}),
+        dealDirection: s.dealDirection,
+        dealSize: s.dealSize,
+        dealTpSlMode: s.dealTpSlMode,
+        dealTakeProfit: s.dealTakeProfit,
+        dealStopLoss: s.dealStopLoss,
+        dealCloseAt: (closeAt && closeAt.trim()) ? closeAt : null,
+        ...manualDynamicTpConfigPayload()
+      };
       return fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -134,7 +166,15 @@ export function initDeal(socket, state, log) {
       if (!epic && cfg.epic) epic = cfg.epic;
       var ui = cfg.ui || {};
       var inst = (epic && ui.instruments && ui.instruments[epic]) ? ui.instruments[epic] : {};
-      var s = { dealDirection: inst.dealDirection || ui.dealDirection, dealSize: inst.dealSize != null ? inst.dealSize : ui.dealSize, dealTpSlMode: inst.dealTpSlMode || ui.dealTpSlMode, dealTakeProfit: inst.dealTakeProfit != null ? inst.dealTakeProfit : ui.dealTakeProfit, dealStopLoss: inst.dealStopLoss != null ? inst.dealStopLoss : ui.dealStopLoss, dealCloseAt: (inst.dealCloseAt != null && inst.dealCloseAt !== '') ? inst.dealCloseAt : '' };
+      var s = {
+        dealDirection: inst.dealDirection || ui.dealDirection,
+        dealSize: inst.dealSize != null ? inst.dealSize : ui.dealSize,
+        dealTpSlMode: inst.dealTpSlMode || ui.dealTpSlMode,
+        dealTakeProfit: inst.dealTakeProfit != null ? inst.dealTakeProfit : ui.dealTakeProfit,
+        dealStopLoss: inst.dealStopLoss != null ? inst.dealStopLoss : ui.dealStopLoss,
+        dealCloseAt: (inst.dealCloseAt != null && inst.dealCloseAt !== '') ? inst.dealCloseAt : '',
+      };
+      applyDynamicTpFromConfig(inst, ui);
       var directionEl = document.getElementById('dealDirection');
       var sizeEl = document.getElementById('dealSize');
       var modeEl = document.getElementById('dealTpSlMode');
@@ -155,6 +195,7 @@ export function initDeal(socket, state, log) {
         }
       }
       updateTpSlPlaceholders();
+      updateDealDynamicSlUi();
       updateDealEstimateDisplay();
     }).catch(function () {});
   }
@@ -192,6 +233,28 @@ export function initDeal(socket, state, log) {
       }
     }
   });
+  var dealDynamicStopLoss = document.getElementById('dealDynamicStopLoss');
+  if (dealDynamicStopLoss) {
+    dealDynamicStopLoss.addEventListener('change', function () {
+      syncDynamicTpUi('deal');
+      updateDealDynamicSlUi();
+      saveDealSettings();
+    });
+  }
+  ['dealDynamicStopLossTrigger', 'dealDynamicStopLossLock'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) {
+      el.addEventListener('change', function () {
+        syncDynamicTpUi('deal');
+        saveDealSettings();
+      });
+      el.addEventListener('input', function () {
+        syncDynamicTpUi('deal');
+        saveDealSettings();
+      });
+    }
+  });
+
   var dealCloseAtEl = document.getElementById('dealCloseAt');
   if (dealCloseAtEl) {
     dealCloseAtEl.addEventListener('change', function () {
@@ -341,7 +404,10 @@ export function initDeal(socket, state, log) {
       }
     }
     document.getElementById('confirmSize').textContent = params.size + (state.currentDealCurrency ? ' ' + state.currentDealCurrency : '');
-    document.getElementById('confirmTakeProfit').textContent = params.takeProfit || '—';
+    var dslOn = pendingDealOpenFromRules
+      ? isDynamicTpEnabledForDirection(params.direction)
+      : isDynamicTpEnabled('manual');
+    document.getElementById('confirmTakeProfit').textContent = dslOn ? '— (dynamic stop loss)' : (params.takeProfit || '—');
     document.getElementById('confirmStopLoss').textContent = params.stopLoss || '—';
     document.getElementById('confirmCloseAt').textContent = params.closeAt ? formatTimeWithTz(params.closeAt) : '—';
     var sizeNum = parseFloat(params.size) || 0;
@@ -415,6 +481,7 @@ export function initDeal(socket, state, log) {
 
   function hideDealConfirmModal() {
     pendingDealParams = null;
+    pendingDealOpenFromRules = false;
     if (dealConfirmModal) {
       dealConfirmModal.classList.add('hidden');
       dealConfirmModal.setAttribute('aria-hidden', 'true');
@@ -500,15 +567,21 @@ export function initDeal(socket, state, log) {
       bid: (state.currentBid != null && !isNaN(state.currentBid)) ? state.currentBid : undefined,
       offer: (state.currentOffer != null && !isNaN(state.currentOffer)) ? state.currentOffer : undefined
     };
+    var dslOn = overrides && overrides.fromRules
+      ? isDynamicTpEnabledForDirection(direction)
+      : isDynamicTpEnabled('manual');
+    if (dslOn) delete params.takeProfit;
     if (!params.takeProfit) delete params.takeProfit;
     if (!params.stopLoss) delete params.stopLoss;
     if (!params.closeAt) delete params.closeAt;
+    if (overrides && overrides.fromRules) params.source = 'rules';
     return { ok: true, params: params };
   }
 
   function buildDealParamsAndShowConfirm(overrides) {
     var r = buildDealParams(overrides);
     if (r.ok) {
+      pendingDealOpenFromRules = !!(overrides && overrides.ruleSet);
       showDealConfirmModal(r.params);
       if (overrides && overrides.ruleSet) {
         log('Rules engine: opened deal confirm (' + r.params.direction + ' ' + r.params.size + ' ' + r.params.epic + ')');
@@ -536,6 +609,7 @@ export function initDeal(socket, state, log) {
     dealInProgress = true;
     state.dealInProgress = true;
     lastDealFromRulesEngine = true;
+    state.pendingDealPlacementSource = 'rules';
     log('Rules engine: submitting deal to server (' + params.direction + ' ' + params.size + ' ' + params.epic + ')');
     socket.emit('placeDeal', params);
     return true;
@@ -555,6 +629,8 @@ export function initDeal(socket, state, log) {
       return;
     }
     if (pendingDealParams) {
+      state.pendingDealPlacementSource = pendingDealOpenFromRules ? 'rules' : 'manual';
+      pendingDealOpenFromRules = false;
       lastDealFromRulesEngine = false;
       dealInProgress = true;
       state.dealInProgress = true;
@@ -608,6 +684,18 @@ export function initDeal(socket, state, log) {
     dealInProgress = false;
     state.dealInProgress = false;
     clearDealMessage();
+    var src = state.pendingDealPlacementSource;
+    state.pendingDealPlacementSource = null;
+    state.dealJustPlaced = {
+      source: src || 'manual',
+      dealId: data && data.dealId,
+      epic: data && data.epic,
+      direction: data && data.direction
+    };
+    if ((src || 'manual') === 'rules' && data && data.epic) {
+      state.pendingRulesPositionEpic = data.epic;
+      state.pendingRulesPositionSinceMs = Date.now();
+    }
     if (lastDealFromRulesEngine) {
       lastDealFromRulesEngine = false;
       playSuccessSound();
@@ -619,6 +707,11 @@ export function initDeal(socket, state, log) {
     dealInProgress = false;
     state.dealInProgress = false;
     lastDealFromRulesEngine = false;
+    state.pendingDealPlacementSource = null;
+    if (!(msg && String(msg).toLowerCase().indexOf('already have') >= 0)) {
+      state.pendingRulesPositionEpic = null;
+      state.pendingRulesPositionSinceMs = null;
+    }
     hideDealConfirmModal();
     var errText = document.getElementById('dealErrorText');
     var errModal = document.getElementById('dealErrorModal');
@@ -634,16 +727,24 @@ export function initDeal(socket, state, log) {
     dealInProgress = false;
     state.dealInProgress = false;
     lastDealFromRulesEngine = false;
+    state.pendingDealPlacementSource = null;
+    state.dealJustPlaced = null;
+    state.pendingRulesPositionEpic = null;
+    state.pendingRulesPositionSinceMs = null;
   });
 
   return {
     setDealEnabled,
     setPositionsEnabled,
     setOrdersPanelEnabled,
+    setDealPanelVisible,
     showDealMessage,
     clearDealMessage,
     triggerDealConfirm: buildDealParamsAndShowConfirm,
     placeDealDirect,
-    loadDealSettings
+    loadDealSettings,
+    updateDynamicStopLossStatusDisplay: function () {
+      updateDynamicTpStatusDisplay(state);
+    }
   };
 }

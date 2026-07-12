@@ -40,5 +40,17 @@ export const state = {
   /** Trading rules engine: true when rules can place deals. Used to block epic/watchlist change. */
   rulesEngineRunning: false,
   /** Deal placement in progress (waiting for confirmation). Blocks rules engine from re-triggering. */
-  dealInProgress: false
+  dealInProgress: false,
+  /** Set just before emit: 'rules' | 'manual' — cleared when deal_placed/deal_error runs. */
+  pendingDealPlacementSource: null,
+  /** Last accepted deal metadata for rules UI (e.g. track rules-originated deal ids). Cleared by tradingRules on deal_placed. */
+  dealJustPlaced: null,
+  /** Server dynamic SL status per open deal (dealId, highestLockApplied, lastMessage, …). */
+  dynamicStopLossStatus: [],
+  /**
+   * Rules engine: IG accepted a deal but `currentPositions` may not include it yet — treat as "has position"
+   * for this epic until the positions list catches up (avoids double-submit). Cleared when epic appears or timeout.
+   */
+  pendingRulesPositionEpic: null,
+  pendingRulesPositionSinceMs: null
 };

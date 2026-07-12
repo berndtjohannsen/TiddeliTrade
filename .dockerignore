@@ -1,0 +1,17 @@
+node_modules
+dist
+.git
+.github
+.env
+config.json
+scheduled-closes.json
+transactions.json
+*.db
+*.log
+ignore.txt
+.cursor
+docker-data
+data
+README.md
+design.md
+readme.md
