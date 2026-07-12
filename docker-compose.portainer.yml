@@ -1,0 +1,35 @@
+# Portainer stack — deploy from Git (recommended)
+#
+# Portainer → Stacks → Add stack → Git repository:
+#   URL:    https://github.com/berndtjohannsen/TiddeliTrade.git
+#   Ref:    main
+#   Path:   docker-compose.portainer.yml
+#
+# App URL: http://<server-host>:3002
+# First run: open Settings in the UI and enter IG credentials (stored in the volume).
+
+services:
+  tiddelitrade:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tiddelitrade:latest
+    container_name: tiddelitrade
+    ports:
+      - "3002:3000"
+    environment:
+      PORT: "3000"
+      TIDDELI_DATA_DIR: /app/data
+      NODE_ENV: production
+    volumes:
+      - tiddelitrade-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  tiddelitrade-data:
