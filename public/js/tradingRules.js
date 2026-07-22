@@ -411,33 +411,39 @@ export function buildPayloadFromStrategy(strategy, analyseOptions) {
 
 /** Engine safety settings from Trade tab DOM (used by backtest analyse). */
 export function readEngineControlsFromDom() {
-  var autoStopCheck = document.getElementById('tradingRulesAutoStop');
-  var autoStopCheckSell = document.getElementById('tradingRulesAutoStopSell');
-  var autoStopMinutesInput = document.getElementById('tradingRulesAutoStopMinutes');
-  var autoStopMinutesInputSell = document.getElementById('tradingRulesAutoStopMinutesSell');
   var pauseOnLossInput = document.getElementById('tradingRulesPauseOnLoss');
-  var pauseOnLossInputSell = document.getElementById('tradingRulesPauseOnLossSell');
-  var stopAfterLossBuyCheck = document.getElementById('tradingRulesStopAfterLossBuy');
-  var stopAfterLossSellCheck = document.getElementById('tradingRulesStopAfterLossSell');
+  var stopAfterLossCheck = document.getElementById('tradingRulesStopAfterLoss');
+  var scheduleStart = document.getElementById('tradingRulesScheduleStart');
+  var scheduleStop = document.getElementById('tradingRulesScheduleStop');
+  var scheduleRepeat = document.getElementById('tradingRulesScheduleRepeatDaily');
   function parsePause(input) {
     if (!input || !input.value.trim()) return 0;
     var n = parseInt(input.value, 10);
     return !isNaN(n) && n >= 0 ? Math.min(n, 86400) : 0;
   }
-  function parseAutoStopMins(input) {
-    if (!input || !input.value.trim()) return 60;
-    var n = parseInt(input.value, 10);
-    return !isNaN(n) && n >= 0 ? Math.min(n, 1440) : 60;
-  }
+  var stopAfter = !!(stopAfterLossCheck && stopAfterLossCheck.checked);
+  var pauseSec = parsePause(pauseOnLossInput);
   return {
-    stopAfterLossBuy: !!(stopAfterLossBuyCheck && stopAfterLossBuyCheck.checked),
-    stopAfterLossSell: !!(stopAfterLossSellCheck && stopAfterLossSellCheck.checked),
-    autoStopEnabledBuy: autoStopCheck ? autoStopCheck.checked !== false : true,
-    autoStopEnabledSell: autoStopCheckSell ? autoStopCheckSell.checked !== false : true,
-    autoStopBeforeMinutesBuy: parseAutoStopMins(autoStopMinutesInput),
-    autoStopBeforeMinutesSell: parseAutoStopMins(autoStopMinutesInputSell),
-    pauseOnLossSecondsBuy: parsePause(pauseOnLossInput),
-    pauseOnLossSecondsSell: parsePause(pauseOnLossInputSell)
+    stopAfterLossBuy: stopAfter,
+    stopAfterLossSell: stopAfter,
+    pauseOnLossSecondsBuy: pauseSec,
+    pauseOnLossSecondsSell: pauseSec,
+    scheduleStartTime: scheduleStart && scheduleStart.value ? scheduleStart.value : '',
+    scheduleStopTime: scheduleStop && scheduleStop.value ? scheduleStop.value : '',
+    scheduleRepeatDaily: scheduleRepeat ? scheduleRepeat.checked !== false : true,
+    scheduleTimezone: typeof Intl !== 'undefined' && Intl.DateTimeFormat
+      ? Intl.DateTimeFormat().resolvedOptions().timeZone
+      : undefined,
+    scheduleActiveDate: (function () {
+      var repeatEl = document.getElementById('tradingRulesScheduleRepeatDaily');
+      var startEl = document.getElementById('tradingRulesScheduleStart');
+      var stopEl = document.getElementById('tradingRulesScheduleStop');
+      var hasLimits = (startEl && startEl.value) || (stopEl && stopEl.value);
+      if (repeatEl && repeatEl.checked) return '';
+      if (!hasLimits) return '';
+      var d = new Date();
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    })()
   };
 }
 
@@ -499,39 +505,46 @@ export function getRulesForBacktest() {
 
 export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled, setProbesPanelEnabled, setProbesBackfillEnabled, getProbeValues, triggerDealConfirm, placeDealDirect, log) {
   var toggleBtn = document.getElementById('tradingRulesToggle');
-  var toggleBtnSell = document.getElementById('tradingRulesToggleSell');
   var confirmCheck = document.getElementById('tradingRulesConfirmBeforePlace');
-  var confirmCheckSell = document.getElementById('tradingRulesConfirmBeforePlaceSell');
   var rulesBuyGroupsRoot = document.getElementById('tradingRulesBuyGroups');
   var rulesSellGroupsRoot = document.getElementById('tradingRulesSellGroups');
   var statusEl = document.getElementById('tradingRulesStatus');
   var statusSellEl = document.getElementById('tradingRulesStatusSell');
   var engineStatusEl = document.getElementById('tradingRulesEngineStatus');
-  var engineStatusSellEl = document.getElementById('tradingRulesEngineStatusSell');
   var rulesLockedMsg = document.getElementById('tradingRulesLockedMsg');
+  var rulesLockedMsgBuy = document.getElementById('tradingRulesLockedMsgBuy');
   var rulesLockedMsgSell = document.getElementById('tradingRulesLockedMsgSell');
   var dealEngineMsg = document.getElementById('dealEngineActiveMsg');
   var orderEngineMsg = document.getElementById('orderEngineActiveMsg');
-  var autoStopCheck = document.getElementById('tradingRulesAutoStop');
-  var autoStopCheckSell = document.getElementById('tradingRulesAutoStopSell');
-  var autoStopMinutesInput = document.getElementById('tradingRulesAutoStopMinutes');
-  var autoStopMinutesInputSell = document.getElementById('tradingRulesAutoStopMinutesSell');
   var pauseOnLossInput = document.getElementById('tradingRulesPauseOnLoss');
-  var pauseOnLossInputSell = document.getElementById('tradingRulesPauseOnLossSell');
-  var stopAfterLossBuyCheck = document.getElementById('tradingRulesStopAfterLossBuy');
-  var stopAfterLossSellCheck = document.getElementById('tradingRulesStopAfterLossSell');
+  var stopAfterLossCheck = document.getElementById('tradingRulesStopAfterLoss');
+  var scheduleStartInput = document.getElementById('tradingRulesScheduleStart');
+  var scheduleStopInput = document.getElementById('tradingRulesScheduleStop');
+  var scheduleRepeatCheck = document.getElementById('tradingRulesScheduleRepeatDaily');
+  var scheduleStatusEl = document.getElementById('tradingRulesScheduleStatus');
+  var commonPanelInputs = [
+    confirmCheck,
+    pauseOnLossInput,
+    stopAfterLossCheck,
+    scheduleStartInput,
+    scheduleStopInput,
+    scheduleRepeatCheck
+  ];
+  /** When repeat-daily is off, schedule applies only on this calendar day (local). */
+  var scheduleActiveDate = null;
   /** dealId → 'buy' | 'sell' for deals placed by the rules engine (tracked until position closes). */
   var rulesPlacedDealIds = Object.create(null);
   var baseEnabled = false;
-  var rulesRunningBuy = false;
-  var rulesRunningSell = false;
+  var rulesEngineRunning = false;
+  var buyEnabledCheck = document.getElementById('tradingRulesBuyEnabled');
+  var sellEnabledCheck = document.getElementById('tradingRulesSellEnabled');
   var sleepPreventionStatus = null;
   var prevRulesPass = false;
   var prevBlocked = false;
   /** Suppress rapid re-fires when pass/blocked flicker (e.g. positions poll) without a stable pass→fail cycle. */
   var RULES_DEAL_ATTEMPT_COOLDOWN_MS = 8000;
   var lastRulesDealAttemptMs = 0;
-  var autoStopTimerId = null;
+  var scheduleTimerId = null;
   var pauseOnLossTimerId = null;
   var pausedUntil = null;
   var draggedRuleWrap = null;
@@ -541,30 +554,127 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   var setOrderEnabledFn = typeof setOrderEnabled === 'function' ? setOrderEnabled : function () {};
   var setProbesBackfillEnabledFn = typeof setProbesBackfillEnabled === 'function' ? setProbesBackfillEnabled : function () {};
 
-  function getPauseOnLossSeconds() {
-    var buySec = 0, sellSec = 0;
-    if (pauseOnLossInput && pauseOnLossInput.value.trim()) { var n = parseInt(pauseOnLossInput.value, 10); buySec = !isNaN(n) && n >= 0 ? Math.min(n, 86400) : 0; }
-    if (pauseOnLossInputSell && pauseOnLossInputSell.value.trim()) { var m = parseInt(pauseOnLossInputSell.value, 10); sellSec = !isNaN(m) && m >= 0 ? Math.min(m, 86400) : 0; }
-    return Math.max(buySec, sellSec);
+  function getRulesBuyEnabled() {
+    return !buyEnabledCheck || buyEnabledCheck.checked !== false;
   }
 
-  function getPauseOnLossSecondsBuy() {
+  function getRulesSellEnabled() {
+    return !sellEnabledCheck || sellEnabledCheck.checked !== false;
+  }
+
+  function isBuyActive() {
+    return rulesEngineRunning && getRulesBuyEnabled();
+  }
+
+  function isSellActive() {
+    return rulesEngineRunning && getRulesSellEnabled();
+  }
+
+  function getPauseOnLossSeconds() {
     if (!pauseOnLossInput || !pauseOnLossInput.value.trim()) return 0;
     var n = parseInt(pauseOnLossInput.value, 10);
     return !isNaN(n) && n >= 0 ? Math.min(n, 86400) : 0;
   }
 
-  function getPauseOnLossSecondsSell() {
-    if (!pauseOnLossInputSell || !pauseOnLossInputSell.value.trim()) return 0;
-    var n = parseInt(pauseOnLossInputSell.value, 10);
-    return !isNaN(n) && n >= 0 ? Math.min(n, 86400) : 0;
+  function localDateKey(d) {
+    var y = d.getFullYear();
+    var m = d.getMonth() + 1;
+    var day = d.getDate();
+    return y + '-' + (m < 10 ? '0' : '') + m + '-' + (day < 10 ? '0' : '') + day;
   }
 
-  function getAutoStopBeforeMinutes(panel) {
-    var input = panel === 'sell' ? autoStopMinutesInputSell : autoStopMinutesInput;
-    if (!input || !input.value.trim()) return 60;
-    var n = parseInt(input.value, 10);
-    return !isNaN(n) && n >= 0 ? Math.min(n, 1440) : 60;
+  function parseScheduleTimeInput(input) {
+    if (!input || !input.value || !input.value.trim()) return null;
+    var parts = input.value.trim().split(':');
+    if (parts.length < 2) return null;
+    var h = parseInt(parts[0], 10);
+    var min = parseInt(parts[1], 10);
+    if (isNaN(h) || isNaN(min) || h < 0 || h > 23 || min < 0 || min > 59) return null;
+    return h * 60 + min;
+  }
+
+  function hasScheduleLimits() {
+    return parseScheduleTimeInput(scheduleStartInput) != null || parseScheduleTimeInput(scheduleStopInput) != null;
+  }
+
+  /** True when new deals may open (local time window). Blank start/stop = no limit. */
+  function isWithinScheduleWindow(nowMs) {
+    var startMin = parseScheduleTimeInput(scheduleStartInput);
+    var stopMin = parseScheduleTimeInput(scheduleStopInput);
+    if (startMin == null && stopMin == null) return true;
+    if (!scheduleRepeatCheck || !scheduleRepeatCheck.checked) {
+      if (scheduleActiveDate && localDateKey(new Date(nowMs)) !== scheduleActiveDate) return true;
+    }
+    var d = new Date(nowMs);
+    var nowMin = d.getHours() * 60 + d.getMinutes();
+    if (startMin != null && stopMin != null) {
+      if (startMin <= stopMin) return nowMin >= startMin && nowMin < stopMin;
+      return nowMin >= startMin || nowMin < stopMin;
+    }
+    if (startMin != null) return nowMin >= startMin;
+    return nowMin < stopMin;
+  }
+
+  function updateScheduleDisplay() {
+    if (!scheduleStatusEl) return;
+    if (!hasScheduleLimits()) {
+      scheduleStatusEl.textContent = 'No time limit';
+      scheduleStatusEl.title = 'Start and stop times blank — engine may run any time when started';
+      return;
+    }
+    var active = isWithinScheduleWindow(Date.now());
+    var startTxt = scheduleStartInput && scheduleStartInput.value ? scheduleStartInput.value : '—';
+    var stopTxt = scheduleStopInput && scheduleStopInput.value ? scheduleStopInput.value : '—';
+    var repeatTxt = scheduleRepeatCheck && scheduleRepeatCheck.checked ? 'daily' : 'today only';
+    scheduleStatusEl.textContent = active ? 'Active now (' + repeatTxt + ')' : 'Outside window (' + startTxt + '–' + stopTxt + ')';
+    scheduleStatusEl.title = active
+      ? 'Within schedule — new deals allowed'
+      : 'Outside schedule — no new deals until window opens';
+  }
+
+  /** True when local time is at or after the schedule stop (not merely before start). */
+  function isPastScheduleStop(nowMs) {
+    var startMin = parseScheduleTimeInput(scheduleStartInput);
+    var stopMin = parseScheduleTimeInput(scheduleStopInput);
+    if (stopMin == null) return false;
+    if (!scheduleRepeatCheck || !scheduleRepeatCheck.checked) {
+      if (scheduleActiveDate && localDateKey(new Date(nowMs)) !== scheduleActiveDate) return false;
+    }
+    var nowMin = new Date(nowMs).getHours() * 60 + new Date(nowMs).getMinutes();
+    if (startMin != null && stopMin != null && startMin <= stopMin && nowMin < startMin) return false;
+    return nowMin >= stopMin;
+  }
+
+  function checkScheduleStop() {
+    if (!rulesEngineRunning) return;
+    if (!hasScheduleLimits()) return;
+    if (!isPastScheduleStop(Date.now())) return;
+    rulesEngineRunning = false;
+    if (scheduleTimerId) {
+      clearInterval(scheduleTimerId);
+      scheduleTimerId = null;
+    }
+    updateToggleButton();
+    saveRules();
+    updateDealEnabled();
+    var logFn = typeof log === 'function' ? log : function () {};
+    logFn('Rules engine stopped (schedule end)');
+  }
+
+  function startScheduleTimer() {
+    if (scheduleTimerId) return;
+    updateScheduleDisplay();
+    scheduleTimerId = setInterval(function () {
+      updateScheduleDisplay();
+      checkScheduleStop();
+    }, 30000);
+  }
+
+  function clearScheduleTimer() {
+    if (scheduleTimerId) {
+      clearInterval(scheduleTimerId);
+      scheduleTimerId = null;
+    }
   }
 
   function computeRulesEstTpSl(direction, sizeEl, tpEl, slEl, modeEl) {
@@ -621,93 +731,6 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     updateOne(document.getElementById('rulesSellEstTpSl'), 'SELL', sellSize, sellTp, sellSl, sellMode);
   }
 
-  /** Next auto-stop instant: always strictly in the future. Rolls past stale defaultCloseAt / UTC-midnight math so the engine does not stop immediately after startup. */
-  function getStopAtForPanel(panel) {
-    var check = panel === 'sell' ? autoStopCheckSell : autoStopCheck;
-    if (!check || !check.checked) return null;
-    var beforeMs = getAutoStopBeforeMinutes(panel) * 60 * 1000;
-    var is24_7 = !!state.is24_7Market;
-    var now = Date.now();
-    if (is24_7) {
-      var t = new Date();
-      var y = t.getUTCFullYear();
-      var m = t.getUTCMonth();
-      var d = t.getUTCDate();
-      for (var k = 1; k <= 8; k++) {
-        var midnight = new Date(Date.UTC(y, m, d + k, 0, 0, 0, 0)).getTime();
-        var stopAt = midnight - beforeMs;
-        if (stopAt > now) return stopAt;
-      }
-      return null;
-    }
-    var closeAt = state.defaultCloseAt;
-    if (!closeAt) return null;
-    var closeMs = new Date(closeAt).getTime();
-    if (isNaN(closeMs)) return null;
-    for (var i = 0; i < 8; i++) {
-      var stopAt2 = closeMs - beforeMs;
-      if (stopAt2 > now) return stopAt2;
-      closeMs += 24 * 60 * 60 * 1000;
-    }
-    return null;
-  }
-
-  function getStopAt() {
-    var buyAt = (rulesRunningBuy ? getStopAtForPanel('buy') : null);
-    var sellAt = (rulesRunningSell ? getStopAtForPanel('sell') : null);
-    if (buyAt == null && sellAt == null) return null;
-    if (buyAt == null) return sellAt;
-    if (sellAt == null) return buyAt;
-    return Math.min(buyAt, sellAt);
-  }
-
-  function updateAutoStopDisplay() {
-    function showOne(el, panel) {
-      var stopAt = getStopAtForPanel(panel);
-      if (stopAt == null) {
-        if (el) { el.textContent = '—'; el.title = 'Auto-stop disabled or no market close time'; }
-      } else {
-        var d = new Date(stopAt);
-        var formatted = formatTimeWithTz(d.toISOString());
-        if (el) { el.textContent = 'Stops at ' + formatted; el.title = 'Engine will auto-stop at ' + formatted; }
-      }
-    }
-    showOne(document.getElementById('tradingRulesAutoStopTime'), 'buy');
-    showOne(document.getElementById('tradingRulesAutoStopTimeSell'), 'sell');
-  }
-
-  function checkAutoStop() {
-    if (!rulesRunningBuy && !rulesRunningSell) return;
-    var stopAt = getStopAt();
-    if (stopAt == null) return;
-    if (Date.now() >= stopAt) {
-      rulesRunningBuy = false;
-      rulesRunningSell = false;
-      if (autoStopTimerId) {
-        clearInterval(autoStopTimerId);
-        autoStopTimerId = null;
-      }
-      updateToggleButton();
-      saveRules();
-      updateDealEnabled();
-      var logFn = typeof log === 'function' ? log : function () {};
-      logFn('Rules engine auto-stopped');
-    }
-  }
-
-  function startAutoStopTimer() {
-    if (autoStopTimerId) return;
-    updateAutoStopDisplay();
-    autoStopTimerId = setInterval(checkAutoStop, 60000);
-  }
-
-  function clearAutoStopTimer() {
-    if (autoStopTimerId) {
-      clearInterval(autoStopTimerId);
-      autoStopTimerId = null;
-    }
-  }
-
   function getRuleSetsFromDom() {
     var buySize = document.getElementById('rulesBuySize');
     var buyTp = document.getElementById('rulesBuyTp');
@@ -741,36 +764,33 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
 
   function getConfig() {
     var runSets = [];
-    if (rulesRunningBuy) runSets.push('BUY');
-    if (rulesRunningSell) runSets.push('SELL');
+    if (isBuyActive()) runSets.push('BUY');
+    if (isSellActive()) runSets.push('SELL');
+    var confirm = confirmCheck ? confirmCheck.checked !== false : true;
     return {
-      running: rulesRunningBuy || rulesRunningSell,
-      confirmBeforePlaceBuy: confirmCheck ? confirmCheck.checked : true,
-      confirmBeforePlaceSell: confirmCheckSell ? confirmCheckSell.checked : true,
+      running: rulesEngineRunning,
+      confirmBeforePlaceBuy: confirm,
+      confirmBeforePlaceSell: confirm,
       ruleSets: getRuleSetsFromDom(),
       runRuleSets: runSets,
-      autoStopEnabledBuy: autoStopCheck ? autoStopCheck.checked : true,
-      autoStopEnabledSell: autoStopCheckSell ? autoStopCheckSell.checked : true,
-      autoStopBeforeMinutesBuy: getAutoStopBeforeMinutes('buy'),
-      autoStopBeforeMinutesSell: getAutoStopBeforeMinutes('sell'),
-      pauseOnLossSeconds: getPauseOnLossSeconds()
+      pauseOnLossSeconds: getPauseOnLossSeconds(),
+      scheduleStartTime: scheduleStartInput && scheduleStartInput.value ? scheduleStartInput.value : '',
+      scheduleStopTime: scheduleStopInput && scheduleStopInput.value ? scheduleStopInput.value : '',
+      scheduleRepeatDaily: scheduleRepeatCheck ? scheduleRepeatCheck.checked !== false : true
     };
   }
 
   var pauseCountdownIntervalId = null;
 
-  var prevRulesRunningBuyOnPause = false;
-  var prevRulesRunningSellOnPause = false;
+  var prevRulesEngineRunningOnPause = false;
   function doPauseOnLoss(seconds) {
     if (pauseOnLossTimerId) clearTimeout(pauseOnLossTimerId);
     if (pauseCountdownIntervalId) clearInterval(pauseCountdownIntervalId);
-    prevRulesRunningBuyOnPause = rulesRunningBuy;
-    prevRulesRunningSellOnPause = rulesRunningSell;
-    rulesRunningBuy = false;
-    rulesRunningSell = false;
+    prevRulesEngineRunningOnPause = rulesEngineRunning;
+    rulesEngineRunning = false;
     pausedUntil = Date.now() + seconds * 1000;
     if (state) state.rulesEngineRunning = false;
-    clearAutoStopTimer();
+    clearScheduleTimer();
     updateToggleButton();
     saveRules();
     updateDealEnabled();
@@ -791,10 +811,9 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
         clearInterval(pauseCountdownIntervalId);
         pauseCountdownIntervalId = null;
       }
-      rulesRunningBuy = prevRulesRunningBuyOnPause;
-      rulesRunningSell = prevRulesRunningSellOnPause;
-      if (state) state.rulesEngineRunning = rulesRunningBuy || rulesRunningSell;
-      startAutoStopTimer();
+      rulesEngineRunning = prevRulesEngineRunningOnPause;
+      if (state) state.rulesEngineRunning = rulesEngineRunning;
+      startScheduleTimer();
       updateToggleButton();
       saveRules();
       updateDealEnabled();
@@ -1029,9 +1048,22 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     }
   }
 
+  function formatCommonEngineStatus(remaining) {
+    if (remaining > 0) return 'Paused (loss) – resuming in ' + remaining + 's';
+    function dirStatus(active) {
+      if (!rulesEngineRunning) return 'Stopped';
+      if (!active) return 'Off';
+      return 'Running';
+    }
+    var line = 'BUY: ' + dirStatus(getRulesBuyEnabled()) + ' • SELL: ' + dirStatus(getRulesSellEnabled());
+    if (rulesEngineRunning && sleepPreventionStatus) line += ' • ' + sleepPreventionStatus;
+    return line;
+  }
+
   function updateEngineState() {
     var config = getConfig();
     var ctx = getContext();
+    updateScheduleDisplay();
 
     if (!config.running) {
       setDealEnabled(baseEnabled);
@@ -1040,11 +1072,9 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       if (dealEngineMsg) dealEngineMsg.classList.add('hidden');
       if (orderEngineMsg) orderEngineMsg.classList.add('hidden');
     var remaining = pausedUntil != null && pausedUntil > Date.now() ? Math.ceil((pausedUntil - Date.now()) / 1000) : 0;
-    var statusText = remaining > 0 ? 'Paused (loss) – resuming in ' + remaining + 's' : 'Engine: Stopped';
+    var fullStatus = formatCommonEngineStatus(remaining);
     var statusCls = 'text-xs ' + (remaining > 0 ? 'text-amber-400 mb-2 font-medium' : 'text-slate-500 mb-2');
-    var fullStatus = statusText + (sleepPreventionStatus && remaining === 0 ? ' • ' + sleepPreventionStatus : '');
     if (engineStatusEl) { engineStatusEl.textContent = fullStatus; engineStatusEl.className = statusCls; }
-    if (engineStatusSellEl) { engineStatusSellEl.textContent = fullStatus; engineStatusSellEl.className = statusCls; }
       if (statusEl) statusEl.textContent = 'Manual trading enabled';
       if (statusSellEl) statusSellEl.textContent = 'Manual trading enabled';
       updateRuleStatusIndicators();
@@ -1056,10 +1086,10 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     setProbesBackfillEnabledFn(false);
     if (dealEngineMsg) dealEngineMsg.classList.remove('hidden');
     if (orderEngineMsg) orderEngineMsg.classList.remove('hidden');
-    var buyStatus = rulesRunningBuy ? ('Engine: Running (BUY)' + (sleepPreventionStatus ? ' • ' + sleepPreventionStatus : '')) : 'Engine: Stopped';
-    var sellStatus = rulesRunningSell ? ('Engine: Running (SELL)' + (sleepPreventionStatus ? ' • ' + sleepPreventionStatus : '')) : 'Engine: Stopped';
-    if (engineStatusEl) { engineStatusEl.textContent = buyStatus; engineStatusEl.className = 'text-xs ' + (rulesRunningBuy ? 'text-amber-400 mb-2 font-medium' : 'text-slate-500 mb-2'); }
-    if (engineStatusSellEl) { engineStatusSellEl.textContent = sellStatus; engineStatusSellEl.className = 'text-xs ' + (rulesRunningSell ? 'text-amber-400 mb-2 font-medium' : 'text-slate-500 mb-2'); }
+    if (engineStatusEl) {
+      engineStatusEl.textContent = formatCommonEngineStatus(0);
+      engineStatusEl.className = 'text-xs text-amber-400 mb-2 font-medium';
+    }
 
     var ruleSets = config.ruleSets || { buy: { rules: [] }, sell: { rules: [] } };
     var runRuleSets = config.runRuleSets || ['BUY', 'SELL'];
@@ -1071,7 +1101,8 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     var sellPass = runSell && sellRules.length > 0 && evaluateRules(ctx, { rules: sellRules });
     var triggeredSet = buyPass ? 'buy' : (sellPass ? 'sell' : null);
     var pass = !!triggeredSet;
-    var blocked = hasPositionOrOrder();
+    var scheduleBlocked = hasScheduleLimits() && !isWithinScheduleWindow(Date.now());
+    var blocked = hasPositionOrOrder() || scheduleBlocked;
 
     var activeBuyRules = runBuy ? buyRules : [];
     var activeSellRules = runSell ? sellRules : [];
@@ -1087,12 +1118,17 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       var needsPrices = allEnabledRules.some(function (r) { return r.left === 'Buy' || r.left === 'Sell'; });
       var needsNowTrend = allEnabledRules.some(function (r) { return r.left === 'now.trend'; });
       var status = 'Conditions not met';
-      if ((runBuy ? buyRules : []).length === 0 && (runSell ? sellRules : []).length === 0) status = 'Add at least one rule to the selected set(s)';
+      if ((runBuy ? buyRules : []).length === 0 && (runSell ? sellRules : []).length === 0) {
+        status = config.running && !runBuy && !runSell
+          ? 'Engine running – enable BUY or SELL'
+          : 'Add at least one rule to the selected set(s)';
+      }
       else if (allEnabledRules.length === 0) status = 'Enable at least one rule';
       else if (needsProbes && !getProbeValuesFn()) status = 'Waiting for probe data';
       else if (needsPrices && (state.currentBid == null || state.currentOffer == null)) status = 'Waiting for prices';
       else if (needsNowTrend && state.currentTrend == null) status = 'Waiting for price updates (now.trend)';
-      else if (pass && blocked) status = 'Conditions met – position/order exists, no new deal';
+      else if (pass && hasPositionOrOrder()) status = 'Conditions met – position/order exists, no new deal';
+      else if (pass && scheduleBlocked) status = 'Conditions met – outside schedule window, no new deal';
       else if (pass && !blocked) {
         var willFireThisTick = !prevRulesPass || prevBlocked;
         status =
@@ -1128,20 +1164,17 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   }
 
   function updateToggleButton() {
-    var buyText = rulesRunningBuy ? 'Stop' : 'Start';
-    var sellText = rulesRunningSell ? 'Stop' : 'Start';
-    var buyCls = 'px-2 py-1 rounded text-xs font-medium transition-colors ' + (rulesRunningBuy ? 'bg-amber-600 hover:bg-amber-500 text-white' : 'bg-emerald-600 hover:bg-emerald-500 text-white');
-    var sellCls = 'px-2 py-1 rounded text-xs font-medium transition-colors ' + (rulesRunningSell ? 'bg-amber-600 hover:bg-amber-500 text-white' : 'bg-emerald-600 hover:bg-emerald-500 text-white');
-    if (toggleBtn) { toggleBtn.textContent = buyText; toggleBtn.className = buyCls; toggleBtn.title = rulesRunningBuy ? 'Stop BUY rules engine' : 'Start BUY rules engine'; }
-    if (toggleBtnSell) { toggleBtnSell.textContent = sellText; toggleBtnSell.className = sellCls; toggleBtnSell.title = rulesRunningSell ? 'Stop SELL rules engine' : 'Start SELL rules engine'; }
+    var text = rulesEngineRunning ? 'Stop' : 'Start';
+    var cls = 'px-3 py-1 rounded text-xs font-medium transition-colors ' + (rulesEngineRunning ? 'bg-amber-600 hover:bg-amber-500 text-white' : 'bg-emerald-600 hover:bg-emerald-500 text-white');
+    if (toggleBtn) { toggleBtn.textContent = text; toggleBtn.className = cls; toggleBtn.title = rulesEngineRunning ? 'Stop rules engine' : 'Start rules engine'; }
     setRulesEditable();
-    if (state) state.rulesEngineRunning = rulesRunningBuy || rulesRunningSell;
-    if (socket && typeof socket.emit === 'function') socket.emit('rules_engine_running', rulesRunningBuy || rulesRunningSell);
+    if (state) state.rulesEngineRunning = rulesEngineRunning;
+    if (socket && typeof socket.emit === 'function') socket.emit('rules_engine_running', rulesEngineRunning);
   }
 
   function setRulesEditable() {
-    var buyEditable = !rulesRunningBuy;
-    var sellEditable = !rulesRunningSell;
+    var buyEditable = !isBuyActive();
+    var sellEditable = !isSellActive();
     if (rulesBuyGroupsRoot) {
       var addBuyBtns = rulesBuyGroupsRoot.querySelectorAll('[data-add-rule-group][data-rules-panel="buy"]');
       for (var ab = 0; ab < addBuyBtns.length; ab++) addBuyBtns[ab].disabled = !buyEditable;
@@ -1150,16 +1183,16 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       var addSellBtns = rulesSellGroupsRoot.querySelectorAll('[data-add-rule-group][data-rules-panel="sell"]');
       for (var as = 0; as < addSellBtns.length; as++) addSellBtns[as].disabled = !sellEditable;
     }
-    if (rulesLockedMsg) rulesLockedMsg.classList.toggle('hidden', buyEditable);
+    if (rulesLockedMsg) rulesLockedMsg.classList.toggle('hidden', !rulesEngineRunning);
+    if (rulesLockedMsgBuy) rulesLockedMsgBuy.classList.toggle('hidden', buyEditable);
     if (rulesLockedMsgSell) rulesLockedMsgSell.classList.toggle('hidden', sellEditable);
-    if (autoStopCheck) autoStopCheck.disabled = !buyEditable;
-    if (autoStopCheckSell) autoStopCheckSell.disabled = !sellEditable;
-    if (autoStopMinutesInput) autoStopMinutesInput.disabled = !buyEditable;
-    if (autoStopMinutesInputSell) autoStopMinutesInputSell.disabled = !sellEditable;
-    if (pauseOnLossInput) pauseOnLossInput.disabled = !buyEditable;
-    if (pauseOnLossInputSell) pauseOnLossInputSell.disabled = !sellEditable;
-    if (stopAfterLossBuyCheck) stopAfterLossBuyCheck.disabled = !buyEditable;
-    if (stopAfterLossSellCheck) stopAfterLossSellCheck.disabled = !sellEditable;
+    var commonLocked = rulesEngineRunning;
+    for (var ci = 0; ci < commonPanelInputs.length; ci++) {
+      var commonEl = commonPanelInputs[ci];
+      if (commonEl) commonEl.disabled = commonLocked;
+    }
+    if (pauseOnLossInput) pauseOnLossInput.disabled = commonLocked;
+    if (stopAfterLossCheck) stopAfterLossCheck.disabled = commonLocked;
     var buyDslIds = ['tradingRulesDynamicTp', 'tradingRulesDynamicTpTrigger', 'tradingRulesDynamicTpLock'];
     var sellDslIds = ['tradingRulesSellDynamicTp', 'tradingRulesSellDynamicTpTrigger', 'tradingRulesSellDynamicTpLock'];
     for (var db = 0; db < buyDslIds.length; db++) {
@@ -1493,30 +1526,46 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     return wrap;
   }
 
+  function persistScheduleActiveDate() {
+    if (scheduleRepeatCheck && scheduleRepeatCheck.checked) {
+      scheduleActiveDate = null;
+    } else if (hasScheduleLimits()) {
+      scheduleActiveDate = localDateKey(new Date());
+    } else {
+      scheduleActiveDate = null;
+    }
+  }
+
   function saveRules() {
     var epicSelect = document.getElementById('epicSelect');
     var epic = (epicSelect && epicSelect.value) || state.savedEpic;
     if (!epic) return;
+    persistScheduleActiveDate();
     var config = getConfig();
     var persistedRuleSets = getPersistedRuleSets(config.ruleSets);
     fetch('/api/config').then(function (r) { return r.json(); }).then(function (cfg) {
       var instruments = (cfg.ui && cfg.ui.instruments) ? { ...cfg.ui.instruments } : {};
       instruments[epic] = {
         ...(instruments[epic] || {}),
-        tradingRulesRunning: config.running,
-        rulesRunningBuy: rulesRunningBuy,
-        rulesRunningSell: rulesRunningSell,
+        tradingRulesRunning: rulesEngineRunning,
+        rulesRunningBuy: isBuyActive(),
+        rulesRunningSell: isSellActive(),
+        rulesBuyEnabled: getRulesBuyEnabled(),
+        rulesSellEnabled: getRulesSellEnabled(),
         ruleSets: persistedRuleSets,
+        tradingRulesConfirmBeforePlace: config.confirmBeforePlaceBuy,
         tradingRulesConfirmBeforePlaceBuy: config.confirmBeforePlaceBuy,
         tradingRulesConfirmBeforePlaceSell: config.confirmBeforePlaceSell,
-        tradingRulesAutoStopEnabledBuy: config.autoStopEnabledBuy,
-        tradingRulesAutoStopEnabledSell: config.autoStopEnabledSell,
-        tradingRulesAutoStopBeforeMinutesBuy: config.autoStopBeforeMinutesBuy,
-        tradingRulesAutoStopBeforeMinutesSell: config.autoStopBeforeMinutesSell,
-        tradingRulesPauseOnLossSecondsBuy: getPauseOnLossSecondsBuy(),
-        tradingRulesPauseOnLossSecondsSell: getPauseOnLossSecondsSell(),
-        tradingRulesStopAfterLossBuy: !!(stopAfterLossBuyCheck && stopAfterLossBuyCheck.checked),
-        tradingRulesStopAfterLossSell: !!(stopAfterLossSellCheck && stopAfterLossSellCheck.checked),
+        tradingRulesPauseOnLossSeconds: getPauseOnLossSeconds(),
+        tradingRulesPauseOnLossSecondsBuy: getPauseOnLossSeconds(),
+        tradingRulesPauseOnLossSecondsSell: getPauseOnLossSeconds(),
+        tradingRulesStopAfterLoss: !!(stopAfterLossCheck && stopAfterLossCheck.checked),
+        tradingRulesStopAfterLossBuy: !!(stopAfterLossCheck && stopAfterLossCheck.checked),
+        tradingRulesStopAfterLossSell: !!(stopAfterLossCheck && stopAfterLossCheck.checked),
+        tradingRulesScheduleStartTime: config.scheduleStartTime || '',
+        tradingRulesScheduleStopTime: config.scheduleStopTime || '',
+        tradingRulesScheduleRepeatDaily: config.scheduleRepeatDaily !== false,
+        tradingRulesScheduleActiveDate: scheduleActiveDate,
         ...rulesBuyDynamicTpConfigPayload(),
         ...rulesSellDynamicTpConfigPayload()
       };
@@ -1535,18 +1584,45 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       if (!epic && cfg.epic) epic = cfg.epic;
       var ui = cfg.ui || {};
       var inst = (epic && ui.instruments && ui.instruments[epic]) ? ui.instruments[epic] : {};
-      var confirmBuy = inst.tradingRulesConfirmBeforePlaceBuy != null ? inst.tradingRulesConfirmBeforePlaceBuy !== false : (inst.tradingRulesConfirmBeforePlace != null ? inst.tradingRulesConfirmBeforePlace !== false : ui.tradingRulesConfirmBeforePlace !== false);
-      var confirmSell = inst.tradingRulesConfirmBeforePlaceSell != null ? inst.tradingRulesConfirmBeforePlaceSell !== false : (inst.tradingRulesConfirmBeforePlace != null ? inst.tradingRulesConfirmBeforePlace !== false : ui.tradingRulesConfirmBeforePlace !== false);
-      var autoStopBuy = inst.tradingRulesAutoStopEnabledBuy != null ? inst.tradingRulesAutoStopEnabledBuy !== false : (inst.tradingRulesAutoStopEnabled != null ? inst.tradingRulesAutoStopEnabled !== false : ui.tradingRulesAutoStopEnabled !== false);
-      var autoStopSell = inst.tradingRulesAutoStopEnabledSell != null ? inst.tradingRulesAutoStopEnabledSell !== false : (inst.tradingRulesAutoStopEnabled != null ? inst.tradingRulesAutoStopEnabled !== false : ui.tradingRulesAutoStopEnabled !== false);
-      var autoStopMinsBuy = inst.tradingRulesAutoStopBeforeMinutesBuy != null ? inst.tradingRulesAutoStopBeforeMinutesBuy : (inst.tradingRulesAutoStopBeforeMinutes != null ? inst.tradingRulesAutoStopBeforeMinutes : ui.tradingRulesAutoStopBeforeMinutes);
-      var autoStopMinsSell = inst.tradingRulesAutoStopBeforeMinutesSell != null ? inst.tradingRulesAutoStopBeforeMinutesSell : (inst.tradingRulesAutoStopBeforeMinutes != null ? inst.tradingRulesAutoStopBeforeMinutes : ui.tradingRulesAutoStopBeforeMinutes);
-      var pauseBuy = inst.tradingRulesPauseOnLossSecondsBuy != null ? inst.tradingRulesPauseOnLossSecondsBuy : (inst.tradingRulesPauseOnLossSeconds != null ? inst.tradingRulesPauseOnLossSeconds : (ui.tradingRulesPauseOnLossSeconds != null ? ui.tradingRulesPauseOnLossSeconds : 0));
-      var pauseSell = inst.tradingRulesPauseOnLossSecondsSell != null ? inst.tradingRulesPauseOnLossSecondsSell : (inst.tradingRulesPauseOnLossSeconds != null ? inst.tradingRulesPauseOnLossSeconds : (ui.tradingRulesPauseOnLossSeconds != null ? ui.tradingRulesPauseOnLossSeconds : 0));
+      var confirmUnified = inst.tradingRulesConfirmBeforePlace != null
+        ? inst.tradingRulesConfirmBeforePlace !== false
+        : (inst.tradingRulesConfirmBeforePlaceBuy != null
+          ? inst.tradingRulesConfirmBeforePlaceBuy !== false
+          : (inst.tradingRulesConfirmBeforePlaceSell != null
+            ? inst.tradingRulesConfirmBeforePlaceSell !== false
+            : ui.tradingRulesConfirmBeforePlace !== false));
+      var pauseSec = inst.tradingRulesPauseOnLossSeconds != null
+        ? inst.tradingRulesPauseOnLossSeconds
+        : Math.max(
+          inst.tradingRulesPauseOnLossSecondsBuy != null ? inst.tradingRulesPauseOnLossSecondsBuy : 0,
+          inst.tradingRulesPauseOnLossSecondsSell != null ? inst.tradingRulesPauseOnLossSecondsSell : 0,
+          ui.tradingRulesPauseOnLossSeconds != null ? ui.tradingRulesPauseOnLossSeconds : 0
+        );
+      var stopAfterLoss = inst.tradingRulesStopAfterLoss === true
+        || inst.tradingRulesStopAfterLossBuy === true
+        || inst.tradingRulesStopAfterLossSell === true
+        || ui.tradingRulesStopAfterLossBuy === true
+        || ui.tradingRulesStopAfterLossSell === true;
+      var schedStart = inst.tradingRulesScheduleStartTime != null ? inst.tradingRulesScheduleStartTime : (ui.tradingRulesScheduleStartTime || '');
+      var schedStop = inst.tradingRulesScheduleStopTime != null ? inst.tradingRulesScheduleStopTime : (ui.tradingRulesScheduleStopTime || '');
+      var schedRepeat = inst.tradingRulesScheduleRepeatDaily != null ? inst.tradingRulesScheduleRepeatDaily !== false : (ui.tradingRulesScheduleRepeatDaily !== false);
+      scheduleActiveDate = inst.tradingRulesScheduleActiveDate != null ? inst.tradingRulesScheduleActiveDate : (ui.tradingRulesScheduleActiveDate || null);
       var ruleSets = inst.ruleSets || ui.ruleSets;
-      var prevRunning = inst.tradingRulesRunning || ui.tradingRulesRunning;
-      rulesRunningBuy = inst.rulesRunningBuy != null ? inst.rulesRunningBuy : (ui.rulesRunningBuy != null ? ui.rulesRunningBuy : (prevRunning ? true : false));
-      rulesRunningSell = inst.rulesRunningSell != null ? inst.rulesRunningSell : (ui.rulesRunningSell != null ? ui.rulesRunningSell : (prevRunning ? true : false));
+      var prevRunning = inst.tradingRulesRunning != null ? inst.tradingRulesRunning : ui.tradingRulesRunning;
+      rulesEngineRunning = inst.tradingRulesRunning != null ? !!inst.tradingRulesRunning
+        : (inst.rulesRunningBuy || inst.rulesRunningSell || ui.rulesRunningBuy || ui.rulesRunningSell || prevRunning);
+      if (buyEnabledCheck) {
+        if (inst.rulesBuyEnabled != null) buyEnabledCheck.checked = inst.rulesBuyEnabled !== false;
+        else if (inst.rulesRunningBuy != null && inst.rulesRunningSell != null && inst.rulesRunningBuy !== inst.rulesRunningSell) {
+          buyEnabledCheck.checked = inst.rulesRunningBuy === true;
+        } else buyEnabledCheck.checked = true;
+      }
+      if (sellEnabledCheck) {
+        if (inst.rulesSellEnabled != null) sellEnabledCheck.checked = inst.rulesSellEnabled !== false;
+        else if (inst.rulesRunningBuy != null && inst.rulesRunningSell != null && inst.rulesRunningBuy !== inst.rulesRunningSell) {
+          sellEnabledCheck.checked = inst.rulesRunningSell === true;
+        } else sellEnabledCheck.checked = true;
+      }
       if (!ruleSets && (inst.tradingRules || ui.tradingRules)) {
         var legacyRules = inst.tradingRules || ui.tradingRules || [];
         var dealDir = (inst.dealDirection || ui.dealDirection || 'BUY').toUpperCase();
@@ -1556,31 +1632,15 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
         };
       }
       if (!ruleSets) ruleSets = { buy: { rules: [], dealSize: '1', takeProfit: null, stopLoss: null, tpSlMode: 'rate' }, sell: { rules: [], dealSize: '1', takeProfit: null, stopLoss: null, tpSlMode: 'rate' } };
-      if (state) state.rulesEngineRunning = rulesRunningBuy || rulesRunningSell;
-      if (confirmCheck) confirmCheck.checked = confirmBuy;
-      if (confirmCheckSell) confirmCheckSell.checked = confirmSell;
-      if (autoStopCheck) autoStopCheck.checked = autoStopBuy;
-      if (autoStopCheckSell) autoStopCheckSell.checked = autoStopSell;
-      if (autoStopMinutesInput) {
-        var minsBuy = (autoStopMinsBuy != null && !isNaN(autoStopMinsBuy) && autoStopMinsBuy >= 0) ? Math.min(autoStopMinsBuy, 1440) : 60;
-        autoStopMinutesInput.value = minsBuy;
-      }
-      if (autoStopMinutesInputSell) {
-        var minsSell = (autoStopMinsSell != null && !isNaN(autoStopMinsSell) && autoStopMinsSell >= 0) ? Math.min(autoStopMinsSell, 1440) : 60;
-        autoStopMinutesInputSell.value = minsSell;
-      }
+      if (state) state.rulesEngineRunning = rulesEngineRunning;
+      if (confirmCheck) confirmCheck.checked = confirmUnified;
       if (pauseOnLossInput) {
-        var secsBuy = (pauseBuy != null && !isNaN(pauseBuy) && pauseBuy >= 0) ? Math.min(pauseBuy, 86400) : 0;
-        pauseOnLossInput.value = secsBuy;
+        pauseOnLossInput.value = (pauseSec != null && !isNaN(pauseSec) && pauseSec >= 0) ? Math.min(pauseSec, 86400) : 0;
       }
-      if (pauseOnLossInputSell) {
-        var secsSell = (pauseSell != null && !isNaN(pauseSell) && pauseSell >= 0) ? Math.min(pauseSell, 86400) : 0;
-        pauseOnLossInputSell.value = secsSell;
-      }
-      var stopALBuy = (inst.tradingRulesStopAfterLossBuy != null ? inst.tradingRulesStopAfterLossBuy : ui.tradingRulesStopAfterLossBuy) === true;
-      var stopALSell = (inst.tradingRulesStopAfterLossSell != null ? inst.tradingRulesStopAfterLossSell : ui.tradingRulesStopAfterLossSell) === true;
-      if (stopAfterLossBuyCheck) stopAfterLossBuyCheck.checked = stopALBuy;
-      if (stopAfterLossSellCheck) stopAfterLossSellCheck.checked = stopALSell;
+      if (stopAfterLossCheck) stopAfterLossCheck.checked = stopAfterLoss;
+      if (scheduleStartInput) scheduleStartInput.value = schedStart || '';
+      if (scheduleStopInput) scheduleStopInput.value = schedStop || '';
+      if (scheduleRepeatCheck) scheduleRepeatCheck.checked = schedRepeat;
       applyDynamicTpFromConfig(inst, ui);
       for (var gi = 0; gi < RULE_GROUP_ORDER.length; gi++) {
         var gk = RULE_GROUP_ORDER[gi];
@@ -1624,8 +1684,8 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       if (smode && ruleSets.sell) smode.value = ruleSets.sell.tpSlMode || 'rate';
       applyDynamicTpUiState();
       updateToggleButton();
-      if (rulesRunningBuy || rulesRunningSell) startAutoStopTimer();
-      else clearAutoStopTimer();
+      if (rulesEngineRunning) startScheduleTimer();
+      else clearScheduleTimer();
       updateEngineState();
       updateRulesEstTpSlDisplay();
     }).catch(function () { updateEngineState(); });
@@ -1696,66 +1756,38 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     updateRulesEstTpSlDisplay();
   }
 
-  function doToggleBuy() {
+  function doToggleEngine() {
     if (pausedUntil != null) {
       pausedUntil = null;
       if (pauseOnLossTimerId) { clearTimeout(pauseOnLossTimerId); pauseOnLossTimerId = null; }
       if (pauseCountdownIntervalId) { clearInterval(pauseCountdownIntervalId); pauseCountdownIntervalId = null; }
     }
-    rulesRunningBuy = !rulesRunningBuy;
-    if (rulesRunningBuy || rulesRunningSell) startAutoStopTimer();
-    else clearAutoStopTimer();
+    rulesEngineRunning = !rulesEngineRunning;
+    if (rulesEngineRunning) startScheduleTimer();
+    else clearScheduleTimer();
     updateToggleButton();
     saveRules();
     updateDealEnabled();
   }
-  function doToggleSell() {
-    if (pausedUntil != null) {
-      pausedUntil = null;
-      if (pauseOnLossTimerId) { clearTimeout(pauseOnLossTimerId); pauseOnLossTimerId = null; }
-      if (pauseCountdownIntervalId) { clearInterval(pauseCountdownIntervalId); pauseCountdownIntervalId = null; }
-    }
-    rulesRunningSell = !rulesRunningSell;
-    if (rulesRunningBuy || rulesRunningSell) startAutoStopTimer();
-    else clearAutoStopTimer();
-    updateToggleButton();
-    saveRules();
-    updateDealEnabled();
-  }
-  if (toggleBtn) toggleBtn.addEventListener('click', doToggleBuy);
-  if (toggleBtnSell) toggleBtnSell.addEventListener('click', doToggleSell);
+  if (toggleBtn) toggleBtn.addEventListener('click', doToggleEngine);
+  if (buyEnabledCheck) buyEnabledCheck.addEventListener('change', function () { saveRules(); updateEngineState(); });
+  if (sellEnabledCheck) sellEnabledCheck.addEventListener('change', function () { saveRules(); updateEngineState(); });
   if (confirmCheck) confirmCheck.addEventListener('change', saveRules);
-  if (confirmCheckSell) confirmCheckSell.addEventListener('change', saveRules);
-  if (autoStopCheck) {
-    autoStopCheck.addEventListener('change', function () {
-      saveRules();
-      updateAutoStopDisplay();
-    });
-  }
-  if (autoStopCheckSell) {
-    autoStopCheckSell.addEventListener('change', function () {
-      saveRules();
-      updateAutoStopDisplay();
-    });
-  }
-  if (autoStopMinutesInput) {
-    autoStopMinutesInput.addEventListener('change', function () {
-      saveRules();
-      updateAutoStopDisplay();
-    });
-    autoStopMinutesInput.addEventListener('input', updateAutoStopDisplay);
-  }
-  if (autoStopMinutesInputSell) {
-    autoStopMinutesInputSell.addEventListener('change', function () {
-      saveRules();
-      updateAutoStopDisplay();
-    });
-    autoStopMinutesInputSell.addEventListener('input', updateAutoStopDisplay);
-  }
   if (pauseOnLossInput) pauseOnLossInput.addEventListener('change', saveRules);
-  if (pauseOnLossInputSell) pauseOnLossInputSell.addEventListener('change', saveRules);
-  if (stopAfterLossBuyCheck) stopAfterLossBuyCheck.addEventListener('change', saveRules);
-  if (stopAfterLossSellCheck) stopAfterLossSellCheck.addEventListener('change', saveRules);
+  if (stopAfterLossCheck) stopAfterLossCheck.addEventListener('change', saveRules);
+  function onScheduleFieldChange() {
+    updateScheduleDisplay();
+    saveRules();
+  }
+  if (scheduleStartInput) {
+    scheduleStartInput.addEventListener('change', onScheduleFieldChange);
+    scheduleStartInput.addEventListener('input', updateScheduleDisplay);
+  }
+  if (scheduleStopInput) {
+    scheduleStopInput.addEventListener('change', onScheduleFieldChange);
+    scheduleStopInput.addEventListener('input', updateScheduleDisplay);
+  }
+  if (scheduleRepeatCheck) scheduleRepeatCheck.addEventListener('change', onScheduleFieldChange);
   var tradingRulesDynamicTp = document.getElementById('tradingRulesDynamicTp');
   if (tradingRulesDynamicTp) {
     tradingRulesDynamicTp.addEventListener('change', function () {
@@ -1836,8 +1868,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   });
 
   socket.on('disconnect', function () {
-    rulesRunningBuy = false;
-    rulesRunningSell = false;
+    rulesEngineRunning = false;
     if (state) state.rulesEngineRunning = false;
     pausedUntil = null;
     if (pauseOnLossTimerId) {
@@ -1848,7 +1879,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       clearInterval(pauseCountdownIntervalId);
       pauseCountdownIntervalId = null;
     }
-    clearAutoStopTimer();
+    clearScheduleTimer();
     updateToggleButton();
     updateDealEnabled();
     for (var rid in rulesPlacedDealIds) delete rulesPlacedDealIds[rid];
@@ -1861,39 +1892,23 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     if (typeof tx.profitLoss !== 'number' || tx.profitLoss >= 0) return;
     var skipPauseForThisClose = false;
     var logFn = typeof log === 'function' ? log : function () {};
-    if (panel === 'buy' && stopAfterLossBuyCheck && stopAfterLossBuyCheck.checked && rulesRunningBuy) {
+    if (panel != null && stopAfterLossCheck && stopAfterLossCheck.checked && rulesEngineRunning) {
       if (pausedUntil != null) {
         pausedUntil = null;
         if (pauseOnLossTimerId) { clearTimeout(pauseOnLossTimerId); pauseOnLossTimerId = null; }
         if (pauseCountdownIntervalId) { clearInterval(pauseCountdownIntervalId); pauseCountdownIntervalId = null; }
       }
-      rulesRunningBuy = false;
+      rulesEngineRunning = false;
       skipPauseForThisClose = true;
-      if (rulesRunningBuy || rulesRunningSell) startAutoStopTimer();
-      else clearAutoStopTimer();
+      clearScheduleTimer();
       updateToggleButton();
       saveRules();
       updateDealEnabled();
-      logFn('BUY rules engine stopped (Stop after loss).');
-    }
-    if (panel === 'sell' && stopAfterLossSellCheck && stopAfterLossSellCheck.checked && rulesRunningSell) {
-      if (pausedUntil != null) {
-        pausedUntil = null;
-        if (pauseOnLossTimerId) { clearTimeout(pauseOnLossTimerId); pauseOnLossTimerId = null; }
-        if (pauseCountdownIntervalId) { clearInterval(pauseCountdownIntervalId); pauseCountdownIntervalId = null; }
-      }
-      rulesRunningSell = false;
-      skipPauseForThisClose = true;
-      if (rulesRunningBuy || rulesRunningSell) startAutoStopTimer();
-      else clearAutoStopTimer();
-      updateToggleButton();
-      saveRules();
-      updateDealEnabled();
-      logFn('SELL rules engine stopped (Stop after loss).');
+      logFn('Rules engine stopped (Stop after loss).');
     }
     if (!skipPauseForThisClose) {
       var seconds = getPauseOnLossSeconds();
-      if (seconds > 0 && (rulesRunningBuy || rulesRunningSell)) doPauseOnLoss(seconds);
+      if (seconds > 0 && rulesEngineRunning) doPauseOnLoss(seconds);
     }
   });
 
@@ -1902,7 +1917,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   });
   socket.on('working_orders', updateEngineState);
   socket.on('marketDetails', function () {
-    setTimeout(updateAutoStopDisplay, 0);
+    setTimeout(updateScheduleDisplay, 0);
     setTimeout(updateDealEnabled, 0);
     setTimeout(updateRulesEstTpSlDisplay, 0);
   });
@@ -1913,21 +1928,11 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
 
   socket.on('sleep_prevention_status', function (msg) {
     sleepPreventionStatus = msg || null;
-    var remaining = pausedUntil != null && pausedUntil > Date.now() ? Math.ceil((pausedUntil - Date.now()) / 1000) : 0;
-    if (remaining > 0) {
-      var pauseStatus = 'Paused (loss) – resuming in ' + remaining + 's' + (sleepPreventionStatus ? ' • ' + sleepPreventionStatus : '');
-      if (engineStatusEl) engineStatusEl.textContent = pauseStatus;
-      if (engineStatusSellEl) engineStatusSellEl.textContent = pauseStatus;
-    } else {
-      var buyStatus = rulesRunningBuy ? ('Engine: Running (BUY)' + (sleepPreventionStatus ? ' • ' + sleepPreventionStatus : '')) : 'Engine: Stopped';
-      var sellStatus = rulesRunningSell ? ('Engine: Running (SELL)' + (sleepPreventionStatus ? ' • ' + sleepPreventionStatus : '')) : 'Engine: Stopped';
-      if (engineStatusEl) engineStatusEl.textContent = buyStatus;
-      if (engineStatusSellEl) engineStatusSellEl.textContent = sellStatus;
-    }
+    updateEngineState();
   });
 
   loadRules();
-  updateAutoStopDisplay();
+  updateScheduleDisplay();
   updateRulesEstTpSlDisplay();
   function persistRulesTpSlUi() {
     updateRulesEstTpSlDisplay();
@@ -1948,8 +1953,10 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     },
     updateDealEnabled: updateDealEnabled,
     setTradingRulesPanelEnabled: function (enabled) {
+      var commonPanel = document.getElementById('tradingRulesCommonPanel');
       var buyPanel = document.getElementById('tradingRulesBuyPanel');
       var sellPanel = document.getElementById('tradingRulesSellPanel');
+      if (commonPanel) commonPanel.classList.toggle('hidden', !enabled);
       if (buyPanel) buyPanel.classList.toggle('hidden', !enabled);
       if (sellPanel) sellPanel.classList.toggle('hidden', !enabled);
     },

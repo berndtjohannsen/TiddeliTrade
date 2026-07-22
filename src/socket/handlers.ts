@@ -1078,12 +1078,13 @@ export function registerSocketHandlers(io: Server): void {
       dynamicSlSell?: DynamicStopLossOverride;
       stopAfterLossBuy?: boolean;
       stopAfterLossSell?: boolean;
-      autoStopEnabledBuy?: boolean;
-      autoStopEnabledSell?: boolean;
-      autoStopBeforeMinutesBuy?: number;
-      autoStopBeforeMinutesSell?: number;
       pauseOnLossSecondsBuy?: number;
       pauseOnLossSecondsSell?: number;
+      scheduleStartTime?: string;
+      scheduleStopTime?: string;
+      scheduleRepeatDaily?: boolean;
+      scheduleActiveDate?: string;
+      scheduleTimezone?: string;
     }) => {
       const epic = (params?.epic || '').trim();
       if (!epic) {
@@ -1132,28 +1133,6 @@ export function registerSocketHandlers(io: Server): void {
       }
 
       const ui = cfg.ui;
-      const resolveAutoStopEnabled = (
-        instVal: boolean | undefined,
-        legacyInst: boolean | undefined,
-        uiSide: boolean | undefined,
-        uiLegacy: boolean | undefined
-      ): boolean => {
-        if (instVal != null) return instVal !== false;
-        if (legacyInst != null) return legacyInst !== false;
-        if (uiSide != null) return uiSide !== false;
-        if (uiLegacy != null) return uiLegacy !== false;
-        return true;
-      };
-      const resolveAutoStopMinutes = (
-        instVal: number | undefined,
-        legacyInst: number | undefined,
-        uiSide: number | undefined,
-        uiLegacy: number | undefined
-      ): number => {
-        const pick = instVal ?? legacyInst ?? uiSide ?? uiLegacy;
-        return typeof pick === 'number' && !isNaN(pick) && pick >= 0 ? Math.min(pick, 1440) : 60;
-      };
-
       const resolvePauseOnLossSeconds = (
         instVal: number | undefined,
         legacyInst: number | undefined,
@@ -1162,6 +1141,26 @@ export function registerSocketHandlers(io: Server): void {
         const pick = instVal ?? legacyInst ?? uiLegacy;
         if (typeof pick !== 'number' || isNaN(pick) || pick < 0) return 0;
         return Math.min(pick, 86400);
+      };
+      const resolveStopAfterLoss = (side: 'buy' | 'sell'): boolean => {
+        const instSide = side === 'buy' ? inst?.tradingRulesStopAfterLossBuy : inst?.tradingRulesStopAfterLossSell;
+        const paramSide = side === 'buy' ? params.stopAfterLossBuy : params.stopAfterLossSell;
+        if (typeof paramSide === 'boolean') return paramSide;
+        if (inst?.tradingRulesStopAfterLoss === true) return true;
+        if (instSide === true) return true;
+        const uiSide = side === 'buy' ? ui?.tradingRulesStopAfterLossBuy : ui?.tradingRulesStopAfterLossSell;
+        return uiSide === true;
+      };
+      const resolveScheduleString = (
+        paramVal: string | undefined,
+        instVal: string | undefined,
+        uiVal: string | undefined
+      ): string => (paramVal ?? instVal ?? uiVal ?? '').trim();
+      const resolveScheduleRepeatDaily = (): boolean => {
+        if (typeof params.scheduleRepeatDaily === 'boolean') return params.scheduleRepeatDaily;
+        if (inst?.tradingRulesScheduleRepeatDaily != null) return inst.tradingRulesScheduleRepeatDaily !== false;
+        if (ui?.tradingRulesScheduleRepeatDaily != null) return ui.tradingRulesScheduleRepeatDaily !== false;
+        return true;
       };
 
       const config: BacktestConfig = {
@@ -1180,44 +1179,25 @@ export function registerSocketHandlers(io: Server): void {
         dealingWeekLondon,
         dynamicStopLossBuy: resolveDynamicStopLossForBacktest(epic, cfg, 'rules-buy', params.dynamicSlBuy),
         dynamicStopLossSell: resolveDynamicStopLossForBacktest(epic, cfg, 'rules-sell', params.dynamicSlSell),
-        stopAfterLossBuy: typeof params.stopAfterLossBuy === 'boolean'
-          ? params.stopAfterLossBuy
-          : (inst?.tradingRulesStopAfterLossBuy ?? ui?.tradingRulesStopAfterLossBuy) === true,
-        stopAfterLossSell: typeof params.stopAfterLossSell === 'boolean'
-          ? params.stopAfterLossSell
-          : (inst?.tradingRulesStopAfterLossSell ?? ui?.tradingRulesStopAfterLossSell) === true,
-        autoStopEnabledBuy: typeof params.autoStopEnabledBuy === 'boolean'
-          ? params.autoStopEnabledBuy
-          : resolveAutoStopEnabled(
-              inst?.tradingRulesAutoStopEnabledBuy,
-              inst?.tradingRulesAutoStopEnabled,
-              ui?.tradingRulesAutoStopEnabledBuy,
-              ui?.tradingRulesAutoStopEnabled
-            ),
-        autoStopEnabledSell: typeof params.autoStopEnabledSell === 'boolean'
-          ? params.autoStopEnabledSell
-          : resolveAutoStopEnabled(
-              inst?.tradingRulesAutoStopEnabledSell,
-              inst?.tradingRulesAutoStopEnabled,
-              ui?.tradingRulesAutoStopEnabledSell,
-              ui?.tradingRulesAutoStopEnabled
-            ),
-        autoStopBeforeMinutesBuy: typeof params.autoStopBeforeMinutesBuy === 'number'
-          ? Math.min(Math.max(params.autoStopBeforeMinutesBuy, 0), 1440)
-          : resolveAutoStopMinutes(
-              inst?.tradingRulesAutoStopBeforeMinutesBuy,
-              inst?.tradingRulesAutoStopBeforeMinutes,
-              ui?.tradingRulesAutoStopBeforeMinutesBuy,
-              ui?.tradingRulesAutoStopBeforeMinutes
-            ),
-        autoStopBeforeMinutesSell: typeof params.autoStopBeforeMinutesSell === 'number'
-          ? Math.min(Math.max(params.autoStopBeforeMinutesSell, 0), 1440)
-          : resolveAutoStopMinutes(
-              inst?.tradingRulesAutoStopBeforeMinutesSell,
-              inst?.tradingRulesAutoStopBeforeMinutes,
-              ui?.tradingRulesAutoStopBeforeMinutesSell,
-              ui?.tradingRulesAutoStopBeforeMinutes
-            ),
+        stopAfterLossBuy: resolveStopAfterLoss('buy'),
+        stopAfterLossSell: resolveStopAfterLoss('sell'),
+        scheduleStartTime: resolveScheduleString(
+          params.scheduleStartTime,
+          inst?.tradingRulesScheduleStartTime,
+          ui?.tradingRulesScheduleStartTime
+        ),
+        scheduleStopTime: resolveScheduleString(
+          params.scheduleStopTime,
+          inst?.tradingRulesScheduleStopTime,
+          ui?.tradingRulesScheduleStopTime
+        ),
+        scheduleRepeatDaily: resolveScheduleRepeatDaily(),
+        scheduleActiveDate: resolveScheduleString(
+          params.scheduleActiveDate,
+          inst?.tradingRulesScheduleActiveDate,
+          ui?.tradingRulesScheduleActiveDate
+        ) || undefined,
+        scheduleTimezone: params.scheduleTimezone?.trim() || undefined,
         pauseOnLossSecondsBuy: typeof params.pauseOnLossSecondsBuy === 'number'
           ? Math.min(Math.max(params.pauseOnLossSecondsBuy, 0), 86400)
           : resolvePauseOnLossSeconds(

@@ -66,18 +66,17 @@ export interface BacktestConfig {
    * Omitted/null = no dealing-hours gate.
    */
   dealingWeekLondon?: DealingWeekLondon | null;
-  /** When true, a losing BUY close stops further BUY opens until the next backtest day/block. */
+  /** When true, a losing close stops that direction until the next backtest day/block. */
   stopAfterLossBuy?: boolean;
-  /** When true, a losing SELL close stops further SELL opens until the next backtest day/block. */
   stopAfterLossSell?: boolean;
-  /** Auto-stop BUY engine N minutes before session close (or UTC midnight when is24_7). Default true. */
-  autoStopEnabledBuy?: boolean;
-  autoStopEnabledSell?: boolean;
-  autoStopBeforeMinutesBuy?: number;
-  autoStopBeforeMinutesSell?: number;
-  /** Seconds to pause all new opens after a losing close (BUY panel). 0 = disabled. */
+  /** HH:MM — schedule window for new opens (see scheduleTimezone). Blank = no limit. */
+  scheduleStartTime?: string;
+  scheduleStopTime?: string;
+  scheduleRepeatDaily?: boolean;
+  scheduleActiveDate?: string;
+  scheduleTimezone?: string;
+  /** Seconds to pause all new opens after a losing close. 0 = disabled. */
   pauseOnLossSecondsBuy?: number;
-  /** Seconds to pause all new opens after a losing close (SELL panel). Live uses max(buy, sell). */
   pauseOnLossSecondsSell?: number;
 }
 
@@ -178,14 +177,46 @@ export function dealingWeekFromMarketTimes(
   return anyOpen ? week : null;
 }
 
-function resolveAutoStopBeforeMinutes(config: BacktestConfig): number | null {
-  const buyOn = config.autoStopEnabledBuy !== false;
-  const sellOn = config.autoStopEnabledSell !== false;
-  if (!buyOn && !sellOn) return null;
-  const buyMins = config.autoStopBeforeMinutesBuy ?? 60;
-  const sellMins = config.autoStopBeforeMinutesSell ?? 60;
-  if (buyOn && sellOn) return Math.min(buyMins, sellMins);
-  return buyOn ? buyMins : sellMins;
+function parseScheduleTimeHHMM(s: string | undefined | null): number | null {
+  if (!s || !s.trim()) return null;
+  const m = s.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const h = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  if (h < 0 || h > 23 || min < 0 || min > 59) return null;
+  return h * 60 + min;
+}
+
+function minutesInTimezone(ts: number, timeZone: string): number {
+  const fmt = new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hour12: false });
+  const parts = fmt.formatToParts(new Date(ts));
+  const h = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0', 10);
+  const min = parseInt(parts.find((p) => p.type === 'minute')?.value ?? '0', 10);
+  return h * 60 + min;
+}
+
+function dateKeyInTimezone(ts: number, timeZone: string): string {
+  const fmt = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' });
+  return fmt.format(new Date(ts));
+}
+
+/** True when schedule window blocks new entries at ts. Blank start/stop = never blocks. */
+export function isScheduleBlockingOpens(ts: number, config: BacktestConfig): boolean {
+  const startMin = parseScheduleTimeHHMM(config.scheduleStartTime);
+  const stopMin = parseScheduleTimeHHMM(config.scheduleStopTime);
+  if (startMin == null && stopMin == null) return false;
+  const tz = config.scheduleTimezone || 'Europe/London';
+  if (config.scheduleRepeatDaily === false && config.scheduleActiveDate) {
+    if (dateKeyInTimezone(ts, tz) !== config.scheduleActiveDate) return false;
+  }
+  const nowMin = minutesInTimezone(ts, tz);
+  let active: boolean;
+  if (startMin != null && stopMin != null) {
+    if (startMin <= stopMin) active = nowMin >= startMin && nowMin < stopMin;
+    else active = nowMin >= startMin || nowMin < stopMin;
+  } else if (startMin != null) active = nowMin >= startMin;
+  else active = nowMin < stopMin!;
+  return !active;
 }
 
 /** Close minute (London) for the dealing session containing ts, or null if flat/unknown. */
@@ -208,21 +239,9 @@ function dealingSessionCloseMinLondon(ts: number, week: DealingWeekLondon): numb
   return null;
 }
 
-/** True when live auto-stop would block new entries at ts (last N minutes before close / UTC midnight). */
+/** @deprecated Use isScheduleBlockingOpens */
 export function isAutoStopBlockingOpens(ts: number, config: BacktestConfig): boolean {
-  const beforeMinutes = resolveAutoStopBeforeMinutes(config);
-  if (beforeMinutes == null) return false;
-  if (config.is24_7) {
-    const d = new Date(ts);
-    const nextMidnightUtc = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1, 0, 0, 0, 0);
-    return ts >= nextMidnightUtc - beforeMinutes * 60 * 1000;
-  }
-  const week = config.dealingWeekLondon;
-  if (!week || week.length !== 7) return false;
-  const closeMin = dealingSessionCloseMinLondon(ts, week);
-  if (closeMin == null) return false;
-  const min = londonMinutesSinceMidnight(ts);
-  return min >= closeMin - beforeMinutes;
+  return isScheduleBlockingOpens(ts, config);
 }
 
 /** True if IG-style dealing is open at ts (London calendar day + overnight sessions). */
@@ -1039,7 +1058,6 @@ export function runBacktest(
   let openPosition: Position | null = null;
   let buyStoppedAfterLoss = false;
   let sellStoppedAfterLoss = false;
-  let autoStopped = false;
   let pausedUntilTs: number | null = null;
 
   function isEnginePaused(ts: number): boolean {
@@ -1047,7 +1065,7 @@ export function runBacktest(
   }
 
   function isDirectionActive(direction: 'BUY' | 'SELL', ts: number): boolean {
-    if (autoStopped || isEnginePaused(ts)) return false;
+    if (isScheduleBlockingOpens(ts, config) || isEnginePaused(ts)) return false;
     if (direction === 'BUY' && buyStoppedAfterLoss) return false;
     if (direction === 'SELL' && sellStoppedAfterLoss) return false;
     return true;
@@ -1055,13 +1073,12 @@ export function runBacktest(
 
   function onTradeClosed(trade: BacktestTrade): void {
     if (trade.profitLoss >= 0) return;
-    const direction = trade.direction;
-    const stopAfterLoss =
-      (direction === 'BUY' && config.stopAfterLossBuy) ||
-      (direction === 'SELL' && config.stopAfterLossSell);
-    if (direction === 'BUY' && config.stopAfterLossBuy) buyStoppedAfterLoss = true;
-    if (direction === 'SELL' && config.stopAfterLossSell) sellStoppedAfterLoss = true;
-    if (stopAfterLoss) return;
+    const stopAfterLoss = config.stopAfterLossBuy || config.stopAfterLossSell;
+    if (stopAfterLoss) {
+      buyStoppedAfterLoss = true;
+      sellStoppedAfterLoss = true;
+      return;
+    }
     const buySec = config.pauseOnLossSecondsBuy ?? 0;
     const sellSec = config.pauseOnLossSecondsSell ?? 0;
     const seconds = Math.max(buySec, sellSec);
@@ -1109,9 +1126,6 @@ export function runBacktest(
       onProgress(i + 1, totalSamples);
     }
     const s = samples[i];
-    if (!autoStopped && isAutoStopBlockingOpens(s.ts, config)) {
-      autoStopped = true;
-    }
     const mid = (s.bid + s.offer) / 2;
     priceHistory.push({ ts: s.ts, mid, spread: s.spread });
 
@@ -1157,7 +1171,7 @@ export function runBacktest(
     const blocked = openPosition !== null;
     const pass = rulesPass;
     const dealingOpen = isDealingOpenLondon(s.ts, config.dealingWeekLondon ?? null);
-    const canOpenHere = pass && dealingOpen && !autoStopped && !isEnginePaused(s.ts);
+    const canOpenHere = pass && dealingOpen && !isScheduleBlockingOpens(s.ts, config) && !isEnginePaused(s.ts);
 
     // Sole blockers: flat, no deal would open; exactly one rule fails (per legacy list or per BUY/SELL set).
     if (!blocked && !pass) {

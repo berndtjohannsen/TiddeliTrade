@@ -971,7 +971,7 @@ export async function getPositions(session: IgSession): Promise<Position[]> {
 
   const data = (await res.json()) as {
     positions?: Array<{
-      position?: { dealId?: string; dealReference?: string; direction?: string; size?: number; level?: number; limitLevel?: number; stopLevel?: number; createdDate?: string; contractSize?: number; currency?: string };
+      position?: { dealId?: string; dealReference?: string; direction?: string; size?: number; level?: number; limitLevel?: number; stopLevel?: number; stopDistance?: number; createdDate?: string; contractSize?: number; currency?: string };
       market?: { epic?: string; expiry?: string; instrumentName?: string; bid?: number; offer?: number };
     }>;
   };
@@ -983,17 +983,23 @@ export async function getPositions(session: IgSession): Promise<Position[]> {
       const epic = p.market!.epic!;
       const expiry = p.market?.expiry || inferExpiry(epic);
       const contractSize = p.position?.contractSize ?? 1;
+      const level = p.position!.level ?? 0;
+      const direction = (p.position!.direction || 'BUY') as 'BUY' | 'SELL';
+      let stopLevel = p.position!.stopLevel;
+      if ((stopLevel == null || isNaN(stopLevel)) && p.position?.stopDistance != null && !isNaN(p.position.stopDistance)) {
+        stopLevel = direction === 'BUY' ? level - p.position.stopDistance : level + p.position.stopDistance;
+      }
       return {
         dealId: p.position!.dealId!,
         dealReference: p.position!.dealReference,
         epic,
         expiry,
         instrumentName: p.market?.instrumentName,
-        direction: (p.position!.direction || 'BUY') as 'BUY' | 'SELL',
+        direction,
         size: p.position!.size ?? 0,
-        level: p.position!.level ?? 0,
+        level,
         limitLevel: p.position!.limitLevel,
-        stopLevel: p.position!.stopLevel,
+        stopLevel,
         createdAt: p.position!.createdDate || '',
         contractSize,
         currency: p.position?.currency,

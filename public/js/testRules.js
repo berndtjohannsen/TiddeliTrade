@@ -2224,12 +2224,13 @@ export function initTestRules(socket, state, log, profileOpts) {
         dynamicSlSell: cfg.dynamicSlSell,
         stopAfterLossBuy: cfg.engineControls && cfg.engineControls.stopAfterLossBuy,
         stopAfterLossSell: cfg.engineControls && cfg.engineControls.stopAfterLossSell,
-        autoStopEnabledBuy: cfg.engineControls && cfg.engineControls.autoStopEnabledBuy,
-        autoStopEnabledSell: cfg.engineControls && cfg.engineControls.autoStopEnabledSell,
-        autoStopBeforeMinutesBuy: cfg.engineControls && cfg.engineControls.autoStopBeforeMinutesBuy,
-        autoStopBeforeMinutesSell: cfg.engineControls && cfg.engineControls.autoStopBeforeMinutesSell,
         pauseOnLossSecondsBuy: cfg.engineControls && cfg.engineControls.pauseOnLossSecondsBuy,
-        pauseOnLossSecondsSell: cfg.engineControls && cfg.engineControls.pauseOnLossSecondsSell
+        pauseOnLossSecondsSell: cfg.engineControls && cfg.engineControls.pauseOnLossSecondsSell,
+        scheduleStartTime: cfg.engineControls && cfg.engineControls.scheduleStartTime,
+        scheduleStopTime: cfg.engineControls && cfg.engineControls.scheduleStopTime,
+        scheduleRepeatDaily: cfg.engineControls && cfg.engineControls.scheduleRepeatDaily,
+        scheduleActiveDate: cfg.engineControls && cfg.engineControls.scheduleActiveDate,
+        scheduleTimezone: cfg.engineControls && cfg.engineControls.scheduleTimezone
       });
     });
   }

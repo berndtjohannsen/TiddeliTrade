@@ -341,36 +341,52 @@
         </div>
       </section>
       <div class="trade-layout-rules">
-      <section id="tradingRulesBuyPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-0 w-full hidden">
-        <div class="flex items-center justify-between gap-2 mb-2">
-          <h3 class="text-sm font-semibold text-emerald-400" data-tooltip="BUY rules – engine evaluates these first. When running: places deals when conditions met.">BUY rules</h3>
-          <button type="button" id="tradingRulesToggle" class="px-2 py-1 rounded text-xs font-medium transition-colors" title="Start/stop rules engine">Stop</button>
-        </div>
-        <p id="tradingRulesEngineStatus" class="text-xs text-slate-500 mb-2" data-tooltip="Running = engine evaluates rules and can place deals. Stopped = manual trading only.">Engine: Stopped</p>
-        <p id="tradingRulesLockedMsg" class="text-xs text-amber-400 mb-2 hidden" data-tooltip="Rules cannot be edited while the engine is running">Rules locked – stop the engine to edit</p>
-        <div class="space-y-2 text-sm mb-3">
+      <section id="tradingRulesCommonPanel" class="trade-layout-rules-common bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-0 w-full hidden">
+        <div class="flex items-center justify-between gap-2 mb-2 flex-wrap">
+          <h3 class="text-sm font-semibold text-slate-300" data-tooltip="Shared engine settings for BUY and SELL rules">Rules engine</h3>
           <div class="flex items-center gap-2">
-            <input type="checkbox" id="tradingRulesConfirmBeforePlace" checked class="rounded bg-slate-800 border-slate-600 text-emerald-500 focus:ring-emerald-500">
+            <button type="button" id="tradingRulesToggle" class="px-3 py-1 rounded text-xs font-medium transition-colors bg-emerald-600 hover:bg-emerald-500 text-white" title="Start/stop rules engine">Start</button>
+          </div>
+        </div>
+        <p id="tradingRulesEngineStatus" class="text-xs text-slate-500 mb-2" data-tooltip="Running = engine evaluates rules and can place deals. Stopped = manual trading only.">BUY: Stopped • SELL: Stopped</p>
+        <p id="tradingRulesLockedMsg" class="text-xs text-amber-400 mb-2 hidden" data-tooltip="Engine settings cannot be edited while BUY or SELL engine is running">Settings locked – stop all engines to edit</p>
+        <div class="space-y-2 text-sm mb-2">
+          <div class="flex items-center gap-2">
+            <input type="checkbox" id="tradingRulesConfirmBeforePlace" checked class="rounded bg-slate-800 border-slate-600 text-sky-500 focus:ring-sky-500">
             <label for="tradingRulesConfirmBeforePlace" class="text-slate-500" data-tooltip="When unchecked, deals place automatically without confirmation dialog">Confirm before placing</label>
           </div>
           <div class="flex flex-wrap items-center gap-2">
-            <input type="checkbox" id="tradingRulesAutoStop" checked class="rounded bg-slate-800 border-slate-600 text-emerald-500 focus:ring-emerald-500">
-            <label for="tradingRulesAutoStop" class="text-slate-500 shrink-0" data-tooltip="When enabled, engine auto-stops N minutes before market close (or midnight for 24/7)">Auto-stop engine</label>
-            <label for="tradingRulesAutoStopMinutes" class="text-slate-500 text-xs shrink-0">min before:</label>
-            <input type="number" id="tradingRulesAutoStopMinutes" min="0" max="1440" value="60" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Minutes before market close (or midnight for 24/7) to stop the engine. Default 60.">
-            <span id="tradingRulesAutoStopTime" class="text-xs font-mono text-slate-400" data-tooltip="Local time when engine will auto-stop">—</span>
-          </div>
-          <div class="flex flex-wrap items-center gap-2">
-            <label for="tradingRulesPauseOnLoss" class="text-slate-500 shrink-0" data-tooltip="When a trade closes with a loss, stop the engine for this many seconds before resuming">Pause on loss</label>
-            <input type="number" id="tradingRulesPauseOnLoss" min="0" max="86400" value="0" placeholder="0" class="w-20 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Seconds to pause after a losing trade. 0 = disabled.">
+            <label for="tradingRulesPauseOnLoss" class="text-slate-500 shrink-0" data-tooltip="When a rules deal closes with a loss, pause both engines for this many seconds before resuming">Pause on loss</label>
+            <input type="number" id="tradingRulesPauseOnLoss" min="0" max="86400" value="0" placeholder="0" class="w-20 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Seconds to pause after a losing rules trade. 0 = disabled.">
             <span class="text-slate-500 text-xs shrink-0">sec</span>
           </div>
           <div class="flex items-center gap-2">
-            <input type="checkbox" id="tradingRulesStopAfterLossBuy" class="rounded bg-slate-800 border-slate-600 text-emerald-500 focus:ring-emerald-500">
-            <label for="tradingRulesStopAfterLossBuy" class="text-slate-500 text-xs" data-tooltip="When a deal opened by this BUY engine closes at a loss, the BUY engine stops until you start it again. Does not affect manual deals.">Stop after loss</label>
+            <input type="checkbox" id="tradingRulesStopAfterLoss" class="rounded bg-slate-800 border-slate-600 text-sky-500 focus:ring-sky-500">
+            <label for="tradingRulesStopAfterLoss" class="text-slate-500 text-xs" data-tooltip="When any rules deal closes at a loss, stop the whole engine (BUY and SELL) until you start it again. Does not affect manual deals.">Stop after loss</label>
+          </div>
+          <div class="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-800">
+            <span class="text-slate-500 text-xs shrink-0" data-tooltip="Local time window when running engines may open new deals. Leave blank for no limit.">Active from</span>
+            <input type="time" id="tradingRulesScheduleStart" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Earliest time to open new deals (local). Blank = no start limit.">
+            <span class="text-slate-500 text-xs shrink-0">to</span>
+            <input type="time" id="tradingRulesScheduleStop" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Latest time to open new deals (local). At stop time running engines are stopped. Blank = no stop limit.">
+            <label class="flex items-center gap-1.5 shrink-0">
+              <input type="checkbox" id="tradingRulesScheduleRepeatDaily" checked class="rounded bg-slate-800 border-slate-600 text-sky-500 focus:ring-sky-500">
+              <span class="text-slate-500 text-xs" data-tooltip="When checked, the time window applies every day. When unchecked, it applies only on the day you save these settings.">Repeat each day</span>
+            </label>
+            <span id="tradingRulesScheduleStatus" class="text-xs font-mono text-slate-400" data-tooltip="Whether the engine may open new deals right now">—</span>
           </div>
         </div>
-        <p class="text-xs text-slate-500 mb-2" data-tooltip="When both running: BUY evaluated first, then SELL. Each panel has its own Start.">When both running: BUY first, then SELL.</p>
+        <p class="text-xs text-slate-500" data-tooltip="When both enabled: BUY evaluated first, then SELL.">When both enabled: BUY first, then SELL.</p>
+      </section>
+      <section id="tradingRulesBuyPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-0 w-full hidden">
+        <div class="flex items-center justify-between gap-2 mb-2">
+          <h3 class="text-sm font-semibold text-emerald-400" data-tooltip="BUY rules – engine evaluates these first. When running: places deals when conditions met.">BUY rules</h3>
+        </div>
+        <div class="flex items-center gap-2 mb-2">
+          <input type="checkbox" id="tradingRulesBuyEnabled" checked class="rounded bg-slate-800 border-slate-600 text-emerald-500 focus:ring-emerald-500">
+          <label for="tradingRulesBuyEnabled" class="text-slate-500 text-xs" data-tooltip="When unchecked, BUY rules are skipped while the engine is running">Enabled</label>
+        </div>
+        <p id="tradingRulesLockedMsgBuy" class="text-xs text-amber-400 mb-2 hidden" data-tooltip="Rules cannot be edited while the BUY engine is running">Rules locked – stop BUY engine to edit</p>
         <div class="space-y-2">
           <div id="tradingRulesBuyHeader" class="rules-grid px-2 pb-1 text-xs text-slate-500 border-b border-slate-700/50">
             <span data-tooltip="Drag to reorder">⋮⋮</span><span>On</span><span>Live</span><span>Op</span><span>Ref</span><span>✓</span><span></span>
@@ -435,33 +451,12 @@
       <section id="tradingRulesSellPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-0 w-full hidden">
         <div class="flex items-center justify-between gap-2 mb-2">
           <h3 class="text-sm font-semibold text-red-400" data-tooltip="SELL rules – evaluated after BUY. Same structure as BUY panel.">SELL rules</h3>
-          <button type="button" id="tradingRulesToggleSell" class="px-2 py-1 rounded text-xs font-medium transition-colors" title="Start/stop rules engine">Stop</button>
         </div>
-        <p id="tradingRulesEngineStatusSell" class="text-xs text-slate-500 mb-2" data-tooltip="Running = engine evaluates rules and can place deals. Stopped = manual trading only.">Engine: Stopped</p>
-        <p id="tradingRulesLockedMsgSell" class="text-xs text-amber-400 mb-2 hidden" data-tooltip="Rules cannot be edited while the engine is running">Rules locked – stop the engine to edit</p>
-        <div class="space-y-2 text-sm mb-3">
-          <div class="flex items-center gap-2">
-            <input type="checkbox" id="tradingRulesConfirmBeforePlaceSell" checked class="rounded bg-slate-800 border-slate-600 text-red-500 focus:ring-red-500">
-            <label for="tradingRulesConfirmBeforePlaceSell" class="text-slate-500" data-tooltip="When unchecked, deals place automatically without confirmation dialog">Confirm before placing</label>
-          </div>
-          <div class="flex flex-wrap items-center gap-2">
-            <input type="checkbox" id="tradingRulesAutoStopSell" checked class="rounded bg-slate-800 border-slate-600 text-red-500 focus:ring-red-500">
-            <label for="tradingRulesAutoStopSell" class="text-slate-500 shrink-0" data-tooltip="When enabled, engine auto-stops N minutes before market close (or midnight for 24/7)">Auto-stop engine</label>
-            <label for="tradingRulesAutoStopMinutesSell" class="text-slate-500 text-xs shrink-0">min before:</label>
-            <input type="number" id="tradingRulesAutoStopMinutesSell" min="0" max="1440" value="60" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Minutes before market close (or midnight for 24/7) to stop the engine. Default 60.">
-            <span id="tradingRulesAutoStopTimeSell" class="text-xs font-mono text-slate-400" data-tooltip="Local time when engine will auto-stop">—</span>
-          </div>
-          <div class="flex flex-wrap items-center gap-2">
-            <label for="tradingRulesPauseOnLossSell" class="text-slate-500 shrink-0" data-tooltip="When a trade closes with a loss, stop the engine for this many seconds before resuming">Pause on loss</label>
-            <input type="number" id="tradingRulesPauseOnLossSell" min="0" max="86400" value="0" placeholder="0" class="w-20 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Seconds to pause after a losing trade. 0 = disabled.">
-            <span class="text-slate-500 text-xs shrink-0">sec</span>
-          </div>
-          <div class="flex items-center gap-2">
-            <input type="checkbox" id="tradingRulesStopAfterLossSell" class="rounded bg-slate-800 border-slate-600 text-red-500 focus:ring-red-500">
-            <label for="tradingRulesStopAfterLossSell" class="text-slate-500 text-xs" data-tooltip="When a deal opened by this SELL engine closes at a loss, the SELL engine stops until you start it again. Does not affect manual deals.">Stop after loss</label>
-          </div>
+        <div class="flex items-center gap-2 mb-2">
+          <input type="checkbox" id="tradingRulesSellEnabled" checked class="rounded bg-slate-800 border-slate-600 text-red-500 focus:ring-red-500">
+          <label for="tradingRulesSellEnabled" class="text-slate-500 text-xs" data-tooltip="When unchecked, SELL rules are skipped while the engine is running">Enabled</label>
         </div>
-        <p class="text-xs text-slate-500 mb-2" data-tooltip="When both running: BUY evaluated first, then SELL. Each panel has its own Start.">When both running: BUY first, then SELL.</p>
+        <p id="tradingRulesLockedMsgSell" class="text-xs text-amber-400 mb-2 hidden" data-tooltip="Rules cannot be edited while the SELL engine is running">Rules locked – stop SELL engine to edit</p>
         <div class="space-y-2">
           <div id="tradingRulesSellHeader" class="rules-grid px-2 pb-1 text-xs text-slate-500 border-b border-slate-700/50">
             <span data-tooltip="Drag to reorder">⋮⋮</span><span>On</span><span>Live</span><span>Op</span><span>Ref</span><span>✓</span><span></span>

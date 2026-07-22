@@ -53,6 +53,10 @@ export interface UserConfig {
     tradingRulesRunning?: boolean;
     /** When false, engine places deals automatically without confirmation dialog */
     tradingRulesConfirmBeforePlace?: boolean;
+    tradingRulesScheduleStartTime?: string;
+    tradingRulesScheduleStopTime?: string;
+    tradingRulesScheduleRepeatDaily?: boolean;
+    tradingRulesScheduleActiveDate?: string;
     /** Rules to evaluate: left (live value) op right (reference). All enabled must pass. No deal if position/order exists. @deprecated Use ruleSets instead. */
     tradingRules?: Array<{ left: string; op: string; right: string; enabled?: boolean }>;
     /** Per-direction rule sets: BUY rules + deal params, SELL rules + deal params. Evaluation order: BUY first, then SELL. */
@@ -85,6 +89,8 @@ export interface UserConfig {
     tradingRulesAutoStopBeforeMinutesSell?: number;
     tradingRulesStopAfterLossBuy?: boolean;
     tradingRulesStopAfterLossSell?: boolean;
+    /** Unified stop-after-loss (both directions). */
+    tradingRulesStopAfterLoss?: boolean;
     /** Seconds to pause engine after a losing trade. 0 = disabled. */
     tradingRulesPauseOnLossSeconds?: number;
     tradingRulesPauseOnLossSecondsBuy?: number;
@@ -169,10 +175,20 @@ export interface InstrumentSettings {
   tradingRulesPauseOnLossSeconds?: number;
   tradingRulesPauseOnLossSecondsBuy?: number;
   tradingRulesPauseOnLossSecondsSell?: number;
-  /** When true, a BUY-rules deal that closes at a loss stops the BUY engine until restarted. */
+  /** When true, a rules deal that closes at a loss stops that direction’s engine until restarted. */
+  tradingRulesStopAfterLoss?: boolean;
   tradingRulesStopAfterLossBuy?: boolean;
-  /** When true, a SELL-rules deal that closes at a loss stops the SELL engine until restarted. */
   tradingRulesStopAfterLossSell?: boolean;
+  tradingRulesScheduleStartTime?: string;
+  tradingRulesScheduleStopTime?: string;
+  tradingRulesScheduleRepeatDaily?: boolean;
+  tradingRulesScheduleActiveDate?: string;
+  rulesRunningBuy?: boolean;
+  rulesRunningSell?: boolean;
+  /** When false, BUY rules are skipped while the engine is running. Default true. */
+  rulesBuyEnabled?: boolean;
+  /** When false, SELL rules are skipped while the engine is running. Default true. */
+  rulesSellEnabled?: boolean;
   /** Saved Research backtest profiles for this instrument. */
   backtestProfiles?: BacktestProfile[];
 }

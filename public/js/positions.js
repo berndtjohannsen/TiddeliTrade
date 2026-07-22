@@ -37,36 +37,48 @@ export function initPositions(socket, state, showDealMessage, clearDealMessage, 
       : String(val);
   }
 
-  function buildDynamicStopLossRows(dealId, currency) {
+  function findDynamicStopLoss(dealId) {
     var dslList = state.dynamicStopLossStatus || [];
     for (var di = 0; di < dslList.length; di++) {
-      if (dslList[di].dealId !== dealId) continue;
-      var dsl = dslList[di];
-      var cur = currency || '';
-      var triggerStr = dsl.triggerProfit != null && !isNaN(dsl.triggerProfit)
-        ? formatMoney(dsl.triggerProfit, cur)
-        : '—';
-      var lockStr = dsl.lockProfit != null && !isNaN(dsl.lockProfit)
-        ? formatMoney(dsl.lockProfit, cur)
-        : '—';
-      var stepStr = dsl.minStepProfit != null && !isNaN(dsl.minStepProfit) && dsl.minStepProfit > 0
-        ? formatMoney(dsl.minStepProfit, cur)
-        : '—';
-      var highestLockStr = dsl.highestLockApplied > 0
-        ? formatMoney(dsl.highestLockApplied, cur)
-        : '—';
-      var lastStopStr = dsl.lastStopLevel != null && !isNaN(dsl.lastStopLevel) ? formatPrice(dsl.lastStopLevel) : '—';
-      var statusStr = dsl.lastMessage || 'Active';
-      return (
-        '<dt class="text-slate-500" data-tooltip="Profit before trailing starts">DSL trigger</dt><dd class="font-mono text-amber-400/90">' + triggerStr + '</dd>' +
-        '<dt class="text-slate-500" data-tooltip="Initial locked profit once trigger is hit">DSL lock</dt><dd class="font-mono text-amber-400/90">' + lockStr + '</dd>' +
-        '<dt class="text-slate-500" data-tooltip="Minimum profit step before stop is amended again">DSL min step</dt><dd class="font-mono text-amber-400/90">' + stepStr + '</dd>' +
-        '<dt class="text-slate-500" data-tooltip="Highest locked profit applied so far">DSL lock applied</dt><dd class="font-mono text-amber-400/90">' + highestLockStr + '</dd>' +
-        '<dt class="text-slate-500" data-tooltip="Last stop level sent to IG">DSL stop level</dt><dd class="font-mono text-amber-400/90">' + lastStopStr + '</dd>' +
-        '<dt class="text-slate-500" data-tooltip="App is trailing stop on IG (no take profit)">DSL status</dt><dd class="font-mono text-amber-400/90 text-[10px]">' + statusStr + '</dd>'
-      );
+      if (dslList[di].dealId === dealId) return dslList[di];
     }
-    return '';
+    return null;
+  }
+
+  /** IG stopLevel, or DSL lastStopLevel when IG omits it on the positions poll. */
+  function resolveStopLossLevel(pos) {
+    if (pos.stopLevel != null && !isNaN(pos.stopLevel)) return pos.stopLevel;
+    var dsl = findDynamicStopLoss(pos.dealId);
+    if (dsl && dsl.lastStopLevel != null && !isNaN(dsl.lastStopLevel)) return dsl.lastStopLevel;
+    return null;
+  }
+
+  function buildDynamicStopLossRows(dealId, currency) {
+    var dsl = findDynamicStopLoss(dealId);
+    if (!dsl) return '';
+    var cur = currency || '';
+    var triggerStr = dsl.triggerProfit != null && !isNaN(dsl.triggerProfit)
+      ? formatMoney(dsl.triggerProfit, cur)
+      : '—';
+    var lockStr = dsl.lockProfit != null && !isNaN(dsl.lockProfit)
+      ? formatMoney(dsl.lockProfit, cur)
+      : '—';
+    var stepStr = dsl.minStepProfit != null && !isNaN(dsl.minStepProfit) && dsl.minStepProfit > 0
+      ? formatMoney(dsl.minStepProfit, cur)
+      : '—';
+    var highestLockStr = dsl.highestLockApplied > 0
+      ? formatMoney(dsl.highestLockApplied, cur)
+      : '—';
+    var lastStopStr = dsl.lastStopLevel != null && !isNaN(dsl.lastStopLevel) ? formatPrice(dsl.lastStopLevel) : '—';
+    var statusStr = dsl.lastMessage || 'Active';
+    return (
+      '<dt class="text-slate-500" data-tooltip="Profit before trailing starts">DSL trigger</dt><dd class="font-mono text-amber-400/90">' + triggerStr + '</dd>' +
+      '<dt class="text-slate-500" data-tooltip="Initial locked profit once trigger is hit">DSL lock</dt><dd class="font-mono text-amber-400/90">' + lockStr + '</dd>' +
+      '<dt class="text-slate-500" data-tooltip="Minimum profit step before stop is amended again">DSL min step</dt><dd class="font-mono text-amber-400/90">' + stepStr + '</dd>' +
+      '<dt class="text-slate-500" data-tooltip="Highest locked profit applied so far">DSL lock applied</dt><dd class="font-mono text-amber-400/90">' + highestLockStr + '</dd>' +
+      '<dt class="text-slate-500" data-tooltip="Last stop level sent to IG">DSL stop level</dt><dd class="font-mono text-amber-400/90">' + lastStopStr + '</dd>' +
+      '<dt class="text-slate-500" data-tooltip="App is trailing stop on IG (no take profit)">DSL status</dt><dd class="font-mono text-amber-400/90 text-[10px]">' + statusStr + '</dd>'
+    );
   }
 
   function renderPositions(positions) {
@@ -112,6 +124,10 @@ export function initPositions(socket, state, showDealMessage, clearDealMessage, 
       var scheduledCloseStrTz = pos.closeAt ? formatTimeWithTz(pos.closeAt) : '—';
       var scheduledCloseRow = '<dt class="text-slate-500" data-tooltip="App will auto-close at this time (app must be running)">Scheduled close</dt><dd class="font-mono text-slate-400">' + scheduledCloseStrTz + '</dd>';
       var dslRows = buildDynamicStopLossRows(pos.dealId, pos.currency || '');
+      var stopLevel = resolveStopLossLevel(pos);
+      var stopLossTip = findDynamicStopLoss(pos.dealId) && (pos.stopLevel == null || isNaN(pos.stopLevel))
+        ? 'Stop level from dynamic stop loss (IG positions poll had no stopLevel)'
+        : 'Stop loss level on IG';
       var cancelSchedBtn = hasScheduledClose
         ? '<button type="button" class="mt-1 w-full px-2 py-1 rounded bg-amber-600/80 hover:bg-amber-600 text-white text-xs font-medium transition-colors cancel-scheduled-close" data-deal-id="' + (pos.dealId || '') + '">Cancel scheduled close</button>'
         : '';
@@ -128,7 +144,7 @@ export function initPositions(socket, state, showDealMessage, clearDealMessage, 
         '<dt class="text-slate-500" data-tooltip="When position was opened (local time)">Opened at</dt><dd class="font-mono text-slate-400 text-xs">' + openedAtStr + '</dd>' +
         '<dt class="text-slate-500" data-tooltip="Net gain/loss if closed at current price">Net if closed</dt><dd class="font-mono ' + netClass + '" data-net-value>' + netStr + '</dd>' +
         '<dt class="text-slate-500">Take profit</dt><dd class="font-mono text-slate-400">' + (pos.limitLevel != null ? pos.limitLevel : '—') + '</dd>' +
-        '<dt class="text-slate-500">Stop loss</dt><dd class="font-mono text-slate-400">' + (pos.stopLevel != null ? pos.stopLevel : '—') + '</dd>' +
+        '<dt class="text-slate-500" data-tooltip="' + stopLossTip + '">Stop loss</dt><dd class="font-mono text-slate-400">' + (stopLevel != null ? formatPrice(stopLevel) : '—') + '</dd>' +
         dslRows +
         scheduledCloseRow +
         '<dt class="text-slate-500">Position value</dt><dd class="font-mono text-slate-300">' + posValueStr + '</dd>' +

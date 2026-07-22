@@ -136,6 +136,9 @@
   gap: 1rem;
   min-width: 0;
 }
+.trade-layout-rules-common {
+  grid-column: 1 / -1;
+}
 @media (min-width: 960px) {
   .trade-layout-rules {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
