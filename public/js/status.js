@@ -1,13 +1,14 @@
 /**
- * Version display, status, start/stop.
+ * Version display, status, session connect/disconnect (Probes + Research).
  */
 import { state } from './state.js';
 
-export function initStatus(socket, log) {
+export function initStatus(socket, log, opts) {
+  var onStopProbing = opts && opts.onStopProbing ? opts.onStopProbing : null;
   const versionEl = document.getElementById('version');
   const statusEl = document.getElementById('status');
-  const startBtn = document.getElementById('startBtn');
-  const stopBtn = document.getElementById('stopBtn');
+  const startBtns = Array.from(document.querySelectorAll('.sessionStartBtn'));
+  const stopBtns = Array.from(document.querySelectorAll('.sessionStopBtn'));
   const mainPlaceholder = document.getElementById('mainPlaceholder');
 
   fetch('/api/version')
@@ -19,6 +20,17 @@ export function initStatus(socket, log) {
       if (versionEl) versionEl.textContent = 'TiddeliTrade ver: 0.0.0';
     });
 
+  function setSessionButtons(isRunning, isConnecting, isDisconnected) {
+    startBtns.forEach(function (btn) {
+      btn.classList.toggle('hidden', isRunning);
+      btn.disabled = isRunning || isConnecting;
+    });
+    stopBtns.forEach(function (btn) {
+      btn.classList.toggle('hidden', !isRunning || isDisconnected);
+      btn.disabled = !isRunning;
+    });
+  }
+
   function setStatus(status) {
     state.engineStatus = (status === 'disconnected' ? 'ready' : status) || 'ready';
     var label = (status || 'ready').charAt(0).toUpperCase() + (status || 'ready').slice(1);
@@ -26,11 +38,10 @@ export function initStatus(socket, log) {
     var isRunning = status === 'running';
     var isConnecting = status === 'connecting';
     var isDisconnected = status === 'disconnected';
-    if (startBtn) { startBtn.classList.toggle('hidden', isRunning); startBtn.disabled = isRunning || isConnecting; }
-    if (stopBtn) { stopBtn.classList.toggle('hidden', !isRunning || isDisconnected); stopBtn.disabled = !isRunning; }
+    setSessionButtons(isRunning, isConnecting, isDisconnected);
     if (mainPlaceholder && isConnecting) {
-      mainPlaceholder.textContent = 'Connecting...';
-      mainPlaceholder.classList.remove('text-red-500');
+      mainPlaceholder.textContent = 'Connecting…';
+      mainPlaceholder.classList.remove('hidden', 'text-red-500');
     }
   }
 
@@ -40,16 +51,22 @@ export function initStatus(socket, log) {
     setStatus('disconnected');
   });
 
-  if (startBtn) {
-    startBtn.addEventListener('click', function () {
-      log('Start clicked');
-      socket.emit('start');
-    });
+  function onStartClick() {
+    log('Start probing clicked');
+    socket.emit('start');
   }
-  if (stopBtn) {
-    stopBtn.addEventListener('click', function () {
-      log('Stop clicked');
-      socket.emit('stop');
-    });
+
+  function onStopClick(ev) {
+    var btn = ev && ev.currentTarget;
+    if (btn && btn.id === 'probesSessionStopBtn' && onStopProbing) onStopProbing();
+    log('Stop probing clicked');
+    socket.emit('stop');
   }
+
+  startBtns.forEach(function (btn) {
+    btn.addEventListener('click', onStartClick);
+  });
+  stopBtns.forEach(function (btn) {
+    btn.addEventListener('click', onStopClick);
+  });
 }

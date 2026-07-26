@@ -35,7 +35,7 @@ export const state = {
   dayStartBuy: null,
   /** Active IG profile: 'demo' or 'live'. From account response or config. */
   activeProfile: 'demo',
-  /** App/engine status: 'ready' | 'connecting' | 'running'. Used for Start/Stop button. */
+  /** App/engine status: 'ready' | 'connecting' | 'connected' | 'running' | 'stopped'. */
   engineStatus: 'ready',
   /** Trading rules engine: true when rules can place deals. Used to block epic/watchlist change. */
   rulesEngineRunning: false,

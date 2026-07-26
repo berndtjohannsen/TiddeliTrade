@@ -14,10 +14,11 @@ export function initAppView(opts) {
   /** @type {AppViewId} */
   var currentView = 'trade';
   var connected = false;
+  var workspaceReady = false;
 
   var tradeRoot = document.getElementById('tradeViewRoot');
   var researchRoot = document.getElementById('researchViewRoot');
-  var splashPanel = document.getElementById('splashPanel');
+  var launchPanel = document.getElementById('launchPanel');
   var navTrade = document.getElementById('appNavTrade');
   var navResearch = document.getElementById('appNavResearch');
 
@@ -45,13 +46,14 @@ export function initAppView(opts) {
   }
 
   function applyLayout() {
-    var tradeOn = connected && currentView === 'trade';
-    var researchOn = connected && currentView === 'research';
+    var showWorkspace = workspaceReady;
+    var tradeOn = showWorkspace && currentView === 'trade';
+    var researchOn = showWorkspace && currentView === 'research';
     if (tradeRoot) tradeRoot.classList.toggle('hidden', !tradeOn);
     if (researchRoot) researchRoot.classList.toggle('hidden', !researchOn);
-    if (splashPanel) splashPanel.classList.toggle('hidden', connected);
+    if (launchPanel) launchPanel.classList.toggle('hidden', showWorkspace);
     var placeholder = document.getElementById('mainPlaceholder');
-    if (placeholder) placeholder.classList.toggle('hidden', connected);
+    if (placeholder) placeholder.classList.toggle('hidden', !showWorkspace || connected);
     updateNavButtons();
   }
 
@@ -70,13 +72,20 @@ export function initAppView(opts) {
     applyLayout();
   }
 
+  function setWorkspaceReady(ready) {
+    workspaceReady = !!ready;
+    applyLayout();
+  }
+
   if (navTrade) {
     navTrade.addEventListener('click', function () {
+      if (!workspaceReady) return;
       setView('trade');
     });
   }
   if (navResearch) {
     navResearch.addEventListener('click', function () {
+      if (!workspaceReady) return;
       setView('research');
     });
   }
@@ -84,6 +93,7 @@ export function initAppView(opts) {
   var openTradeRulesBtn = document.getElementById('researchOpenTradeRulesBtn');
   if (openTradeRulesBtn) {
     openTradeRulesBtn.addEventListener('click', function () {
+      if (!workspaceReady) return;
       setView('trade');
     });
   }
@@ -97,8 +107,12 @@ export function initAppView(opts) {
     },
     setView: setView,
     setConnected: setConnected,
+    setWorkspaceReady: setWorkspaceReady,
     isConnected: function () {
       return connected;
+    },
+    isWorkspaceReady: function () {
+      return workspaceReady;
     }
   };
 }

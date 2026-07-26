@@ -11,6 +11,8 @@ export function initTestRules(socket, state, log, profileOpts) {
   var logEl = document.getElementById('testRulesLog');
   var recordingActive = false;
   var engineStatus = 'stopped';
+  var pendingRecordStart = false;
+  var pendingRecordSawConnecting = false;
 
   function appendLog(msg) {
     if (!logBody) return;
@@ -25,25 +27,49 @@ export function initTestRules(socket, state, log, profileOpts) {
     while (logBody.children.length > 100) logBody.removeChild(logBody.firstChild);
   }
 
+  function canStartRecording() {
+    return !!(state.savedEpic) && engineStatus !== 'connecting' && !pendingRecordStart;
+  }
+
   function updateRecordButton() {
     if (!recordBtn) return;
-    var canRecord = engineStatus === 'running' && state.savedEpic;
     if (recordingActive) {
       recordBtn.textContent = 'Stop recording';
       recordBtn.classList.add('bg-amber-600', 'hover:bg-amber-500');
       recordBtn.classList.remove('bg-slate-700', 'hover:bg-slate-600');
       recordBtn.disabled = false;
-    } else {
-      recordBtn.textContent = 'Record';
+    } else if (pendingRecordStart) {
+      recordBtn.textContent = 'Starting…';
       recordBtn.classList.remove('bg-amber-600', 'hover:bg-amber-500');
       recordBtn.classList.add('bg-slate-700', 'hover:bg-slate-600');
-      recordBtn.disabled = !canRecord;
+      recordBtn.disabled = true;
+    } else {
+      recordBtn.textContent = 'Start recording';
+      recordBtn.classList.remove('bg-amber-600', 'hover:bg-amber-500');
+      recordBtn.classList.add('bg-slate-700', 'hover:bg-slate-600');
+      recordBtn.disabled = !canStartRecording();
     }
     recordBtn.title = recordingActive
-      ? 'Stop recording price data to database'
-      : canRecord
-        ? 'Record price data to database at 1/sec for later replay. Requires streaming and instrument selected.'
-        : 'Need to be connected and have an instrument selected to record.';
+      ? 'Stop recording and disconnect from IG price stream'
+      : pendingRecordStart
+        ? 'Connecting to IG…'
+        : canStartRecording()
+          ? 'Record prices to the database (~1/sec). Connects to IG automatically if needed.'
+          : engineStatus === 'connecting'
+            ? 'Wait for IG connection…'
+            : 'Select an instrument on the launch screen to record.';
+  }
+
+  function beginRecording() {
+    socket.emit('recording_start');
+    appendLog('Recording started');
+  }
+
+  function cancelPendingRecord(message) {
+    pendingRecordStart = false;
+    pendingRecordSawConnecting = false;
+    if (message) appendLog(message);
+    updateRecordButton();
   }
 
   socket.on('recorded_sample', function (msg) {
@@ -90,18 +116,45 @@ export function initTestRules(socket, state, log, profileOpts) {
 
   socket.on('status', function (status) {
     engineStatus = status || 'stopped';
+    if (pendingRecordStart && status === 'connecting') pendingRecordSawConnecting = true;
+    if (pendingRecordStart && engineStatus === 'running') {
+      pendingRecordStart = false;
+      pendingRecordSawConnecting = false;
+      beginRecording();
+    } else if (
+      pendingRecordStart &&
+      pendingRecordSawConnecting &&
+      (engineStatus === 'ready' || engineStatus === 'connected')
+    ) {
+      cancelPendingRecord('Could not start stream for recording');
+    } else if (pendingRecordStart && status === 'disconnected') {
+      cancelPendingRecord();
+    }
     updateRecordButton();
+  });
+
+  socket.on('login_error', function () {
+    if (pendingRecordStart) cancelPendingRecord('Could not start stream for recording');
+  });
+
+  socket.on('disconnect', function () {
+    cancelPendingRecord();
   });
 
   if (recordBtn) {
     recordBtn.addEventListener('click', function () {
       if (recordBtn.disabled) return;
       if (recordingActive) {
-        socket.emit('recording_stop');
-        appendLog('Stopping…');
+        socket.emit('stop');
+        appendLog('Stopping recording…');
+      } else if (engineStatus === 'running') {
+        beginRecording();
       } else {
-        socket.emit('recording_start');
-        appendLog('Recording started');
+        pendingRecordStart = true;
+        pendingRecordSawConnecting = false;
+        updateRecordButton();
+        appendLog('Starting stream for recording…');
+        socket.emit('start');
       }
     });
   }
@@ -113,6 +166,10 @@ export function initTestRules(socket, state, log, profileOpts) {
   var analyseProgressModal = document.getElementById('analyseProgressModal');
   var analyseProgressText = document.getElementById('analyseProgressText');
   var analyseProgressStop = document.getElementById('analyseProgressStop');
+  var loadDaysProgressModal = document.getElementById('loadDaysProgressModal');
+  var loadDaysProgressText = document.getElementById('loadDaysProgressText');
+  var pruneProgressModal = document.getElementById('pruneProgressModal');
+  var pruneProgressText = document.getElementById('pruneProgressText');
   var tradeChartModal = document.getElementById('tradeChartModal');
   var tradeChartModalBackdrop = document.getElementById('tradeChartModalBackdrop');
   var tradeChartModalClose = document.getElementById('tradeChartModalClose');
@@ -145,10 +202,10 @@ export function initTestRules(socket, state, log, profileOpts) {
   var profilesApi = initBacktestProfiles(
     Object.assign({}, profileOpts || {}, {
       getEpic: function () {
-        return (epicSelect && epicSelect.value) || state.savedEpic || '';
+        return lastAnalyseEpic || (epicSelect && epicSelect.value) || state.savedEpic || '';
       },
       onLoadProfile: function (profile) {
-        appendLog('Loaded profile: ' + profile.name + ' (embedded rules — re-run Analyse recording for trade list)');
+        appendLog('Active profile: ' + profile.name + ' (applied to Trade)');
       },
       onClearProfile: function () {
         appendLog('Using Trade tab rules for analyse');
@@ -1956,10 +2013,8 @@ export function initTestRules(socket, state, log, profileOpts) {
       if (data.dealingScheduleSource === 'default' && !state.is24_7Market) {
         appendLog('Note: IG did not return usable marketTimes — using default UK Mon–Fri 08:00–21:59 (Europe/London). Log in for exact IG hours per epic.');
       }
-      var epic = (epicSelect && epicSelect.value) || state.savedEpic || '';
-      profilesApi.updateLoadedProfileResult(epic, report).then(function () {
-        if (!profilesApi.getLoadedProfileId()) profilesApi.promptSaveAfterAnalyse(report);
-      });
+      var epic = lastAnalyseEpic || (epicSelect && epicSelect.value) || state.savedEpic || '';
+      profilesApi.promptSaveAfterAnalyseIfNeeded(report, epic);
     }
   });
 
@@ -1976,6 +2031,50 @@ export function initTestRules(socket, state, log, profileOpts) {
   var pruneBtn = document.getElementById('testRulesPruneBtn');
   var pruneMinCountEl = document.getElementById('testRulesPruneMinCount');
   var daysListEl = document.getElementById('testRulesDaysList');
+  var loadDaysPending = false;
+
+  function showLoadDaysProgress() {
+    loadDaysPending = true;
+    if (loadDaysProgressModal) {
+      loadDaysProgressModal.classList.remove('hidden');
+      loadDaysProgressModal.setAttribute('aria-hidden', 'false');
+    }
+    if (loadDaysProgressText) loadDaysProgressText.textContent = 'Scanning database…';
+    if (loadDaysBtn) loadDaysBtn.disabled = true;
+  }
+
+  function hideLoadDaysProgress() {
+    loadDaysPending = false;
+    if (loadDaysProgressModal) {
+      loadDaysProgressModal.classList.add('hidden');
+      loadDaysProgressModal.setAttribute('aria-hidden', 'true');
+    }
+    if (loadDaysBtn) loadDaysBtn.disabled = false;
+  }
+
+  var prunePending = false;
+
+  function showPruneProgress(minCount) {
+    prunePending = true;
+    if (pruneProgressModal) {
+      pruneProgressModal.classList.remove('hidden');
+      pruneProgressModal.setAttribute('aria-hidden', 'false');
+    }
+    if (pruneProgressText) {
+      pruneProgressText.textContent =
+        'Removing days with fewer than ' + (minCount != null ? minCount.toLocaleString() : '—') + ' samples…';
+    }
+    if (pruneBtn) pruneBtn.disabled = true;
+  }
+
+  function hidePruneProgress() {
+    prunePending = false;
+    if (pruneProgressModal) {
+      pruneProgressModal.classList.add('hidden');
+      pruneProgressModal.setAttribute('aria-hidden', 'true');
+    }
+    if (pruneBtn) pruneBtn.disabled = false;
+  }
 
   function getEpicDisplayName(epic) {
     if (!epicSelect || !epic) return epic || '';
@@ -2059,6 +2158,7 @@ export function initTestRules(socket, state, log, profileOpts) {
   }
 
   socket.on('recorded_days', function (data) {
+    if (loadDaysPending) hideLoadDaysProgress();
     if (data && (data.dayStats || data.days)) {
       var stats = data.dayStats || (data.days || []).map(function (d) { return { day: d }; });
       renderDaysList(stats);
@@ -2077,7 +2177,9 @@ export function initTestRules(socket, state, log, profileOpts) {
 
   if (loadDaysBtn) {
     loadDaysBtn.addEventListener('click', function () {
+      if (loadDaysPending) return;
       appendLog('Loading days…');
+      showLoadDaysProgress();
       socket.emit('get_recorded_days', '');
     });
   }
@@ -2113,6 +2215,7 @@ export function initTestRules(socket, state, log, profileOpts) {
 
   if (pruneBtn) {
     pruneBtn.addEventListener('click', function () {
+      if (prunePending) return;
       var epic = (epicSelect && epicSelect.value) || state.savedEpic || '';
       if (!epic) {
         appendLog('Select an instrument first');
@@ -2120,7 +2223,7 @@ export function initTestRules(socket, state, log, profileOpts) {
       }
       var minCount = pruneMinCountEl ? parseInt(pruneMinCountEl.value, 10) : 3600;
       if (isNaN(minCount) || minCount < 0) minCount = 3600;
-      appendLog('Pruning days with fewer than ' + minCount.toLocaleString() + ' samples…');
+      showPruneProgress(minCount);
       socket.emit('prune_sparse_days', { epic: epic, minCount: minCount });
     });
   }
@@ -2136,6 +2239,7 @@ export function initTestRules(socket, state, log, profileOpts) {
   });
 
   socket.on('prune_sparse_days_result', function (data) {
+    hidePruneProgress();
     if (data && data.error) {
       appendLog('Prune failed: ' + data.error);
     } else if (data) {
@@ -2235,6 +2339,11 @@ export function initTestRules(socket, state, log, profileOpts) {
     });
   }
 
+  socket.on('disconnect', function () {
+    hideLoadDaysProgress();
+    hidePruneProgress();
+  });
+
   if (logBody) logBody.innerHTML = '';
 
   return {
@@ -2244,6 +2353,7 @@ export function initTestRules(socket, state, log, profileOpts) {
     },
     refreshProfilesForEpic: function (epic) {
       if (profilesApi && profilesApi.refreshForEpic) profilesApi.refreshForEpic(epic);
-    }
+    },
+    refreshRecordUi: updateRecordButton
   };
 }

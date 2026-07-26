@@ -1,12 +1,12 @@
 /**
  * Account display and workspace connection state.
  */
+import { updateHeaderInstrument } from './onboarding.js';
+
 export function initAccount(socket, state, setBaseEnabled, clearDealMessage, onWorkspaceConnectionChange) {
   var accountInfo = document.getElementById('accountInfo');
   var mainPlaceholder = document.getElementById('mainPlaceholder');
   var splashHint = document.getElementById('splashHint');
-  var watchlistSelect = document.getElementById('watchlistSelect');
-  var epicSelect = document.getElementById('epicSelect');
 
   setBaseEnabled(false);
   if (onWorkspaceConnectionChange) onWorkspaceConnectionChange(false);
@@ -39,9 +39,10 @@ export function initAccount(socket, state, setBaseEnabled, clearDealMessage, onW
         updateProfileBadge();
       }).catch(function () { state.activeProfile = 'demo'; updateProfileBadge(); });
       if (mainPlaceholder) { mainPlaceholder.textContent = ''; mainPlaceholder.classList.add('hidden'); }
-      if (splashHint) { splashHint.textContent = 'Press Start to connect'; splashHint.classList.remove('text-red-500'); }
-      if (watchlistSelect) watchlistSelect.classList.add('hidden');
-      if (epicSelect) epicSelect.disabled = true;
+      if (splashHint) { splashHint.textContent = ''; splashHint.classList.add('hidden'); }
+      fetch('/api/config').then(function (r) { return r.json(); }).then(function (cfg) {
+        updateHeaderInstrument(cfg);
+      }).catch(function () {});
       setBaseEnabled(false);
       if (onWorkspaceConnectionChange) onWorkspaceConnectionChange(false);
       state.currentMinDealSize = null;
@@ -71,11 +72,10 @@ export function initAccount(socket, state, setBaseEnabled, clearDealMessage, onW
     accountInfo.textContent = 'Account: ' + data.accountId + env + ': ' + (data.accountType || '');
     accountInfo.classList.remove('hidden');
     if (mainPlaceholder) mainPlaceholder.textContent = '';
-    if (watchlistSelect) watchlistSelect.classList.remove('hidden');
-    if (epicSelect) epicSelect.disabled = false;
-    setBaseEnabled(true);
-    if (onWorkspaceConnectionChange) onWorkspaceConnectionChange(true);
-    socket.emit('getWatchlists');
+    var sessionActive = state.engineStatus === 'running';
+    setBaseEnabled(sessionActive);
+    if (onWorkspaceConnectionChange) onWorkspaceConnectionChange(sessionActive);
+    if (sessionActive) socket.emit('getWatchlists');
     fetch('/api/config').then(function (r) { return r.json(); }).then(function (cfg) {
       var sizeEl = document.getElementById('dealSize');
       if (sizeEl && cfg.defaultSize) {
@@ -96,7 +96,7 @@ export function initAccount(socket, state, setBaseEnabled, clearDealMessage, onW
   socket.on('disconnect', function () {
     setAccount(null);
     if (disconnectBanner) disconnectBanner.classList.remove('hidden');
-    if (splashHint) splashHint.textContent = 'Server disconnected. Press Start to reconnect.';
+    if (splashHint) splashHint.textContent = 'Server disconnected. Use Connect in your workspace to reconnect.';
     if (splashHint) splashHint.classList.add('text-red-200');
   });
 

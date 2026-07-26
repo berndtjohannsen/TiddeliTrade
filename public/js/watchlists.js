@@ -1,5 +1,5 @@
 /**
- * Watchlists and epics selection.
+ * Watchlists and epics – launch page selects; state sync when connected in workspace.
  * @param {Object} opts - Optional. onEpicChange(epic) called when epic changes (user select or server).
  */
 export function initWatchlists(socket, state, log, opts) {
@@ -8,6 +8,11 @@ export function initWatchlists(socket, state, log, opts) {
   var epicSelect = document.getElementById('epicSelect');
   var headerMessageEl = document.getElementById('headerMessage');
   var headerMessageTimer = null;
+
+  function isLaunchVisible() {
+    var lp = document.getElementById('launchPanel');
+    return lp && !lp.classList.contains('hidden');
+  }
 
   function showHeaderMessage(msg) {
     if (!headerMessageEl) return;
@@ -22,6 +27,7 @@ export function initWatchlists(socket, state, log, opts) {
   }
 
   socket.on('watchlists', function (list) {
+    if (isLaunchVisible()) return;
     if (!watchlistSelect) return;
     var cur = state.savedWatchlistId || watchlistSelect.value;
     watchlistSelect.innerHTML = '<option value="">—</option>';
@@ -44,6 +50,7 @@ export function initWatchlists(socket, state, log, opts) {
   });
 
   socket.on('epics', function (list) {
+    if (isLaunchVisible()) return;
     if (!epicSelect) return;
     var cur = state.savedEpic || epicSelect.value;
     epicSelect.innerHTML = '<option value="">—</option>';
@@ -66,7 +73,7 @@ export function initWatchlists(socket, state, log, opts) {
 
   socket.on('epic', function (epic) {
     state.savedEpic = epic || '';
-    if (epicSelect && epic) {
+    if (epicSelect && epic && !isLaunchVisible()) {
       epicSelect.value = epic;
     }
     onEpicChange(epic);
@@ -74,13 +81,14 @@ export function initWatchlists(socket, state, log, opts) {
 
   socket.on('watchlistId', function (id) {
     state.savedWatchlistId = id || '';
-    if (watchlistSelect && id) {
+    if (watchlistSelect && id && !isLaunchVisible()) {
       watchlistSelect.value = id;
     }
   });
 
   if (watchlistSelect) {
     watchlistSelect.addEventListener('change', function () {
+      if (isLaunchVisible()) return;
       var id = watchlistSelect.value;
       var prevId = state.savedWatchlistId || '';
       if (id === prevId) return;
@@ -98,6 +106,7 @@ export function initWatchlists(socket, state, log, opts) {
 
   if (epicSelect) {
     epicSelect.addEventListener('change', function () {
+      if (isLaunchVisible()) return;
       var epic = epicSelect.value;
       var prevEpic = state.savedEpic || '';
       if (epic === prevEpic) return;

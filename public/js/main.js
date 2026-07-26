@@ -17,6 +17,7 @@ import { initTestRules } from './testRules.js';
 import { initTradingRules } from './tradingRules.js';
 import { initTransactionLog } from './transactionLog.js';
 import { initAppView } from './appView.js';
+import { initOnboarding } from './onboarding.js';
 import { formatTimeWithTz } from './utils.js';
 import { updateDynamicTpStatusDisplay } from './dynamicTpUi.js';
 
@@ -77,14 +78,18 @@ socket.on('dynamic_stop_loss_status', function (list) {
 });
 const orderApi = initOrder(socket, state, log);
 
-initStatus(socket, log);
 var probesApi = initProbes(socket, state, log);
 var testRulesApi = initTestRules(socket, state, log, {
-  applyToTrade: function (strategy) {
-    if (tradingRulesApi.applyRuleSetsSnapshot) tradingRulesApi.applyRuleSetsSnapshot(strategy);
+  applyTradeProfile: function (profile) {
+    if (tradingRulesApi.applyTradeProfile) tradingRulesApi.applyTradeProfile(profile);
   }
 });
 var tradingRulesApi = initTradingRules(socket, state, dealApi.setDealEnabled, orderApi.setOrderEnabled, probesApi.setProbesPanelEnabled, probesApi.setBackfillEnabled, probesApi.getProbeValues, dealApi.triggerDealConfirm, dealApi.placeDealDirect, log);
+initStatus(socket, log, {
+  onStopProbing: function () {
+    tradingRulesApi.stopRulesEngine('Rules engine stopped (probing ended)');
+  }
+});
 probesApi.setOnProbeUpdate(function () { tradingRulesApi.updateDealEnabled(); });
 var transactionLogApi = initTransactionLog(socket);
 
@@ -103,7 +108,10 @@ function hideAllWorkspacePanels() {
 }
 
 function refreshWorkspacePanels() {
-  if (!appView.isConnected()) return;
+  if (!appView.isWorkspaceReady()) {
+    hideAllWorkspacePanels();
+    return;
+  }
   var onTrade = appView.getView() === 'trade';
   setTradePanelsVisible(onTrade);
   testRulesApi.setTestRulesPanelEnabled(!onTrade);
@@ -111,10 +119,30 @@ function refreshWorkspacePanels() {
 
 var appView = initAppView({ onViewChange: refreshWorkspacePanels });
 
+initOnboarding(socket, state, appView, log, {
+  onEnterWorkspace: refreshWorkspacePanels,
+  onEpicSaved: function () {
+    dealApi.loadDealSettings();
+    orderApi.loadOrderSettings();
+    if (tradingRulesApi.loadRules) tradingRulesApi.loadRules();
+    if (testRulesApi.refreshProfilesForEpic) {
+      testRulesApi.refreshProfilesForEpic(state.savedEpic || '');
+    }
+    if (testRulesApi.refreshRecordUi) testRulesApi.refreshRecordUi();
+  }
+});
+
 var accountApi = initAccount(socket, state, tradingRulesApi.setBaseEnabled, dealApi.clearDealMessage, function (connected) {
   appView.setConnected(connected);
-  if (connected) refreshWorkspacePanels();
+  if (appView.isWorkspaceReady()) refreshWorkspacePanels();
   else hideAllWorkspacePanels();
+});
+
+socket.on('status', function (status) {
+  if (status === 'disconnected') return;
+  var running = status === 'running';
+  appView.setConnected(running);
+  if (appView.isWorkspaceReady()) refreshWorkspacePanels();
 });
 initWatchlists(socket, state, log, {
   onEpicChange: function () {
@@ -124,6 +152,7 @@ initWatchlists(socket, state, log, {
     if (testRulesApi.refreshProfilesForEpic) {
       testRulesApi.refreshProfilesForEpic(state.savedEpic || '');
     }
+    if (testRulesApi.refreshRecordUi) testRulesApi.refreshRecordUi();
   }
 });
 initPrices(socket, state, log);

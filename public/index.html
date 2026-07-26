@@ -12,20 +12,13 @@
     <div class="flex items-center gap-3 flex-wrap">
       <span class="text-sm font-semibold text-slate-400" id="version">TiddeliTrade ver: —</span>
       <span id="profileBadge" class="hidden px-2 py-0.5 rounded text-xs font-semibold" data-tooltip="Account mode – switch in Settings">—</span>
-      <nav id="appNav" class="flex items-center gap-1 rounded-lg bg-slate-800/80 p-0.5 border border-slate-700/80" role="tablist" aria-label="Workspace">
+      <nav id="appNav" class="hidden flex items-center gap-1 rounded-lg bg-slate-800/80 p-0.5 border border-slate-700/80" role="tablist" aria-label="Workspace">
         <button type="button" id="appNavTrade" role="tab" aria-selected="true" data-tooltip="Live trading: probes, rules engines, deals, positions">Trade</button>
         <button type="button" id="appNavResearch" role="tab" aria-selected="false" data-tooltip="Record prices and run simulated backtests (no IG orders)">Research</button>
       </nav>
     </div>
-    <div class="flex flex-col gap-1 flex-1 justify-center max-w-xs">
-      <div class="flex items-center gap-2">
-        <select id="watchlistSelect" class="hidden px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none" title="Watchlist">
-          <option value="">—</option>
-        </select>
-        <select id="epicSelect" class="flex-1 min-w-0 px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none" title="Instrument" disabled>
-          <option value="">—</option>
-        </select>
-      </div>
+    <div class="flex flex-col gap-1 flex-1 justify-center max-w-md min-w-0">
+      <p id="headerInstrument" class="text-sm text-slate-300 truncate" title="Instrument">—</p>
       <p id="headerMessage" class="text-xs text-amber-400 hidden min-w-0"></p>
     </div>
     <div class="flex items-center gap-3 flex-1 justify-end flex-wrap">
@@ -38,12 +31,6 @@
       <span id="nowDelay" class="font-mono text-slate-400 text-xs">—</span>
       <span class="text-slate-500 text-xs" data-tooltip="Today's market close time (UK local). — for 24/7 markets or when unavailable">Market closes at</span>
       <span id="marketClosesAt" class="font-mono text-slate-400 text-xs">—</span>
-      <button id="startBtn" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors">
-        Start
-      </button>
-      <button id="stopBtn" class="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-medium transition-colors hidden">
-        Stop
-      </button>
       <button id="settingsBtn" class="p-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors" title="Settings" aria-label="Settings">
         <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
       </button>
@@ -51,7 +38,7 @@
   </header>
 
   <div id="disconnectBanner" class="hidden py-4 px-4 bg-red-600 text-white text-center font-bold text-lg shadow-lg" role="alert">
-    Server disconnected. Press Start to reconnect.
+    Server disconnected. Use Connect on the launch screen or Start probing on Trade.
   </div>
 
   <div id="dealConfirmModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
@@ -175,6 +162,40 @@
       </div>
     </div>
   </div>
+  <div id="loadDaysProgressModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-xl w-full max-w-sm mx-4 overflow-hidden">
+      <div class="px-4 py-3 border-b border-slate-700">
+        <h2 class="text-lg font-semibold text-slate-200">Loading recorded days</h2>
+      </div>
+      <div class="p-4 flex flex-col items-center gap-4">
+        <div class="flex items-center gap-3">
+          <svg class="animate-spin h-8 w-8 text-emerald-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <p id="loadDaysProgressText" class="text-slate-400">Scanning database…</p>
+        </div>
+        <p class="text-xs text-slate-500 text-center">This may take a while if you have many recorded samples across instruments.</p>
+      </div>
+    </div>
+  </div>
+  <div id="pruneProgressModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-xl w-full max-w-sm mx-4 overflow-hidden">
+      <div class="px-4 py-3 border-b border-slate-700">
+        <h2 class="text-lg font-semibold text-slate-200">Pruning sparse days</h2>
+      </div>
+      <div class="p-4 flex flex-col items-center gap-4">
+        <div class="flex items-center gap-3">
+          <svg class="animate-spin h-8 w-8 text-emerald-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <p id="pruneProgressText" class="text-slate-400">Removing sparse samples…</p>
+        </div>
+        <p class="text-xs text-slate-500 text-center">This may take a while if you have many recorded samples for this instrument.</p>
+      </div>
+    </div>
+  </div>
   <div id="backtestProfileSaveModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
     <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-xl w-full max-w-sm mx-4 overflow-hidden">
       <div class="px-4 py-3 border-b border-slate-700">
@@ -206,6 +227,21 @@
       <div class="px-4 py-3 border-t border-slate-700 flex gap-2 justify-end">
         <button type="button" id="backtestProfileDeleteCancel" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium transition-colors">Cancel</button>
         <button type="button" id="backtestProfileDeleteOk" class="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-medium transition-colors">Delete</button>
+      </div>
+    </div>
+  </div>
+  <div id="rulesNoProbesModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
+    <div class="bg-slate-900 border border-amber-500/50 rounded-xl shadow-xl w-full max-w-sm mx-4 overflow-hidden">
+      <div class="px-4 py-3 border-b border-slate-700">
+        <h2 class="text-lg font-semibold text-amber-400">Start rules without probing?</h2>
+      </div>
+      <div class="p-4 text-sm text-slate-300 space-y-2">
+        <p>Probing is not running, so there is no live price stream.</p>
+        <p class="text-slate-400">Most rules need live prices to evaluate. You can still start rules trading if your setup allows it — for example scheduled rules or when you plan to start probing shortly.</p>
+      </div>
+      <div class="px-4 py-3 border-t border-slate-700 flex gap-2 justify-end">
+        <button type="button" id="rulesNoProbesCancel" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium transition-colors">Cancel</button>
+        <button type="button" id="rulesNoProbesOk" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors">Start rules</button>
       </div>
     </div>
   </div>
@@ -262,12 +298,14 @@
   </div>
   <main class="p-4 pb-16">
     <div class="flex flex-col gap-4 items-stretch w-full">
-      <p id="mainPlaceholder" class="text-slate-500 text-sm">Start to connect and log in.</p>
+      <p id="mainPlaceholder" class="text-slate-500 text-sm hidden">Connect to log in.</p>
       <div id="tradeViewRoot" class="trade-layout hidden">
       <section id="probesPanel" class="trade-layout-probes bg-slate-900 border border-slate-800 rounded-xl p-4 w-full min-w-0 hidden">
-        <div class="flex items-center gap-2 mb-2">
+        <div class="flex items-center gap-2 mb-2 flex-wrap">
           <h3 class="text-sm font-semibold text-slate-400" data-tooltip="Price statistics over configurable periods">Probes</h3>
           <div class="flex items-center gap-2">
+            <button type="button" id="probesSessionStartBtn" class="sessionStartBtn px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Start IG price stream and probes — does not start rules trading">Start probing</button>
+            <button type="button" id="probesSessionStopBtn" class="sessionStopBtn px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-medium transition-colors hidden disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Stop price stream, probes, and rules trading">Stop probing</button>
             <button type="button" id="probesBackfillBtn" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-slate-700" data-tooltip="Fetch historical prices from IG (uses allowance). Disabled when rules engine is running.">Backfill</button>
             <span id="probesBackfillStatus" class="text-xs text-slate-500 hidden"></span>
           </div>
@@ -343,12 +381,21 @@
       <div class="trade-layout-rules">
       <section id="tradingRulesCommonPanel" class="trade-layout-rules-common bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-0 w-full hidden">
         <div class="flex items-center justify-between gap-2 mb-2 flex-wrap">
-          <h3 class="text-sm font-semibold text-slate-300" data-tooltip="Shared engine settings for BUY and SELL rules">Rules engine</h3>
+          <div>
+            <h3 class="text-sm font-semibold text-slate-300" data-tooltip="Shared engine settings for BUY and SELL rules">Rules engine</h3>
+            <p class="text-[11px] text-slate-500 mt-0.5">Automated rules trading only — does not connect to IG or start the price stream.</p>
+          </div>
           <div class="flex items-center gap-2">
-            <button type="button" id="tradingRulesToggle" class="px-3 py-1 rounded text-xs font-medium transition-colors bg-emerald-600 hover:bg-emerald-500 text-white" title="Start/stop rules engine">Start</button>
+            <button type="button" id="tradingRulesToggle" class="px-3 py-1 rounded text-xs font-medium transition-colors bg-emerald-600 hover:bg-emerald-500 text-white" title="Start automated rules trading (manual Deal/Order disabled while running)">Start rules</button>
           </div>
         </div>
-        <p id="tradingRulesEngineStatus" class="text-xs text-slate-500 mb-2" data-tooltip="Running = engine evaluates rules and can place deals. Stopped = manual trading only.">BUY: Stopped • SELL: Stopped</p>
+        <p id="tradingRulesEngineStatus" class="text-xs text-slate-500 mb-2" data-tooltip="Running = rules engine evaluates conditions and can place deals. Stopped = manual trading only.">Rules trading: Stopped • BUY: off • SELL: off</p>
+        <div class="flex flex-wrap items-center gap-2 mb-2">
+          <label for="tradeProfileSelect" class="text-xs text-slate-500 shrink-0" data-tooltip="Load a saved strategy profile onto Trade (and Research backtests)">Trade profile</label>
+          <select id="tradeProfileSelect" class="flex-1 min-w-[140px] max-w-xs px-2 py-1 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-xs focus:ring-2 focus:ring-emerald-500 outline-none disabled:opacity-50" title="Trade profile">
+            <option value="">Custom (manual edits)</option>
+          </select>
+        </div>
         <p id="tradingRulesLockedMsg" class="text-xs text-amber-400 mb-2 hidden" data-tooltip="Engine settings cannot be edited while BUY or SELL engine is running">Settings locked – stop all engines to edit</p>
         <div class="space-y-2 text-sm mb-2">
           <div class="flex items-center gap-2">
@@ -676,9 +723,9 @@
           </div>
           <button type="button" id="researchOpenTradeRulesBtn" class="shrink-0 px-2 py-1 rounded text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 border border-slate-600" data-tooltip="Switch to Trade tab to edit BUY/SELL rules and probe periods">Edit rules on Trade →</button>
         </div>
-        <p class="text-[10px] text-amber-500/90 mb-2 border border-amber-700/40 rounded px-2 py-1 bg-amber-950/30" data-tooltip="Uses saved rules from the Trade tab. When dynamic stop loss is enabled per direction, backtest simulates trailing stop on 1s samples (may differ from live IG).">Simulated only. Backtest uses Trade-tab rules; dynamic stop loss is simulated when enabled (see report).</p>
+        <p class="text-[10px] text-amber-500/90 mb-2 border border-amber-700/40 rounded px-2 py-1 bg-amber-950/30" data-tooltip="Uses the active Trade profile (or Custom rules on Trade). Dynamic stop loss is simulated when enabled (see report).">Simulated only. Backtest uses the same rules as Trade; dynamic stop loss is simulated when enabled (see report).</p>
         <div class="flex flex-wrap items-center gap-2 mb-2">
-          <button type="button" id="testRulesRecordBtn" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-slate-700" data-tooltip="Record price data to database at 1/sec for later replay. Requires streaming and instrument selected.">Record</button>
+          <button type="button" id="testRulesRecordBtn" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-slate-700" data-tooltip="Start or stop recording prices to the database (~1/sec). Connects to IG automatically when needed.">Start recording</button>
           <button type="button" id="testRulesButton2" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Run backtest on recorded samples using current rules and probe periods">Analyse recording</button>
           <span id="testRulesRecordedCount" class="text-xs text-slate-500" data-tooltip="Total recorded samples for current instrument in database">—</span>
         </div>
@@ -723,10 +770,10 @@
         <div id="backtestProfilesSection" class="mb-2 flex flex-col gap-1.5 text-xs border border-slate-700/80 rounded-lg p-2 bg-slate-900/60">
           <div class="flex flex-wrap items-center gap-2">
             <span class="text-slate-400 font-medium">Saved profiles</span>
-            <button type="button" id="backtestProfileSaveBtn" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-[11px]" data-tooltip="Save current Trade rules, probes, and Research analyse options">Save current…</button>
-            <button type="button" id="backtestProfileClearLoadBtn" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 text-[11px] hidden" data-tooltip="Stop using embedded profile rules; analyse from Trade tab again">Use Trade rules</button>
+            <button type="button" id="backtestProfileSaveBtn" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-[11px]" data-tooltip="Save current Trade profile (rules, probes, engine controls) and analyse options">Save current…</button>
             <span id="backtestProfileActiveLabel" class="text-violet-400/90 text-[11px] hidden"></span>
           </div>
+          <p class="text-[10px] text-slate-500">Click a profile to activate it on Trade (same rules used for backtest).</p>
           <ul id="backtestProfilesList" class="flex flex-col gap-0.5 max-h-36 overflow-y-auto text-[11px]"></ul>
         </div>
         <div class="flex flex-col gap-1">
@@ -768,17 +815,99 @@
         </div>
       </section>
       </div>
-      <section id="splashPanel" class="flex-1 min-w-[280px] max-w-[400px] flex flex-col items-center justify-center py-12 px-6 rounded-xl bg-gradient-to-br from-slate-900/80 to-slate-950 border border-slate-800">
-        <div class="flex flex-col items-center gap-6">
-          <svg class="w-28 h-28 text-emerald-500/90 drop-shadow-[0_0_16px_rgba(16,185,129,0.25)]" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <section id="launchPanel" class="flex-1 min-w-[280px] max-w-[480px] flex flex-col items-center justify-center py-12 px-6 rounded-xl bg-gradient-to-br from-slate-900/80 to-slate-950 border border-slate-800 mx-auto w-full">
+        <div class="flex flex-col items-center gap-6 w-full max-w-md">
+          <svg class="w-20 h-20 text-emerald-500/90 drop-shadow-[0_0_16px_rgba(16,185,129,0.25)]" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
             <path d="M14 56V24l14 16 14-16 14 16 14-16" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
             <circle cx="40" cy="40" r="36" stroke="currentColor" stroke-width="1.5" stroke-opacity="0.2" fill="none"/>
           </svg>
           <div class="text-center">
             <h1 class="text-2xl font-bold tracking-tight text-slate-100">TiddeliTrade</h1>
-            <p class="mt-1 text-sm text-slate-500">IG Index trading with rules</p>
+            <p class="mt-1 text-sm text-slate-500">IG trading with rules</p>
           </div>
-          <p id="splashHint" class="text-slate-500 text-sm">Press Start to connect</p>
+
+          <div id="launchConnectionBar" class="hidden w-full flex flex-wrap items-center gap-2">
+            <button type="button" id="launchConnectBtn" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Log in to IG and load watchlists — does not start price stream or trading">Connect</button>
+            <button type="button" id="launchDisconnectBtn" class="hidden px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-medium transition-colors" data-tooltip="Log out from IG">Disconnect</button>
+            <button type="button" id="launchConfigBtn" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-100 text-sm font-medium transition-colors" data-tooltip="Change account credentials or API settings">Account settings</button>
+            <span id="launchConnectionStatus" class="text-xs text-slate-500"></span>
+          </div>
+
+          <div id="onboardingSetup" class="hidden w-full space-y-4 text-left">
+            <div>
+              <h2 class="text-lg font-semibold text-slate-200 mb-1">Account settings</h2>
+              <p class="text-sm text-slate-500">Enter your IG account details and save.</p>
+            </div>
+            <div>
+              <label for="setupProfileSelect" class="block text-sm font-medium text-slate-400 mb-1">Account</label>
+              <select id="setupProfileSelect" class="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 text-sm focus:ring-2 focus:ring-emerald-500 outline-none">
+                <option value="demo">Demo</option>
+                <option value="live">Live</option>
+              </select>
+            </div>
+            <div>
+              <label for="setupBaseUrl" class="block text-sm font-medium text-slate-400 mb-1">API base URL</label>
+              <input type="text" id="setupBaseUrl" placeholder="https://demo-api.ig.com" autocomplete="off" class="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 text-sm font-mono focus:ring-2 focus:ring-emerald-500 outline-none">
+            </div>
+            <div>
+              <label for="setupApiKey" class="block text-sm font-medium text-slate-400 mb-1">API Key *</label>
+              <input type="password" id="setupApiKey" placeholder="IG API key" autocomplete="off" class="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 text-sm focus:ring-2 focus:ring-emerald-500 outline-none">
+            </div>
+            <div>
+              <label for="setupUsername" class="block text-sm font-medium text-slate-400 mb-1">Username *</label>
+              <input type="text" id="setupUsername" placeholder="IG username" autocomplete="username" class="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 text-sm focus:ring-2 focus:ring-emerald-500 outline-none">
+            </div>
+            <div>
+              <label for="setupPassword" class="block text-sm font-medium text-slate-400 mb-1">Password *</label>
+              <input type="password" id="setupPassword" placeholder="IG password" autocomplete="current-password" class="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 text-sm focus:ring-2 focus:ring-emerald-500 outline-none">
+            </div>
+            <p id="setupStatus" class="text-sm text-slate-500 hidden"></p>
+            <div class="flex gap-2">
+              <button type="button" id="setupCancelBtn" class="flex-1 px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-100 text-sm font-medium transition-colors">Cancel</button>
+              <button type="button" id="setupSaveBtn" class="flex-1 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors">Save</button>
+              <button type="button" id="setupFinishBtn" class="hidden flex-1 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed" disabled>Finish setup</button>
+            </div>
+          </div>
+
+          <div id="launchInstrumentSection" class="hidden w-full space-y-3 text-left border border-slate-800 rounded-lg p-4 bg-slate-900/50">
+            <p class="text-sm font-medium text-slate-300">Instrument</p>
+            <div>
+              <label for="watchlistSelect" class="block text-sm font-medium text-slate-400 mb-1">Watchlist</label>
+              <select id="watchlistSelect" class="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 text-sm focus:ring-2 focus:ring-emerald-500 outline-none disabled:opacity-50" title="Watchlist" disabled>
+                <option value="">—</option>
+              </select>
+            </div>
+            <div>
+              <label for="epicSelect" class="block text-sm font-medium text-slate-400 mb-1">Instrument</label>
+              <select id="epicSelect" class="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-100 text-sm focus:ring-2 focus:ring-emerald-500 outline-none disabled:opacity-50" title="Instrument" disabled>
+                <option value="">—</option>
+              </select>
+            </div>
+            <p id="launchInstrumentHint" class="text-xs text-slate-500">Select watchlist and instrument before continuing.</p>
+          </div>
+
+          <div id="onboardingMode" class="hidden w-full space-y-4 text-center">
+            <div id="onboardingModeSummary" class="w-full rounded-lg border border-slate-800 bg-slate-900/60 px-4 py-3 text-left space-y-3">
+              <div class="flex items-center justify-between gap-3">
+                <span class="text-xs font-medium text-slate-500 uppercase tracking-wide">Account</span>
+                <span id="onboardingModeAccount" class="px-2 py-0.5 rounded text-xs font-semibold">—</span>
+              </div>
+              <div class="border-t border-slate-800/80 pt-3">
+                <span class="text-xs font-medium text-slate-500 uppercase tracking-wide block mb-1">Instrument</span>
+                <p id="onboardingModeInstrumentName" class="text-base font-medium text-slate-100 truncate">—</p>
+                <p id="onboardingModeInstrumentEpic" class="text-xs text-slate-500 font-mono truncate mt-0.5 hidden"></p>
+              </div>
+            </div>
+            <p id="modeStatus" class="text-sm text-slate-500 hidden"></p>
+            <p id="onboardingModeConnectHint" class="text-sm text-slate-500">Connect to IG above to continue.</p>
+            <div id="onboardingModeActions" class="hidden flex flex-col sm:flex-row gap-3 justify-center">
+              <button type="button" id="onboardingChooseTrade" class="flex-1 px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold transition-colors" data-tooltip="Live trading: probes, rules, deals, positions">Trade</button>
+              <button type="button" id="onboardingChooseResearch" class="flex-1 px-6 py-3 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-sm font-semibold transition-colors" data-tooltip="Record prices and run simulated backtests">Research</button>
+            </div>
+            <button type="button" id="onboardingChangeSetup" class="text-xs text-slate-500 hover:text-slate-300 underline">Change account or instrument</button>
+          </div>
+
+          <p id="splashHint" class="text-slate-500 text-sm hidden"></p>
         </div>
       </section>
     </div>

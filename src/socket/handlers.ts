@@ -42,6 +42,7 @@ import {
   getEpicsWithData,
   deleteSamplesByDays,
   deleteSparseDays,
+  type RecordedSample,
 } from '../services/priceRecorder';
 import path from 'path';
 import { Worker } from 'worker_threads';
@@ -75,6 +76,68 @@ let scheduledCloses: ScheduledCloseEntry[] = [];
 let recordingStatusTimer: ReturnType<typeof setInterval> | null = null;
 const rulesEngineRunningBySocket = new Map<string, boolean>();
 const activeAnalyseBySocket = new Map<string, (err?: string) => void>();
+
+function runBacktestInWorker(
+  workerPath: string,
+  samples: RecordedSample[],
+  config: BacktestConfig,
+  usePerDay: boolean,
+  ctx: { isCancelled: () => boolean; onWorker: (worker: Worker | null) => void }
+): Promise<BacktestReport> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(workerPath, { workerData: { samples, config, usePerDay } });
+    ctx.onWorker(worker);
+    let resolved = false;
+    const cleanup = () => {
+      ctx.onWorker(null);
+    };
+    worker.on('message', (msg: { report?: unknown; error?: string }) => {
+      if (resolved) return;
+      if (msg.error) {
+        resolved = true;
+        cleanup();
+        worker.terminate().catch(() => {});
+        reject(new Error(msg.error));
+      } else if (msg.report) {
+        resolved = true;
+        cleanup();
+        worker.terminate().catch(() => {});
+        resolve(msg.report as BacktestReport);
+      }
+    });
+    worker.on('error', (err) => {
+      if (resolved) return;
+      resolved = true;
+      cleanup();
+      worker.terminate().catch(() => {});
+      reject(err);
+    });
+    worker.on('exit', (code) => {
+      if (resolved) return;
+      resolved = true;
+      cleanup();
+      if (ctx.isCancelled()) reject(new Error('Cancelled'));
+      else if (code !== 0) reject(new Error(`Backtest worker exited (code ${code}). Try fewer days or increase Node memory.`));
+      else reject(new Error('Backtest worker exited without report'));
+    });
+  });
+}
+
+function finishAnalyseWithWorkerError(
+  socket: Socket,
+  io: Server,
+  cancelledFlag: boolean,
+  err: unknown
+): void {
+  activeAnalyseBySocket.delete(socket.id);
+  const msg = err instanceof Error ? err.message : String(err);
+  if (cancelledFlag || msg === 'Cancelled') {
+    socket.emit('analyse_recording_report', { error: 'Cancelled' });
+  } else {
+    socket.emit('analyse_recording_report', { error: msg });
+    io.emit('log', 'Analysis error: ' + msg);
+  }
+}
 
 function updateSleepPrevention(io: Server, appRunning: boolean): void {
   const msg = appRunning ? preventSleep() : allowSleep();
@@ -593,7 +656,7 @@ async function runOverdueCloses(session: IgSession, io: Server): Promise<void> {
   }
 }
 
-type EngineStatus = 'ready' | 'running' | 'stopped';
+type EngineStatus = 'ready' | 'connected' | 'running' | 'stopped';
 
 function accountToClient(session: IgSession) {
   const cfg = loadConfig();
@@ -654,7 +717,7 @@ export function registerSocketHandlers(io: Server): void {
     io.emit('log', logMsg || 'Stopped');
   }
 
-  setOnProfileChangeListener(() => doStop('Account switched – click Start to connect with new credentials'));
+  setOnProfileChangeListener(() => doStop('Account switched – use Connect to log in with new credentials'));
 
   io.on('connection', async (socket: Socket) => {
     io.emit('log', 'Client connected: ' + socket.id);
@@ -718,68 +781,84 @@ export function registerSocketHandlers(io: Server): void {
       }
     });
 
-    socket.on('start', async () => {
+    socket.on('connect_ig', async () => {
       if (engineStatus === 'running') return;
+      if (currentSession && engineStatus === 'connected') {
+        socket.emit('account', accountToClient(currentSession));
+        return;
+      }
       try {
         socket.emit('status', 'connecting');
-        io.emit('log', 'Connecting to IG...');
+        io.emit('log', 'Connecting to IG (login only)...');
         const session = await createSession();
         currentSession = session;
-        engineStatus = 'running';
+        engineStatus = 'connected';
         io.emit('status', engineStatus);
         io.emit('account', accountToClient(session));
         const cfg = loadConfig();
         io.emit('epic', cfg.epic || '');
         io.emit('watchlistId', cfg.watchlistId || '');
-        io.emit('log', 'Logged in: ' + session.accountId + ' (' + session.accountType + ')');
-        scheduledCloses = loadScheduledCloses();
-        await runOverdueCloses(session, io);
-        let positions: Awaited<ReturnType<typeof getPositions>> = [];
-        try {
-          positions = await pollAndEmitPositions(session, io);
-        } catch {
-          io.emit('positions', []);
+        io.emit('log', 'Logged in: ' + session.accountId + ' (' + session.accountType + ') — stream not started');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Login failed';
+        io.emit('log', 'Error: ' + msg);
+        socket.emit('login_error', msg);
+        currentSession = null;
+        engineStatus = 'ready';
+        socket.emit('status', engineStatus);
+      }
+    });
+
+    async function beginStreamingSession(session: IgSession, io: Server): Promise<void> {
+      const cfg = loadConfig();
+      scheduledCloses = loadScheduledCloses();
+      await runOverdueCloses(session, io);
+      let positions: Awaited<ReturnType<typeof getPositions>> = [];
+      try {
+        positions = await pollAndEmitPositions(session, io);
+      } catch {
+        io.emit('positions', []);
+      }
+      const openDealIds = new Set(positions.map((p) => p.dealId));
+      const before = scheduledCloses.length;
+      scheduledCloses = scheduledCloses.filter((s) => openDealIds.has(s.dealId));
+      if (scheduledCloses.length !== before) {
+        saveScheduledCloses(scheduledCloses);
+        if (before > 0 && scheduledCloses.length === 0) {
+          io.emit('log', 'Cleared stale scheduled closes (no open positions)');
         }
-        const openDealIds = new Set(positions.map((p) => p.dealId));
-        const before = scheduledCloses.length;
-        scheduledCloses = scheduledCloses.filter((s) => openDealIds.has(s.dealId));
-        if (scheduledCloses.length !== before) {
-          saveScheduledCloses(scheduledCloses);
-          if (before > 0 && scheduledCloses.length === 0) {
-            io.emit('log', 'Cleared stale scheduled closes (no open positions)');
-          }
-        }
-        io.emit('scheduled_closes', scheduledCloses);
-        if (positionsPollTimer) clearInterval(positionsPollTimer);
-        positionsPollTimer = setInterval(() => {
-          if (currentSession) pollAndEmitPositions(currentSession, io);
-        }, 15000);
-        try {
-          await pollAndEmitWorkingOrders(session, io);
-        } catch {
-          io.emit('working_orders', []);
-        }
-        if (ordersPollTimer) clearInterval(ordersPollTimer);
-        ordersPollTimer = setInterval(() => {
-          if (currentSession) pollAndEmitWorkingOrders(currentSession, io);
-        }, 15000);
-        if (scheduledCloses.length > 0) {
-          persistAndRunScheduler(session, io);
-          io.emit('log', 'Scheduled closes loaded: ' + scheduledCloses.length);
-        }
-        const epic = cfg.epic || 'CS.D.CFDGOLD.CFD.IP';
-        try {
-          getClientSentiment(session, epic, { debugLog: (msg) => io.emit('log', msg) })
-            .then((s) => { lastClientSentimentByEpic[epic] = s ?? null; })
-            .catch(() => { lastClientSentimentByEpic[epic] = null; });
-          startStream(
+      }
+      io.emit('scheduled_closes', scheduledCloses);
+      if (positionsPollTimer) clearInterval(positionsPollTimer);
+      positionsPollTimer = setInterval(() => {
+        if (currentSession) pollAndEmitPositions(currentSession, io);
+      }, 15000);
+      try {
+        await pollAndEmitWorkingOrders(session, io);
+      } catch {
+        io.emit('working_orders', []);
+      }
+      if (ordersPollTimer) clearInterval(ordersPollTimer);
+      ordersPollTimer = setInterval(() => {
+        if (currentSession) pollAndEmitWorkingOrders(currentSession, io);
+      }, 15000);
+      if (scheduledCloses.length > 0) {
+        persistAndRunScheduler(session, io);
+        io.emit('log', 'Scheduled closes loaded: ' + scheduledCloses.length);
+      }
+      const epic = cfg.epic || 'CS.D.CFDGOLD.CFD.IP';
+      try {
+        getClientSentiment(session, epic, { debugLog: (msg) => io.emit('log', msg) })
+          .then((s) => { lastClientSentimentByEpic[epic] = s ?? null; })
+          .catch(() => { lastClientSentimentByEpic[epic] = null; });
+        startStream(
           session,
           epic,
           (data) => {
-            const cfg = loadConfig();
-            if (cfg.epic && isRecording()) {
-              if (recordPrice(cfg.epic, data, lastClientSentimentByEpic[cfg.epic] ?? null)) {
-                io.emit('recorded_sample', { epic: cfg.epic, ts: Date.now(), bid: data.bid, offer: data.offer, spread: data.spread });
+            const cfgNow = loadConfig();
+            if (cfgNow.epic && isRecording()) {
+              if (recordPrice(cfgNow.epic, data, lastClientSentimentByEpic[cfgNow.epic] ?? null)) {
+                io.emit('recorded_sample', { epic: cfgNow.epic, ts: Date.now(), bid: data.bid, offer: data.offer, spread: data.spread });
               }
             }
             const now = Date.now();
@@ -800,17 +879,41 @@ export function registerSocketHandlers(io: Server): void {
           },
           (msg) => io.emit('log', msg)
         );
-          io.emit('log', 'Streaming: ' + epic);
-        } catch (streamErr) {
-          const msg = streamErr instanceof Error ? streamErr.message : 'Stream failed';
-          io.emit('log', 'Stream: ' + msg);
+        io.emit('log', 'Streaming: ' + epic);
+      } catch (streamErr) {
+        const msg = streamErr instanceof Error ? streamErr.message : 'Stream failed';
+        io.emit('log', 'Stream: ' + msg);
+      }
+      updateSleepPrevention(io, true);
+    }
+
+    socket.on('start', async () => {
+      if (engineStatus === 'running') return;
+      try {
+        if (engineStatus === 'connected' && currentSession) {
+          io.emit('log', 'Starting price stream and session...');
+          await beginStreamingSession(currentSession, io);
+          engineStatus = 'running';
+          io.emit('status', engineStatus);
+          return;
         }
-        updateSleepPrevention(io, true);
+        socket.emit('status', 'connecting');
+        io.emit('log', 'Connecting to IG...');
+        const session = await createSession();
+        currentSession = session;
+        io.emit('account', accountToClient(session));
+        const cfg = loadConfig();
+        io.emit('epic', cfg.epic || '');
+        io.emit('watchlistId', cfg.watchlistId || '');
+        io.emit('log', 'Logged in: ' + session.accountId + ' (' + session.accountType + ')');
+        await beginStreamingSession(session, io);
+        engineStatus = 'running';
+        io.emit('status', engineStatus);
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Login failed';
         io.emit('log', 'Error: ' + msg);
         socket.emit('login_error', msg);
-        engineStatus = 'ready';
+        engineStatus = currentSession ? 'connected' : 'ready';
         socket.emit('status', engineStatus);
       }
     });
@@ -1091,6 +1194,11 @@ export function registerSocketHandlers(io: Server): void {
         socket.emit('analyse_recording_report', { error: 'No epic specified' });
         return;
       }
+      const priorCancel = activeAnalyseBySocket.get(socket.id);
+      if (priorCancel) {
+        priorCancel();
+        activeAnalyseBySocket.delete(socket.id);
+      }
       const fromDate = params?.fromDate?.trim();
       const toDate = params?.toDate?.trim();
       const selectedDaysRaw = Array.isArray(params?.selectedDays) ? params.selectedDays : null;
@@ -1335,40 +1443,16 @@ export function registerSocketHandlers(io: Server): void {
           const day = days[i];
           const daySamples = getRecordedSamplesFiltered(epic, { days: [day] });
           if (daySamples.length > 0) {
-            const dayReport = await new Promise<BacktestReport>((resolve, reject) => {
-              const worker = new Worker(workerPath, { workerData: { samples: daySamples, config, usePerDay: false } });
-              currentWorker = worker;
-              let resolved = false;
-              worker.on('message', (msg: { report?: unknown; error?: string }) => {
-                if (resolved) return;
-                if (msg.error) {
-                  resolved = true;
-                  currentWorker = null;
-                  worker.terminate().catch(() => {});
-                  reject(new Error(msg.error));
-                } else if (msg.report) {
-                  resolved = true;
-                  currentWorker = null;
-                  worker.terminate().catch(() => {});
-                  resolve(msg.report as BacktestReport);
-                }
+            let dayReport: BacktestReport;
+            try {
+              dayReport = await runBacktestInWorker(workerPath, daySamples, config, false, {
+                isCancelled: () => cancelled,
+                onWorker: (worker) => { currentWorker = worker; },
               });
-              worker.on('error', (err) => {
-                if (resolved) return;
-                resolved = true;
-                currentWorker = null;
-                worker.terminate().catch(() => {});
-                reject(err);
-              });
-              worker.on('exit', (code) => {
-                if (resolved) return;
-                resolved = true;
-                currentWorker = null;
-                if (cancelled) reject(new Error('Cancelled'));
-                else if (code !== 0) reject(new Error(`Backtest worker exited (code ${code}). Try fewer days or increase Node memory.`));
-                else reject(new Error('Backtest worker exited without report'));
-              });
-            });
+            } catch (err) {
+              finishAnalyseWithWorkerError(socket, io, cancelled, err);
+              return;
+            }
             allTrades.push(...dayReport.trades);
             totalGainLoss += dayReport.totalGainLoss;
             totalSamples += dayReport.sampleCount;
@@ -1506,42 +1590,16 @@ export function registerSocketHandlers(io: Server): void {
           });
           return;
         }
-        const report = await new Promise<BacktestReport>((resolve, reject) => {
-          const worker = new Worker(workerPath, { workerData: { samples: blockSamples, config, usePerDay: false } });
-          currentWorker = worker;
-          let resolved = false;
-          worker.on('message', (msg: { report?: unknown; error?: string }) => {
-            if (resolved) return;
-            if (msg.error) {
-              resolved = true;
-              currentWorker = null;
-              worker.terminate().catch(() => {});
-              reject(new Error(msg.error));
-            } else if (msg.report) {
-              resolved = true;
-              currentWorker = null;
-              worker.terminate().catch(() => {});
-              resolve(msg.report as BacktestReport);
-            }
+        let report: BacktestReport;
+        try {
+          report = await runBacktestInWorker(workerPath, blockSamples, config, false, {
+            isCancelled: () => cancelled,
+            onWorker: (worker) => { currentWorker = worker; },
           });
-          worker.on('error', (err) => {
-            if (resolved) return;
-            resolved = true;
-            currentWorker = null;
-            worker.terminate().catch(() => {});
-            reject(err);
-          });
-          worker.on('exit', (code) => {
-            if (resolved) return;
-            resolved = true;
-            currentWorker = null;
-            if (cancelled) reject(new Error('Cancelled'));
-            else if (code !== 0) reject(new Error(`Backtest worker exited (code ${code}). Try fewer days or increase Node memory.`));
-            else reject(new Error('Backtest worker exited without report'));
-          });
-        }).catch((err: Error) => {
-          throw err;
-        });
+        } catch (err) {
+          finishAnalyseWithWorkerError(socket, io, cancelled, err);
+          return;
+        }
         allTrades.push(...report.trades);
         totalGainLoss += report.totalGainLoss;
         totalSamples += report.sampleCount;

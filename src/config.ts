@@ -29,8 +29,12 @@ export interface UserConfig {
   activeProfile?: IgProfileId;
   /** Last selected watchlist ID */
   watchlistId?: string;
+  /** Human-readable watchlist name (shown in launch UI) */
+  watchlistDisplayName?: string;
   /** Last selected epic (e.g. CS.D.CFDGOLD.CFD.IP) */
   epic?: string;
+  /** Human-readable instrument name for the saved epic (shown on launch screen) */
+  epicDisplayName?: string;
   /** Default trade size */
   defaultSize?: string;
   /** Default expiry (e.g. DFB, D) */
@@ -116,6 +120,8 @@ export interface UserConfig {
     rulesDynamicStopLossLockSell?: number | string;
     /** Per-instrument settings (deal, order, rules). Key = epic. */
     instruments?: Record<string, InstrumentSettings>;
+    /** True after first-run account + instrument setup is complete */
+    setupComplete?: boolean;
   };
 }
 
@@ -189,17 +195,33 @@ export interface InstrumentSettings {
   rulesBuyEnabled?: boolean;
   /** When false, SELL rules are skipped while the engine is running. Default true. */
   rulesSellEnabled?: boolean;
-  /** Saved Research backtest profiles for this instrument. */
+  /** Saved strategy profiles for this instrument (Trade + Research). */
   backtestProfiles?: BacktestProfile[];
+  /** Id of the profile currently applied on the Trade tab for this instrument. */
+  activeTradeProfileId?: string;
 }
 
 /** Named snapshot of strategy + analyse options + last simulated result. */
+export interface BacktestProfileEngineControls {
+  stopAfterLossBuy?: boolean;
+  stopAfterLossSell?: boolean;
+  pauseOnLossSecondsBuy?: number;
+  pauseOnLossSecondsSell?: number;
+  scheduleStartTime?: string;
+  scheduleStopTime?: string;
+  scheduleRepeatDaily?: boolean;
+  scheduleActiveDate?: string;
+  scheduleTimezone?: string;
+}
+
 export interface BacktestProfile {
   id: string;
   name: string;
   savedAt: number;
   strategy: BacktestProfileStrategy;
   analyseOptions: BacktestProfileAnalyseOptions;
+  /** Rules engine safety settings snapshot (pause/stop-after-loss/schedule). */
+  engineControls?: BacktestProfileEngineControls;
   lastResult?: BacktestProfileLastResult;
 }
 
