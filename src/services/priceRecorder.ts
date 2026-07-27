@@ -21,6 +21,8 @@ let sessionStartTs = 0;
 function getDb(): Database.Database {
   if (!db) {
     db = new Database(DB_PATH);
+    db.pragma('journal_mode = WAL');
+    db.pragma('busy_timeout = 5000');
     db.exec(`
       CREATE TABLE IF NOT EXISTS price_samples (
         epic    TEXT    NOT NULL,
@@ -37,6 +39,12 @@ function getDb(): Database.Database {
     try { db.exec('ALTER TABLE price_samples ADD COLUMN short_pct REAL'); } catch { /* exists */ }
   }
   return db;
+}
+
+/** Local calendar day bounds (matches strftime localtime day keys). */
+function dayLocalBoundsMs(day: string): { fromTs: number; toTsExclusive: number } {
+  const fromTs = new Date(`${day}T00:00:00`).getTime();
+  return { fromTs, toTsExclusive: fromTs + 86400000 };
 }
 
 function ensureClosed(): void {
@@ -149,9 +157,13 @@ export function getRecordedSamplesFiltered(
     let sql = 'SELECT epic, ts, bid, offer, spread, long_pct, short_pct FROM price_samples WHERE epic = ?';
     const params: (string | number)[] = [epic];
     if (opts?.days && opts.days.length > 0) {
-      const placeholders = opts.days.map(() => '?').join(',');
-      sql += ` AND strftime('%Y-%m-%d', ts / 1000, 'unixepoch', 'localtime') IN (${placeholders})`;
-      params.push(...opts.days);
+      const dayClauses: string[] = [];
+      for (const day of opts.days) {
+        const { fromTs, toTsExclusive } = dayLocalBoundsMs(day);
+        dayClauses.push('(ts >= ? AND ts < ?)');
+        params.push(fromTs, toTsExclusive);
+      }
+      sql += ` AND (${dayClauses.join(' OR ')})`;
     } else if (opts?.fromTs != null || opts?.toTs != null) {
       if (opts.fromTs != null) {
         sql += ' AND ts >= ?';

@@ -1973,7 +1973,16 @@ export function initTestRules(socket, state, log, profileOpts) {
   }
 
   socket.on('analyse_recording_progress', function (data) {
-    if (data && typeof data.processed === 'number' && typeof data.total === 'number' && analyseProgressText) {
+    if (!data || typeof data.total !== 'number' || !analyseProgressText) return;
+    if (typeof data.daySampleProcessed === 'number' && typeof data.daySampleTotal === 'number' && data.daySampleTotal > 0) {
+      var dayNum = typeof data.processed === 'number' ? data.processed + 1 : 1;
+      var pct = Math.min(100, Math.round((data.daySampleProcessed / data.daySampleTotal) * 100));
+      analyseProgressText.textContent = 'Day ' + dayNum + ' of ' + data.total +
+        (data.currentDay ? ' (' + data.currentDay + ')' : '') +
+        ': ' + pct + '% samples…';
+      return;
+    }
+    if (typeof data.processed === 'number') {
       analyseProgressText.textContent = data.processed === 0
         ? 'Starting… (0 of ' + data.total + ' days)'
         : 'Day ' + data.processed + ' of ' + data.total + '…';
@@ -2340,6 +2349,7 @@ export function initTestRules(socket, state, log, profileOpts) {
   }
 
   socket.on('disconnect', function () {
+    hideAnalyseProgress();
     hideLoadDaysProgress();
     hidePruneProgress();
   });

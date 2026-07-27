@@ -77,48 +77,78 @@ let recordingStatusTimer: ReturnType<typeof setInterval> | null = null;
 const rulesEngineRunningBySocket = new Map<string, boolean>();
 const activeAnalyseBySocket = new Map<string, (err?: string) => void>();
 
+const DEFAULT_BACKTEST_DAY_TIMEOUT_MS = 90 * 60 * 1000;
+
+function parseBacktestDayTimeoutMs(): number {
+  const raw = process.env.BACKTEST_DAY_TIMEOUT_MS;
+  if (!raw) return DEFAULT_BACKTEST_DAY_TIMEOUT_MS;
+  const n = parseInt(raw, 10);
+  return !isNaN(n) && n > 0 ? n : DEFAULT_BACKTEST_DAY_TIMEOUT_MS;
+}
+
 function runBacktestInWorker(
   workerPath: string,
   samples: RecordedSample[],
   config: BacktestConfig,
   usePerDay: boolean,
-  ctx: { isCancelled: () => boolean; onWorker: (worker: Worker | null) => void }
+  ctx: {
+    isCancelled: () => boolean;
+    onWorker: (worker: Worker | null) => void;
+    onSampleProgress?: (processed: number, total: number) => void;
+    timeoutMs?: number;
+  }
 ): Promise<BacktestReport> {
   return new Promise((resolve, reject) => {
     const worker = new Worker(workerPath, { workerData: { samples, config, usePerDay } });
     ctx.onWorker(worker);
     let resolved = false;
+    const timeoutMs = ctx.timeoutMs ?? parseBacktestDayTimeoutMs();
+    const timer = setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+      ctx.onWorker(null);
+      worker.terminate().catch(() => {});
+      reject(new Error(`Backtest timed out after ${Math.round(timeoutMs / 60000)} minutes. Try fewer days or shorter probe windows.`));
+    }, timeoutMs);
     const cleanup = () => {
+      clearTimeout(timer);
       ctx.onWorker(null);
     };
-    worker.on('message', (msg: { report?: unknown; error?: string }) => {
+    const finish = (action: () => void) => {
       if (resolved) return;
+      resolved = true;
+      cleanup();
+      action();
+    };
+    worker.on('message', (msg: { report?: unknown; error?: string; progress?: { processed: number; total: number } }) => {
+      if (msg.progress && ctx.onSampleProgress) {
+        ctx.onSampleProgress(msg.progress.processed, msg.progress.total);
+        return;
+      }
       if (msg.error) {
-        resolved = true;
-        cleanup();
-        worker.terminate().catch(() => {});
-        reject(new Error(msg.error));
+        finish(() => {
+          worker.terminate().catch(() => {});
+          reject(new Error(msg.error));
+        });
       } else if (msg.report) {
-        resolved = true;
-        cleanup();
-        worker.terminate().catch(() => {});
-        resolve(msg.report as BacktestReport);
+        finish(() => {
+          worker.terminate().catch(() => {});
+          resolve(msg.report as BacktestReport);
+        });
       }
     });
     worker.on('error', (err) => {
-      if (resolved) return;
-      resolved = true;
-      cleanup();
-      worker.terminate().catch(() => {});
-      reject(err);
+      finish(() => {
+        worker.terminate().catch(() => {});
+        reject(err);
+      });
     });
     worker.on('exit', (code) => {
-      if (resolved) return;
-      resolved = true;
-      cleanup();
-      if (ctx.isCancelled()) reject(new Error('Cancelled'));
-      else if (code !== 0) reject(new Error(`Backtest worker exited (code ${code}). Try fewer days or increase Node memory.`));
-      else reject(new Error('Backtest worker exited without report'));
+      finish(() => {
+        if (ctx.isCancelled()) reject(new Error('Cancelled'));
+        else if (code !== 0) reject(new Error(`Backtest worker exited (code ${code}). Try fewer days or increase Node memory.`));
+        else reject(new Error('Backtest worker exited without report'));
+      });
     });
   });
 }
@@ -1441,18 +1471,31 @@ export function registerSocketHandlers(io: Server): void {
             return;
           }
           const day = days[i];
+          io.emit('log', `[Backtest] Loading day ${i + 1}/${days.length}: ${day}…`);
           const daySamples = getRecordedSamplesFiltered(epic, { days: [day] });
           if (daySamples.length > 0) {
+            io.emit('log', `[Backtest] Day ${i + 1}/${days.length}: ${day} — ${daySamples.length.toLocaleString()} samples`);
             let dayReport: BacktestReport;
             try {
               dayReport = await runBacktestInWorker(workerPath, daySamples, config, false, {
                 isCancelled: () => cancelled,
                 onWorker: (worker) => { currentWorker = worker; },
+                timeoutMs: parseBacktestDayTimeoutMs(),
+                onSampleProgress: (processed, total) => {
+                  socket.emit('analyse_recording_progress', {
+                    processed: i,
+                    total: days.length,
+                    currentDay: day,
+                    daySampleProcessed: processed,
+                    daySampleTotal: total,
+                  });
+                },
               });
             } catch (err) {
               finishAnalyseWithWorkerError(socket, io, cancelled, err);
               return;
             }
+            io.emit('log', `[Backtest] Day ${i + 1}/${days.length}: ${day} done — ${dayReport.tradeCount} trade(s)`);
             allTrades.push(...dayReport.trades);
             totalGainLoss += dayReport.totalGainLoss;
             totalSamples += dayReport.sampleCount;
@@ -1590,16 +1633,28 @@ export function registerSocketHandlers(io: Server): void {
           });
           return;
         }
+        io.emit('log', `[Backtest] Block ${blockDays[0]}–${blockDays[blockDays.length - 1]} — ${blockSamples.length.toLocaleString()} samples`);
         let report: BacktestReport;
         try {
           report = await runBacktestInWorker(workerPath, blockSamples, config, false, {
             isCancelled: () => cancelled,
             onWorker: (worker) => { currentWorker = worker; },
+            timeoutMs: parseBacktestDayTimeoutMs() * Math.max(1, blockDays.length),
+            onSampleProgress: (processed, total) => {
+              socket.emit('analyse_recording_progress', {
+                processed: daysProcessed,
+                total: days.length,
+                currentDay: blockDays.join(' → '),
+                daySampleProcessed: processed,
+                daySampleTotal: total,
+              });
+            },
           });
         } catch (err) {
           finishAnalyseWithWorkerError(socket, io, cancelled, err);
           return;
         }
+        io.emit('log', `[Backtest] Block done — ${report.tradeCount} trade(s)`);
         allTrades.push(...report.trades);
         totalGainLoss += report.totalGainLoss;
         totalSamples += report.sampleCount;
