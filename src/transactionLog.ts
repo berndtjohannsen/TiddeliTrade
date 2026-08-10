@@ -3,6 +3,7 @@
  */
 import fs from 'fs';
 import path from 'path';
+import type { IgProfileId } from './config';
 
 const TRANSACTIONS_PATH = path.join(process.cwd(), 'transactions.json');
 const MAX_TRANSACTIONS = 200;
@@ -24,6 +25,8 @@ export interface Transaction {
   /** Only for closed transactions. */
   profitLoss?: number;
   currency: string;
+  /** IG account mode (demo/live) when the trade was logged. */
+  profile?: IgProfileId;
 }
 
 export interface TransactionLogState {

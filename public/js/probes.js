@@ -29,6 +29,10 @@ export function initProbes(socket, state, log) {
   var shortInput = document.getElementById('probeShortPeriod');
   var mediumInput = document.getElementById('probeMediumPeriod');
   var longInput = document.getElementById('probeLongPeriod');
+  var periodInputsWrap = document.getElementById('probesPeriodInputs');
+  var sessionStopBtn = document.getElementById('probesSessionStopBtn');
+  var STOP_PROBE_TOOLTIP_DEFAULT = 'Stop price stream and probes';
+  var STOP_PROBE_TOOLTIP_LOCKED = 'Stop rules trading first — probing cannot be stopped while rules are active';
   var shortTrend = document.getElementById('probeShortTrend');
   var shortMin = document.getElementById('probeShortMin');
   var shortMax = document.getElementById('probeShortMax');
@@ -329,6 +333,21 @@ export function initProbes(socket, state, log) {
       if (panel) panel.classList.toggle('hidden', !enabled);
     },
     setBackfillEnabled: setBackfillEnabled,
+    setProbesSettingsLocked: function (locked) {
+      if (shortInput) shortInput.disabled = !!locked;
+      if (mediumInput) mediumInput.disabled = !!locked;
+      if (longInput) longInput.disabled = !!locked;
+      if (periodInputsWrap) periodInputsWrap.classList.toggle('probes-settings-locked', !!locked);
+      if (sessionStopBtn) {
+        var probing = state.engineStatus === 'running';
+        var blocked = !!locked && probing;
+        sessionStopBtn.disabled = !probing || blocked;
+        sessionStopBtn.setAttribute(
+          'data-tooltip',
+          blocked ? STOP_PROBE_TOOLTIP_LOCKED : STOP_PROBE_TOOLTIP_DEFAULT
+        );
+      }
+    },
     setOnProbeUpdate: function (fn) {
       onProbeUpdateCallback = fn;
     },

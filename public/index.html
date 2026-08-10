@@ -13,12 +13,13 @@
       <span class="text-sm font-semibold text-slate-400" id="version">TiddeliTrade ver: —</span>
       <span id="profileBadge" class="hidden px-2 py-0.5 rounded text-xs font-semibold" data-tooltip="Account mode – switch in Settings">—</span>
       <nav id="appNav" class="hidden flex items-center gap-1 rounded-lg bg-slate-800/80 p-0.5 border border-slate-700/80" role="tablist" aria-label="Workspace">
-        <button type="button" id="appNavTrade" role="tab" aria-selected="true" data-tooltip="Live trading: probes, rules engines, deals, positions">Trade</button>
+        <button type="button" id="appNavTrade" role="tab" aria-selected="true" data-tooltip="Live trading: probes, rules engines, deals, positions" class="inline-flex items-center gap-1.5">Trade<span id="appNavTradeRulesBadge" class="hidden px-1 py-0.5 rounded text-[9px] font-bold bg-amber-500 text-amber-950 leading-none" title="Rules trading session active">AUTO</span></button>
         <button type="button" id="appNavResearch" role="tab" aria-selected="false" data-tooltip="Record prices and run simulated backtests (no IG orders)">Research</button>
       </nav>
     </div>
     <div class="flex flex-col gap-1 flex-1 justify-center max-w-md min-w-0">
       <p id="headerInstrument" class="text-sm text-slate-300 truncate" title="Instrument">—</p>
+      <p id="headerRulesStatus" class="text-xs text-amber-400 hidden min-w-0 truncate" title="Automated rules trading session"></p>
       <p id="headerMessage" class="text-xs text-amber-400 hidden min-w-0"></p>
     </div>
     <div class="flex items-center gap-3 flex-1 justify-end flex-wrap">
@@ -145,20 +146,26 @@
     </div>
   </div>
   <div id="analyseProgressModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
-    <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-xl w-full max-w-sm mx-4 overflow-hidden">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-xl w-full max-w-md mx-4 overflow-hidden">
       <div class="px-4 py-3 border-b border-slate-700">
         <h2 class="text-lg font-semibold text-slate-200">Analysing recording</h2>
       </div>
-      <div class="p-4 flex flex-col items-center gap-4">
+      <div class="p-4 flex flex-col gap-4">
         <div class="flex items-center gap-3">
-          <svg class="animate-spin h-8 w-8 text-emerald-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+          <svg class="animate-spin h-8 w-8 shrink-0 text-emerald-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" aria-hidden="true">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
           </svg>
-          <p id="analyseProgressText" class="text-slate-400">Processing…</p>
+          <div class="min-w-0 flex-1">
+            <p id="analyseProgressText" class="text-sm text-slate-300">Processing…</p>
+            <div class="mt-2 h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
+              <div id="analyseProgressBar" class="h-full rounded-full bg-emerald-500 transition-all duration-300" style="width: 0%"></div>
+            </div>
+          </div>
         </div>
+        <p id="analyseProgressStats" class="text-xs font-mono text-slate-400 hidden">P/L — · Wins — · Losses —</p>
         <p class="text-xs text-slate-500">This may take several minutes for many days.</p>
-        <button type="button" id="analyseProgressStop" class="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-medium transition-colors">Stop</button>
+        <button type="button" id="analyseProgressStop" class="self-end px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white text-sm font-medium transition-colors">Stop</button>
       </div>
     </div>
   </div>
@@ -230,6 +237,39 @@
       </div>
     </div>
   </div>
+  <div id="backtestProfileRenameModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-xl w-full max-w-sm mx-4 overflow-hidden">
+      <div class="px-4 py-3 border-b border-slate-700">
+        <h2 class="text-lg font-semibold text-slate-200">Rename profile</h2>
+      </div>
+      <div class="p-4 space-y-3 text-sm">
+        <div>
+          <label for="backtestProfileRenameName" class="block text-slate-500 text-xs mb-1">Profile name</label>
+          <input type="text" id="backtestProfileRenameName" class="w-full rounded-lg bg-slate-800 border border-slate-600 text-slate-200 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-violet-500/50" autocomplete="off" spellcheck="false">
+        </div>
+        <p id="backtestProfileRenameError" class="hidden text-red-400 text-xs"></p>
+      </div>
+      <div class="px-4 py-3 border-t border-slate-700 flex gap-2 justify-end">
+        <button type="button" id="backtestProfileRenameCancel" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium transition-colors">Cancel</button>
+        <button type="button" id="backtestProfileRenameOk" class="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium transition-colors">Rename</button>
+      </div>
+    </div>
+  </div>
+  <div id="rulesStartModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
+    <div class="bg-slate-900 border border-amber-500/50 rounded-xl shadow-xl w-full max-w-md mx-4 overflow-hidden">
+      <div class="px-4 py-3 border-b border-slate-700">
+        <h2 class="text-lg font-semibold text-amber-400">Rules trading started</h2>
+      </div>
+      <div class="p-4 text-sm text-slate-300 space-y-2">
+        <p id="rulesStartModalSummary" class="font-mono text-xs text-slate-200 whitespace-pre-wrap">—</p>
+        <p class="text-slate-500 text-xs">Manual deal and order forms are disabled. Rules keep running after you close this dialog.</p>
+      </div>
+      <div class="px-4 py-3 border-t border-slate-700 flex gap-2 justify-end">
+        <button type="button" id="rulesStartModalStop" class="px-4 py-2 rounded-lg bg-red-700 hover:bg-red-600 text-white text-sm font-medium transition-colors">Stop rules</button>
+        <button type="button" id="rulesStartModalOk" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors">Got it</button>
+      </div>
+    </div>
+  </div>
   <div id="rulesNoProbesModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
     <div class="bg-slate-900 border border-amber-500/50 rounded-xl shadow-xl w-full max-w-sm mx-4 overflow-hidden">
       <div class="px-4 py-3 border-b border-slate-700">
@@ -237,11 +277,12 @@
       </div>
       <div class="p-4 text-sm text-slate-300 space-y-2">
         <p>Probing is not running, so there is no live price stream.</p>
-        <p class="text-slate-400">Most rules need live prices to evaluate. You can still start rules trading if your setup allows it — for example scheduled rules or when you plan to start probing shortly.</p>
+        <p class="text-slate-400">Most rules need live prices to evaluate. Start probing together with rules, or start rules only if your setup allows it — for example scheduled rules or when you plan to start probing shortly.</p>
       </div>
-      <div class="px-4 py-3 border-t border-slate-700 flex gap-2 justify-end">
+      <div class="px-4 py-3 border-t border-slate-700 flex flex-wrap gap-2 justify-end">
         <button type="button" id="rulesNoProbesCancel" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium transition-colors">Cancel</button>
-        <button type="button" id="rulesNoProbesOk" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors">Start rules</button>
+        <button type="button" id="rulesNoProbesRulesOnly" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium transition-colors">Start only rules</button>
+        <button type="button" id="rulesNoProbesWithProbes" class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium transition-colors">Start rules and probing</button>
       </div>
     </div>
   </div>
@@ -300,18 +341,25 @@
     <div class="flex flex-col gap-4 items-stretch w-full">
       <p id="mainPlaceholder" class="text-slate-500 text-sm hidden">Connect to log in.</p>
       <div id="tradeViewRoot" class="trade-layout hidden">
+      <div id="tradeRulesSessionBanner" class="trade-rules-session-banner hidden trade-layout-probes" role="status" aria-live="polite">
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-1 min-w-0 flex-1">
+          <span id="tradeRulesSessionBannerLabel" class="text-xs font-semibold text-amber-300 shrink-0">Rules</span>
+          <span id="tradeRulesSessionBannerText" class="text-xs text-slate-200 min-w-0">—</span>
+        </div>
+        <button type="button" id="tradeRulesSessionBannerStop" class="shrink-0 px-3 py-1 rounded-lg bg-red-700 hover:bg-red-600 text-white text-xs font-medium transition-colors">Stop rules</button>
+      </div>
       <section id="probesPanel" class="trade-layout-probes bg-slate-900 border border-slate-800 rounded-xl p-4 w-full min-w-0 hidden">
         <div class="flex items-center gap-2 mb-2 flex-wrap">
           <h3 class="text-sm font-semibold text-slate-400" data-tooltip="Price statistics over configurable periods">Probes</h3>
           <div class="flex items-center gap-2">
             <button type="button" id="probesSessionStartBtn" class="sessionStartBtn px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Start IG price stream and probes — does not start rules trading">Start probing</button>
-            <button type="button" id="probesSessionStopBtn" class="sessionStopBtn px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-medium transition-colors hidden disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Stop price stream, probes, and rules trading">Stop probing</button>
+            <button type="button" id="probesSessionStopBtn" class="sessionStopBtn px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-medium transition-colors hidden disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Stop price stream and probes">Stop probing</button>
             <button type="button" id="probesBackfillBtn" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-slate-700" data-tooltip="Fetch historical prices from IG (uses allowance). Disabled when rules engine is running.">Backfill</button>
             <span id="probesBackfillStatus" class="text-xs text-slate-500 hidden"></span>
           </div>
           <div class="flex-1"></div>
         </div>
-        <div class="grid grid-cols-4 gap-2 text-xs mb-2">
+        <div id="probesPeriodInputs" class="grid grid-cols-4 gap-2 text-xs mb-2">
           <div>
             <label for="probeLongPeriod" class="text-slate-500 block mb-0.5" data-tooltip="Lookback period in hours (1–720)">Long (hr)</label>
             <input type="number" id="probeLongPeriod" min="1" max="720" value="24" class="w-full px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs" title="Lookback period in hours">

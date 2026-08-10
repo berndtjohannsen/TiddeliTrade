@@ -165,6 +165,8 @@ export function initTestRules(socket, state, log, profileOpts) {
   var epicSelect = document.getElementById('epicSelect');
   var analyseProgressModal = document.getElementById('analyseProgressModal');
   var analyseProgressText = document.getElementById('analyseProgressText');
+  var analyseProgressBar = document.getElementById('analyseProgressBar');
+  var analyseProgressStats = document.getElementById('analyseProgressStats');
   var analyseProgressStop = document.getElementById('analyseProgressStop');
   var loadDaysProgressModal = document.getElementById('loadDaysProgressModal');
   var loadDaysProgressText = document.getElementById('loadDaysProgressText');
@@ -206,6 +208,19 @@ export function initTestRules(socket, state, log, profileOpts) {
       },
       onLoadProfile: function (profile) {
         appendLog('Active profile: ' + profile.name + ' (applied to Trade)');
+      },
+      onRestoreSavedReport: function (savedReport) {
+        if (!savedReport || !savedReport.report) return;
+        lastBacktestReport = savedReport.report;
+        lastAnalyseDayKeys = Array.isArray(savedReport.analysedDayKeys) ? savedReport.analysedDayKeys.slice() : [];
+        showReport(
+          savedReport.report,
+          !!savedReport.usedTpSl,
+          !!savedReport.usedDynamicSl,
+          savedReport.sampleQuality,
+          false
+        );
+        appendLog('Restored saved backtest report from profile.');
       },
       onClearProfile: function () {
         appendLog('Using Trade tab rules for analyse');
@@ -1963,30 +1978,76 @@ export function initTestRules(socket, state, log, profileOpts) {
     reportEl.classList.remove('hidden');
   }
 
-  function showAnalyseProgress(daysCount) {
-    if (analyseProgressModal) analyseProgressModal.classList.remove('hidden');
-    if (analyseProgressText) analyseProgressText.textContent = daysCount != null ? 'Processing ' + daysCount + ' day(s)…' : 'Processing…';
+  function formatAnalyseProgressPl(data) {
+    if (data.totalGainLossPounds != null && data.totalGainLoss != null && data.totalGainLoss !== 0) {
+      var pl = data.totalGainLossPounds;
+      return (pl >= 0 ? '+' : '') + pl.toFixed(2) + ' $';
+    }
+    if (data.totalGainLoss != null) {
+      var pts = data.totalGainLoss;
+      return (pts >= 0 ? '+' : '') + pts.toFixed(2) + ' pts';
+    }
+    return '—';
   }
 
-  function hideAnalyseProgress() {
-    if (analyseProgressModal) analyseProgressModal.classList.add('hidden');
+  function formatAnalyseProgressStats(data) {
+    var pl = formatAnalyseProgressPl(data);
+    var wins = data.winningTrades != null ? String(data.winningTrades) : '—';
+    var losses = data.losingTrades != null ? String(data.losingTrades) : '—';
+    return 'P/L ' + pl + ' · Wins ' + wins + ' · Losses ' + losses;
   }
 
-  socket.on('analyse_recording_progress', function (data) {
-    if (!data || typeof data.total !== 'number' || !analyseProgressText) return;
+  function computeAnalyseOverallPct(data) {
+    if (!data || typeof data.total !== 'number' || data.total <= 0) return 0;
+    var dayFrac = typeof data.processed === 'number' ? data.processed / data.total : 0;
+    if (typeof data.daySampleProcessed === 'number' && typeof data.daySampleTotal === 'number' && data.daySampleTotal > 0) {
+      dayFrac = (data.processed + data.daySampleProcessed / data.daySampleTotal) / data.total;
+    }
+    return Math.min(100, Math.max(0, Math.round(dayFrac * 100)));
+  }
+
+  function updateAnalyseProgressUi(data) {
+    if (!data || typeof data.total !== 'number') return;
+    var pct = computeAnalyseOverallPct(data);
+    if (analyseProgressBar) analyseProgressBar.style.width = pct + '%';
+    if (analyseProgressStats) {
+      analyseProgressStats.textContent = formatAnalyseProgressStats(data);
+      analyseProgressStats.classList.remove('hidden');
+    }
+    if (!analyseProgressText) return;
     if (typeof data.daySampleProcessed === 'number' && typeof data.daySampleTotal === 'number' && data.daySampleTotal > 0) {
       var dayNum = typeof data.processed === 'number' ? data.processed + 1 : 1;
-      var pct = Math.min(100, Math.round((data.daySampleProcessed / data.daySampleTotal) * 100));
+      var samplePct = Math.min(100, Math.round((data.daySampleProcessed / data.daySampleTotal) * 100));
       analyseProgressText.textContent = 'Day ' + dayNum + ' of ' + data.total +
         (data.currentDay ? ' (' + data.currentDay + ')' : '') +
-        ': ' + pct + '% samples…';
+        ' · ' + samplePct + '% · overall ' + pct + '%';
       return;
     }
     if (typeof data.processed === 'number') {
       analyseProgressText.textContent = data.processed === 0
-        ? 'Starting… (0 of ' + data.total + ' days)'
-        : 'Day ' + data.processed + ' of ' + data.total + '…';
+        ? 'Starting… (0 of ' + data.total + ' days) · overall ' + pct + '%'
+        : 'Day ' + data.processed + ' of ' + data.total + ' · overall ' + pct + '%';
     }
+  }
+
+  function showAnalyseProgress(daysCount) {
+    if (analyseProgressModal) analyseProgressModal.classList.remove('hidden');
+    if (analyseProgressBar) analyseProgressBar.style.width = '0%';
+    if (analyseProgressStats) analyseProgressStats.classList.add('hidden');
+    if (analyseProgressText) {
+      analyseProgressText.textContent = daysCount != null
+        ? 'Processing ' + daysCount + ' day(s)…'
+        : 'Processing…';
+    }
+  }
+
+  function hideAnalyseProgress() {
+    if (analyseProgressModal) analyseProgressModal.classList.add('hidden');
+    if (analyseProgressBar) analyseProgressBar.style.width = '0%';
+  }
+
+  socket.on('analyse_recording_progress', function (data) {
+    updateAnalyseProgressUi(data);
   });
 
   socket.on('analyse_recording_report', function (data) {
@@ -2023,7 +2084,13 @@ export function initTestRules(socket, state, log, profileOpts) {
         appendLog('Note: IG did not return usable marketTimes — using default UK Mon–Fri 08:00–21:59 (Europe/London). Log in for exact IG hours per epic.');
       }
       var epic = lastAnalyseEpic || (epicSelect && epicSelect.value) || state.savedEpic || '';
-      profilesApi.promptSaveAfterAnalyseIfNeeded(report, epic);
+      profilesApi.promptSaveAfterAnalyseIfNeeded({
+        report: report,
+        sampleQuality: data.sampleQuality,
+        usedTpSl: !!data.usedTpSl,
+        usedDynamicSl: !!data.usedDynamicSl,
+        analysedDayKeys: lastAnalyseDayKeys
+      }, epic);
     }
   });
 

@@ -20,6 +20,13 @@ export function initStatus(socket, log, opts) {
       if (versionEl) versionEl.textContent = 'TiddeliTrade ver: 0.0.0';
     });
 
+  var STOP_PROBE_TOOLTIP_DEFAULT = 'Stop price stream and probes';
+  var STOP_PROBE_TOOLTIP_LOCKED = 'Stop rules trading first — probing cannot be stopped while rules are active';
+
+  function isStopProbingBlocked() {
+    return !!state.rulesEngineRunning;
+  }
+
   function setSessionButtons(isRunning, isConnecting, isDisconnected) {
     startBtns.forEach(function (btn) {
       btn.classList.toggle('hidden', isRunning);
@@ -27,7 +34,11 @@ export function initStatus(socket, log, opts) {
     });
     stopBtns.forEach(function (btn) {
       btn.classList.toggle('hidden', !isRunning || isDisconnected);
-      btn.disabled = !isRunning;
+      var blocked = btn.id === 'probesSessionStopBtn' && isStopProbingBlocked();
+      btn.disabled = !isRunning || blocked;
+      if (btn.id === 'probesSessionStopBtn') {
+        btn.setAttribute('data-tooltip', blocked && isRunning ? STOP_PROBE_TOOLTIP_LOCKED : STOP_PROBE_TOOLTIP_DEFAULT);
+      }
     });
   }
 
@@ -58,6 +69,10 @@ export function initStatus(socket, log, opts) {
 
   function onStopClick(ev) {
     var btn = ev && ev.currentTarget;
+    if (btn && btn.id === 'probesSessionStopBtn' && isStopProbingBlocked()) {
+      log('Stop probing blocked — stop rules trading first');
+      return;
+    }
     if (btn && btn.id === 'probesSessionStopBtn' && onStopProbing) onStopProbing();
     log('Stop probing clicked');
     socket.emit('stop');

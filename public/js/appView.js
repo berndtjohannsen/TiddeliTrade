@@ -30,7 +30,7 @@ export function initAppView(opts) {
   function updateNavButtons() {
     var tradeActive = currentView === 'trade';
     var tradeCls =
-      'px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ' +
+      'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ' +
       (tradeActive ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-200');
     var researchCls =
       'px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ' +

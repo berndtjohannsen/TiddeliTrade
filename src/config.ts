@@ -222,7 +222,10 @@ export interface BacktestProfile {
   analyseOptions: BacktestProfileAnalyseOptions;
   /** Rules engine safety settings snapshot (pause/stop-after-loss/schedule). */
   engineControls?: BacktestProfileEngineControls;
+  /** Summary of last backtest (legacy; see savedReport for full UI snapshot). */
   lastResult?: BacktestProfileLastResult;
+  /** Full backtest report as shown in Research (trades, quality, blockers, summary). */
+  savedReport?: BacktestProfileSavedReport;
 }
 
 export interface BacktestProfileStrategy {
@@ -273,6 +276,104 @@ export interface BacktestProfileLastResult {
   tradeCount: number;
   winRate?: number;
   runAt: number;
+}
+
+/** Full backtest report as shown in Research UI, saved with the profile. */
+export interface BacktestProfileSavedReport {
+  runAt: number;
+  report: BacktestProfileReportSnapshot;
+  sampleQuality?: BacktestProfileSampleQualitySnapshot;
+  usedTpSl?: boolean;
+  usedDynamicSl?: boolean;
+  analysedDayKeys?: string[];
+}
+
+export interface BacktestProfileReportSnapshot {
+  trades: BacktestProfileTradeSnapshot[];
+  totalGainLoss: number;
+  totalGainLossPounds?: number;
+  tradeCount: number;
+  winningTrades: number;
+  losingTrades: number;
+  winRate: number;
+  avgTradePnl: number;
+  avgTradePnlPounds?: number;
+  sampleCount: number;
+  startTs: number;
+  endTs: number;
+  openAtEnd?: number;
+  daysAnalysed?: number;
+  closeReasonCounts?: {
+    tp: number;
+    sl: number;
+    dsl: number;
+    rules: number;
+    endOfPeriod: number;
+  };
+  nonConsecutiveWarning?: string;
+  ruleBlockerCounts?: Array<{
+    left: string;
+    op: string;
+    right: string;
+    soleBlockerCount: number;
+    direction?: 'BUY' | 'SELL';
+  }>;
+  dynamicStopLossApplied?: boolean;
+  dynamicStopLossNote?: string;
+  analysedDays?: Array<{
+    day: string;
+    sampleCount: number;
+    tradeCount: number;
+    totalGainLoss: number;
+    totalGainLossPounds?: number;
+    status?: 'noSamples';
+  }>;
+}
+
+export interface BacktestProfileTradeSnapshot {
+  direction: 'BUY' | 'SELL';
+  entryTs: number;
+  entryPrice: number;
+  exitTs: number;
+  exitPrice: number;
+  profitLoss: number;
+  exitReason?: string;
+  entryRules?: Array<{
+    left: string;
+    op: string;
+    right: string;
+    leftAtEntry?: string;
+    rightAtEntry?: string;
+  }>;
+}
+
+export interface BacktestProfileSampleQualitySnapshot {
+  hasWarnings: boolean;
+  summaryWarnings: string[];
+  totalSamples: number;
+  dayCount: number;
+  gapsOver5s: number;
+  gapsOver30s: number;
+  gapsOver60s: number;
+  maxGapMs: number;
+  estimatedMissingSamples: number;
+  largeMidJumpCount: number;
+  invalidSpreadCount: number;
+  days: Array<{
+    day: string;
+    count: number;
+    spanMs: number;
+    expectedInSpan: number;
+    coveragePct: number;
+    gapsOver5s: number;
+    gapsOver30s: number;
+    gapsOver60s: number;
+    maxGapMs: number;
+    estimatedMissingSamples: number;
+    invalidSpreadCount: number;
+    largeMidJumpCount: number;
+    warnings: string[];
+  }>;
 }
 
 const DEFAULT_CONFIG: UserConfig = {

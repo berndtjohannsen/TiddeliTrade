@@ -1,7 +1,7 @@
 /**
  * Transaction log panel – scrollable list, total, reset. Persisted server-side.
  */
-import { formatMoney, formatTimeWithTz } from './utils.js';
+import { formatMoney, formatLogTimestamp } from './utils.js';
 
 export function initTransactionLog(socket) {
   var listEl = document.getElementById('transactionLogList');
@@ -14,7 +14,13 @@ export function initTransactionLog(socket) {
   }
 
   function renderTransaction(tx) {
-    var time = formatTimeWithTz(tx.timestamp);
+    var time = formatLogTimestamp(tx.timestamp);
+    var profileBadge = '';
+    if (tx.profile === 'live') {
+      profileBadge = '<span class="shrink-0 px-1 py-0.5 rounded text-[10px] font-semibold bg-amber-600/90 text-amber-950" title="Live account">LIVE</span>';
+    } else if (tx.profile === 'demo') {
+      profileBadge = '<span class="shrink-0 px-1 py-0.5 rounded text-[10px] font-semibold bg-slate-600/80 text-slate-300" title="Demo account">Demo</span>';
+    }
     var name = tx.instrumentName || tx.epic || '—';
     var dirClass = tx.direction === 'BUY' ? 'text-emerald-500' : 'text-red-500';
     var isOpen = tx.type === 'open';
@@ -27,7 +33,8 @@ export function initTransactionLog(socket) {
     var rowBg = isOpen ? 'bg-slate-800/50' : '';
     var rowBorder = isOpen ? 'border-l-2 border-amber-500/70' : '';
     return '<div class="flex items-center gap-3 py-1.5 px-2 border-b border-slate-800/50 last:border-0 text-xs whitespace-nowrap flex-nowrap ' + rowBg + ' ' + rowBorder + '">' +
-      '<span class="text-slate-500 shrink-0 min-w-[7.5rem]" title="' + time + '">' + time + '</span>' +
+      '<span class="text-slate-500 shrink-0 min-w-[10.5rem]" title="' + time + '">' + time + '</span>' +
+      profileBadge +
       '<span class="text-slate-300 min-w-0 truncate flex-1" title="' + (tx.epic || '') + '">' + name + '</span>' +
       '<span class="' + dirClass + ' shrink-0">' + (tx.direction || '') + (sizeStr ? ' ' + sizeStr : '') + '</span>' +
       '<span class="text-slate-500 font-mono shrink-0">' + priceLine + '</span>' +

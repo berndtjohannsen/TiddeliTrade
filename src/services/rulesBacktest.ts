@@ -857,7 +857,8 @@ function groupConsecutiveDays(days: string[]): string[][] {
 export function runBacktestCarryOver(
   samples: RecordedSample[],
   config: BacktestConfig,
-  onProgress?: (processed: number, total: number) => void
+  onDayProgress?: (processed: number, total: number) => void,
+  onSampleProgress?: BacktestProgressCallback
 ): BacktestReport {
   const byDay = new Map<string, RecordedSample[]>();
   for (const s of samples) {
@@ -881,7 +882,7 @@ export function runBacktestCarryOver(
   let endTs = 0;
   const blockerAggregate = new Map<string, number>();
   let daysProcessed = 0;
-  onProgress?.(0, totalDays);
+  onDayProgress?.(0, totalDays);
 
   for (const blockDays of blocks) {
     const blockSamples: RecordedSample[] = [];
@@ -889,10 +890,11 @@ export function runBacktestCarryOver(
       blockSamples.push(...(byDay.get(d) ?? []));
     }
     const blockDayCount = blockDays.length;
-    const report = runBacktest(blockSamples, config, (samplesDone, blockTotal) => {
+    const report = runBacktest(blockSamples, config, (samplesDone, blockTotal, stats) => {
+      onSampleProgress?.(samplesDone, blockTotal, stats);
       const frac = blockTotal > 0 ? samplesDone / blockTotal : 1;
       const approxDays = daysProcessed + Math.floor(frac * blockDayCount);
-      onProgress?.(Math.min(approxDays, totalDays), totalDays);
+      onDayProgress?.(Math.min(approxDays, totalDays), totalDays);
     });
     allTrades.push(...report.trades);
     totalGainLoss += report.totalGainLoss;
@@ -909,7 +911,7 @@ export function runBacktestCarryOver(
       if (blockSamples[blockSamples.length - 1].ts > endTs) endTs = blockSamples[blockSamples.length - 1].ts;
     }
     daysProcessed += blockDays.length;
-    onProgress?.(daysProcessed, totalDays);
+    onDayProgress?.(daysProcessed, totalDays);
   }
 
   const winningTrades = allTrades.filter((t) => t.profitLoss > 0).length;
@@ -1037,12 +1039,40 @@ function getLongWindowMs(config: BacktestConfig): number {
   return extendWindowOverWeekends(longMs, config.is24_7);
 }
 
-const PROGRESS_SAMPLE_INTERVAL = 50000;
+export interface BacktestProgressSnapshot {
+  totalGainLoss: number;
+  winningTrades: number;
+  losingTrades: number;
+  tradeCount: number;
+}
+
+export type BacktestProgressCallback = (
+  processed: number,
+  total: number,
+  stats?: BacktestProgressSnapshot
+) => void;
+
+function progressSampleInterval(totalSamples: number): number {
+  if (totalSamples <= 0) return 1;
+  return Math.max(1, Math.min(5000, Math.floor(totalSamples / 200)));
+}
+
+function snapshotTradeStats(trades: BacktestTrade[]): BacktestProgressSnapshot {
+  let totalGainLoss = 0;
+  let winningTrades = 0;
+  let losingTrades = 0;
+  for (const t of trades) {
+    totalGainLoss += t.profitLoss;
+    if (t.profitLoss > 0) winningTrades++;
+    else if (t.profitLoss < 0) losingTrades++;
+  }
+  return { totalGainLoss, winningTrades, losingTrades, tradeCount: trades.length };
+}
 
 export function runBacktest(
   samples: RecordedSample[],
   config: BacktestConfig,
-  onProgress?: (samplesProcessed: number, totalSamples: number) => void
+  onProgress?: BacktestProgressCallback
 ): BacktestReport {
   const trades: BacktestTrade[] = [];
   const priceHistory: { ts: number; mid: number; spread: number }[] = [];
@@ -1120,10 +1150,13 @@ export function runBacktest(
   const soleBlockerCounts = new Map<string, number>();
 
   const totalSamples = samples.length;
+  const progressEvery = progressSampleInterval(totalSamples);
+  if (onProgress) onProgress(0, totalSamples, snapshotTradeStats(trades));
 
   for (let i = 0; i < samples.length; i++) {
-    if (onProgress && (i + 1) % PROGRESS_SAMPLE_INTERVAL === 0) {
-      onProgress(i + 1, totalSamples);
+    const done = i + 1;
+    if (onProgress && (done % progressEvery === 0 || done === totalSamples)) {
+      onProgress(done, totalSamples, snapshotTradeStats(trades));
     }
     const s = samples[i];
     const mid = (s.bid + s.offer) / 2;

@@ -1,5 +1,5 @@
 import { Server, Socket } from 'socket.io';
-import { loadConfig, updateConfig } from '../config';
+import { loadConfig, updateConfig, type IgProfileId } from '../config';
 import { loadScheduledCloses, saveScheduledCloses, type ScheduledCloseEntry } from '../scheduledCloses';
 import {
   closePosition,
@@ -51,6 +51,7 @@ import {
   defaultDealingWeekLondonMonFri,
   type BacktestConfig,
   type BacktestReport,
+  type BacktestProgressSnapshot,
   type BacktestDaySummary,
   type RuleBlockerCountRow,
   type RuleSetConfig,
@@ -86,6 +87,38 @@ function parseBacktestDayTimeoutMs(): number {
   return !isNaN(n) && n > 0 ? n : DEFAULT_BACKTEST_DAY_TIMEOUT_MS;
 }
 
+function buildAnalyseProgressPayload(opts: {
+  processed: number;
+  total: number;
+  currentDay?: string;
+  daySampleProcessed?: number;
+  daySampleTotal?: number;
+  completedGainLoss: number;
+  completedWins: number;
+  completedLosses: number;
+  completedTrades: number;
+  partial?: BacktestProgressSnapshot;
+  pnlDenom: number;
+}): Record<string, unknown> {
+  const partial = opts.partial;
+  const totalGainLoss = opts.completedGainLoss + (partial?.totalGainLoss ?? 0);
+  const winningTrades = opts.completedWins + (partial?.winningTrades ?? 0);
+  const losingTrades = opts.completedLosses + (partial?.losingTrades ?? 0);
+  const tradeCount = opts.completedTrades + (partial?.tradeCount ?? 0);
+  return {
+    processed: opts.processed,
+    total: opts.total,
+    currentDay: opts.currentDay,
+    daySampleProcessed: opts.daySampleProcessed,
+    daySampleTotal: opts.daySampleTotal,
+    totalGainLoss,
+    totalGainLossPounds: opts.pnlDenom > 0 ? totalGainLoss * opts.pnlDenom : undefined,
+    winningTrades,
+    losingTrades,
+    tradeCount,
+  };
+}
+
 function runBacktestInWorker(
   workerPath: string,
   samples: RecordedSample[],
@@ -94,7 +127,7 @@ function runBacktestInWorker(
   ctx: {
     isCancelled: () => boolean;
     onWorker: (worker: Worker | null) => void;
-    onSampleProgress?: (processed: number, total: number) => void;
+    onSampleProgress?: (processed: number, total: number, stats?: BacktestProgressSnapshot) => void;
     timeoutMs?: number;
   }
 ): Promise<BacktestReport> {
@@ -120,9 +153,27 @@ function runBacktestInWorker(
       cleanup();
       action();
     };
-    worker.on('message', (msg: { report?: unknown; error?: string; progress?: { processed: number; total: number } }) => {
-      if (msg.progress && ctx.onSampleProgress) {
-        ctx.onSampleProgress(msg.progress.processed, msg.progress.total);
+    worker.on('message', (msg: {
+      report?: unknown;
+      error?: string;
+      progress?: {
+        processed: number;
+        total: number;
+        scope?: 'samples' | 'days';
+        totalGainLoss?: number;
+        winningTrades?: number;
+        losingTrades?: number;
+        tradeCount?: number;
+      };
+    }) => {
+      if (msg.progress && msg.progress.scope !== 'days' && ctx.onSampleProgress) {
+        const p = msg.progress;
+        ctx.onSampleProgress(p.processed, p.total, {
+          totalGainLoss: p.totalGainLoss ?? 0,
+          winningTrades: p.winningTrades ?? 0,
+          losingTrades: p.losingTrades ?? 0,
+          tradeCount: p.tradeCount ?? 0,
+        });
         return;
       }
       if (msg.error) {
@@ -268,6 +319,7 @@ async function pollAndEmitWorkingOrders(session: IgSession, io: Server): Promise
               size: sizeNum,
               entry: typeof entry === 'number' && !isNaN(entry) ? entry : 0,
               currency: match.currency ?? 'GBP',
+              profile: currentIgProfile(),
             });
             io.emit('transaction_added', tx);
           } catch { /* ignore */ }
@@ -556,6 +608,7 @@ async function recordTransactionFromPosition(
       exit,
       profitLoss,
       currency,
+      profile: currentIgProfile(),
     });
     persisted = true;
     if (tx) io.emit('transaction_added', tx);
@@ -687,6 +740,11 @@ async function runOverdueCloses(session: IgSession, io: Server): Promise<void> {
 }
 
 type EngineStatus = 'ready' | 'connected' | 'running' | 'stopped';
+
+function currentIgProfile(): IgProfileId {
+  const p = loadConfig().activeProfile;
+  return p === 'live' ? 'live' : 'demo';
+}
 
 function accountToClient(session: IgSession) {
   const cfg = loadConfig();
@@ -1463,7 +1521,19 @@ export function registerSocketHandlers(io: Server): void {
         const size = parseFloat(config.dealSize || '1') || 1;
         const contractSize = (config.contractSize != null && config.contractSize > 0) ? config.contractSize : 1;
         const pnlDenom = size * contractSize;
-        socket.emit('analyse_recording_progress', { processed: 0, total: days.length });
+        let completedGainLoss = 0;
+        let completedWins = 0;
+        let completedLosses = 0;
+        let completedTrades = 0;
+        socket.emit('analyse_recording_progress', buildAnalyseProgressPayload({
+          processed: 0,
+          total: days.length,
+          completedGainLoss: 0,
+          completedWins: 0,
+          completedLosses: 0,
+          completedTrades: 0,
+          pnlDenom,
+        }));
         for (let i = 0; i < days.length; i++) {
           if (cancelled) {
             activeAnalyseBySocket.delete(socket.id);
@@ -1481,14 +1551,20 @@ export function registerSocketHandlers(io: Server): void {
                 isCancelled: () => cancelled,
                 onWorker: (worker) => { currentWorker = worker; },
                 timeoutMs: parseBacktestDayTimeoutMs(),
-                onSampleProgress: (processed, total) => {
-                  socket.emit('analyse_recording_progress', {
+                onSampleProgress: (processed, total, stats) => {
+                  socket.emit('analyse_recording_progress', buildAnalyseProgressPayload({
                     processed: i,
                     total: days.length,
                     currentDay: day,
                     daySampleProcessed: processed,
                     daySampleTotal: total,
-                  });
+                    completedGainLoss,
+                    completedWins,
+                    completedLosses,
+                    completedTrades,
+                    partial: stats,
+                    pnlDenom,
+                  }));
                 },
               });
             } catch (err) {
@@ -1508,6 +1584,10 @@ export function registerSocketHandlers(io: Server): void {
             }
             if (dayReport.startTs && (startTs === 0 || dayReport.startTs < startTs)) startTs = dayReport.startTs;
             if (dayReport.endTs && dayReport.endTs > endTs) endTs = dayReport.endTs;
+            completedGainLoss += dayReport.totalGainLoss;
+            completedWins += dayReport.winningTrades;
+            completedLosses += dayReport.losingTrades;
+            completedTrades += dayReport.tradeCount;
             analysedDays.push({
               day,
               sampleCount: dayReport.sampleCount,
@@ -1524,7 +1604,15 @@ export function registerSocketHandlers(io: Server): void {
               status: 'noSamples',
             });
           }
-          socket.emit('analyse_recording_progress', { processed: i + 1, total: days.length });
+          socket.emit('analyse_recording_progress', buildAnalyseProgressPayload({
+            processed: i + 1,
+            total: days.length,
+            completedGainLoss,
+            completedWins,
+            completedLosses,
+            completedTrades,
+            pnlDenom,
+          }));
           await new Promise<void>((resolve) => setImmediate(resolve));
         }
         activeAnalyseBySocket.delete(socket.id);
@@ -1613,7 +1701,22 @@ export function registerSocketHandlers(io: Server): void {
       let endTs = 0;
       const blockerAggregate = new Map<string, number>();
       let daysProcessed = 0;
-      socket.emit('analyse_recording_progress', { processed: 0, total: days.length });
+      const sizeCo = parseFloat(config.dealSize || '1') || 1;
+      const contractSizeCo = (config.contractSize != null && config.contractSize > 0) ? config.contractSize : 1;
+      const pnlDenomCo = sizeCo * contractSizeCo;
+      let completedGainLoss = 0;
+      let completedWins = 0;
+      let completedLosses = 0;
+      let completedTrades = 0;
+      socket.emit('analyse_recording_progress', buildAnalyseProgressPayload({
+        processed: 0,
+        total: days.length,
+        completedGainLoss: 0,
+        completedWins: 0,
+        completedLosses: 0,
+        completedTrades: 0,
+        pnlDenom: pnlDenomCo,
+      }));
       for (const blockDays of blocks) {
         if (cancelled) {
           activeAnalyseBySocket.delete(socket.id);
@@ -1623,7 +1726,15 @@ export function registerSocketHandlers(io: Server): void {
         const blockSamples = getRecordedSamplesFiltered(epic, { days: blockDays });
         if (blockSamples.length === 0) {
           daysProcessed += blockDays.length;
-          socket.emit('analyse_recording_progress', { processed: daysProcessed, total: days.length });
+          socket.emit('analyse_recording_progress', buildAnalyseProgressPayload({
+            processed: daysProcessed,
+            total: days.length,
+            completedGainLoss,
+            completedWins,
+            completedLosses,
+            completedTrades,
+            pnlDenom: pnlDenomCo,
+          }));
           continue;
         }
         if (blockSamples.length > MAX_CARRYOVER_SAMPLES) {
@@ -1640,14 +1751,20 @@ export function registerSocketHandlers(io: Server): void {
             isCancelled: () => cancelled,
             onWorker: (worker) => { currentWorker = worker; },
             timeoutMs: parseBacktestDayTimeoutMs() * Math.max(1, blockDays.length),
-            onSampleProgress: (processed, total) => {
-              socket.emit('analyse_recording_progress', {
+            onSampleProgress: (processed, total, stats) => {
+              socket.emit('analyse_recording_progress', buildAnalyseProgressPayload({
                 processed: daysProcessed,
                 total: days.length,
                 currentDay: blockDays.join(' → '),
                 daySampleProcessed: processed,
                 daySampleTotal: total,
-              });
+                completedGainLoss,
+                completedWins,
+                completedLosses,
+                completedTrades,
+                partial: stats,
+                pnlDenom: pnlDenomCo,
+              }));
             },
           });
         } catch (err) {
@@ -1667,8 +1784,20 @@ export function registerSocketHandlers(io: Server): void {
         }
         if (report.startTs && (startTs === 0 || report.startTs < startTs)) startTs = report.startTs;
         if (report.endTs && report.endTs > endTs) endTs = report.endTs;
+        completedGainLoss += report.totalGainLoss;
+        completedWins += report.winningTrades;
+        completedLosses += report.losingTrades;
+        completedTrades += report.tradeCount;
         daysProcessed += blockDays.length;
-        socket.emit('analyse_recording_progress', { processed: daysProcessed, total: days.length });
+        socket.emit('analyse_recording_progress', buildAnalyseProgressPayload({
+          processed: daysProcessed,
+          total: days.length,
+          completedGainLoss,
+          completedWins,
+          completedLosses,
+          completedTrades,
+          pnlDenom: pnlDenomCo,
+        }));
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
       activeAnalyseBySocket.delete(socket.id);
@@ -2002,6 +2131,7 @@ export function registerSocketHandlers(io: Server): void {
               size: sizeNum,
               entry: typeof entry === 'number' && !isNaN(entry) ? entry : 0,
               currency: placedPosition.currency ?? currencyCode,
+              profile: currentIgProfile(),
             });
             if (tx) io.emit('transaction_added', tx);
           } catch { /* ignore */ }

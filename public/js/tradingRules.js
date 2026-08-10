@@ -537,7 +537,7 @@ export function getRulesForBacktest() {
   };
 }
 
-export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled, setProbesPanelEnabled, setProbesBackfillEnabled, getProbeValues, triggerDealConfirm, placeDealDirect, log) {
+export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled, setProbesPanelEnabled, setProbesBackfillEnabled, setProbesSettingsLocked, getProbeValues, triggerDealConfirm, placeDealDirect, log) {
   var toggleBtn = document.getElementById('tradingRulesToggle');
   var confirmCheck = document.getElementById('tradingRulesConfirmBeforePlace');
   var rulesBuyGroupsRoot = document.getElementById('tradingRulesBuyGroups');
@@ -547,8 +547,8 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   var engineStatusEl = document.getElementById('tradingRulesEngineStatus');
   var rulesNoProbesModal = document.getElementById('rulesNoProbesModal');
   var rulesNoProbesCancel = document.getElementById('rulesNoProbesCancel');
-  var rulesNoProbesOk = document.getElementById('rulesNoProbesOk');
-  var rulesNoProbesConfirmCallback = null;
+  var rulesNoProbesRulesOnly = document.getElementById('rulesNoProbesRulesOnly');
+  var rulesNoProbesWithProbes = document.getElementById('rulesNoProbesWithProbes');
   var rulesLockedMsg = document.getElementById('tradingRulesLockedMsg');
   var rulesLockedMsgBuy = document.getElementById('tradingRulesLockedMsgBuy');
   var rulesLockedMsgSell = document.getElementById('tradingRulesLockedMsgSell');
@@ -560,6 +560,18 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   var scheduleStopInput = document.getElementById('tradingRulesScheduleStop');
   var scheduleRepeatCheck = document.getElementById('tradingRulesScheduleRepeatDaily');
   var scheduleStatusEl = document.getElementById('tradingRulesScheduleStatus');
+  var tradeViewRoot = document.getElementById('tradeViewRoot');
+  var tradeManualSection = document.getElementById('tradeManualSection');
+  var sessionBanner = document.getElementById('tradeRulesSessionBanner');
+  var sessionBannerLabel = document.getElementById('tradeRulesSessionBannerLabel');
+  var sessionBannerText = document.getElementById('tradeRulesSessionBannerText');
+  var sessionBannerStop = document.getElementById('tradeRulesSessionBannerStop');
+  var headerRulesStatus = document.getElementById('headerRulesStatus');
+  var navRulesBadge = document.getElementById('appNavTradeRulesBadge');
+  var rulesStartModal = document.getElementById('rulesStartModal');
+  var rulesStartModalSummary = document.getElementById('rulesStartModalSummary');
+  var rulesStartModalOk = document.getElementById('rulesStartModalOk');
+  var rulesStartModalStop = document.getElementById('rulesStartModalStop');
   var commonPanelInputs = [
     confirmCheck,
     pauseOnLossInput,
@@ -576,15 +588,13 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   var rulesEngineRunning = false;
 
   function hideRulesNoProbesModal() {
-    rulesNoProbesConfirmCallback = null;
     if (rulesNoProbesModal) {
       rulesNoProbesModal.classList.add('hidden');
       rulesNoProbesModal.setAttribute('aria-hidden', 'true');
     }
   }
 
-  function showRulesNoProbesModal(onConfirm) {
-    rulesNoProbesConfirmCallback = onConfirm || null;
+  function showRulesNoProbesModal() {
     if (rulesNoProbesModal) {
       rulesNoProbesModal.classList.remove('hidden');
       rulesNoProbesModal.setAttribute('aria-hidden', 'false');
@@ -599,10 +609,12 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     return rulesEngineRunning && !isProbingActive();
   }
 
-  function engineStatusClass(remaining) {
-    if (remaining > 0) return 'text-xs text-amber-400 mb-2 font-medium';
-    if (rulesRunningWithoutProbes()) return 'text-xs text-amber-400 mb-2';
-    return 'text-xs text-slate-500 mb-2';
+  function engineStatusClass(ui) {
+    if (!ui) ui = getRulesUiMode();
+    if (ui.key === 'paused') return 'text-xs text-sky-400 mb-2 font-medium';
+    if (ui.key === 'stopped') return 'text-xs text-slate-500 mb-2';
+    if (ui.key === 'active') return 'text-xs text-emerald-400 mb-2 font-medium';
+    return 'text-xs text-amber-400 mb-2 font-medium';
   }
   var buyEnabledCheck = document.getElementById('tradingRulesBuyEnabled');
   var sellEnabledCheck = document.getElementById('tradingRulesSellEnabled');
@@ -613,6 +625,8 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   var RULES_DEAL_ATTEMPT_COOLDOWN_MS = 8000;
   var lastRulesDealAttemptMs = 0;
   var scheduleTimerId = null;
+  /** True once the engine has been inside the schedule window this start session (avoids auto-stop when armed outside). */
+  var scheduleSessionSeenInside = false;
   var pauseOnLossTimerId = null;
   var pausedUntil = null;
   var draggedRuleWrap = null;
@@ -621,6 +635,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   var placeDealDirectFn = typeof placeDealDirect === 'function' ? placeDealDirect : function () { return false; };
   var setOrderEnabledFn = typeof setOrderEnabled === 'function' ? setOrderEnabled : function () {};
   var setProbesBackfillEnabledFn = typeof setProbesBackfillEnabled === 'function' ? setProbesBackfillEnabled : function () {};
+  var setProbesSettingsLockedFn = typeof setProbesSettingsLocked === 'function' ? setProbesSettingsLocked : function () {};
 
   function getRulesBuyEnabled() {
     return !buyEnabledCheck || buyEnabledCheck.checked !== false;
@@ -663,6 +678,138 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
 
   function hasScheduleLimits() {
     return parseScheduleTimeInput(scheduleStartInput) != null || parseScheduleTimeInput(scheduleStopInput) != null;
+  }
+
+  function formatScheduleWindowShort() {
+    var startTxt = scheduleStartInput && scheduleStartInput.value ? scheduleStartInput.value : '—';
+    var stopTxt = scheduleStopInput && scheduleStopInput.value ? scheduleStopInput.value : '—';
+    return startTxt + '–' + stopTxt;
+  }
+
+  function getPauseRemainingSec() {
+    if (pausedUntil == null || pausedUntil <= Date.now()) return 0;
+    return Math.ceil((pausedUntil - Date.now()) / 1000);
+  }
+
+  function isPausedOnLoss() {
+    return getPauseRemainingSec() > 0;
+  }
+
+  /** @returns {{ key: string, pauseSec?: number, scheduleText?: string }} */
+  function getRulesUiMode() {
+    var pauseSec = getPauseRemainingSec();
+    if (pauseSec > 0) return { key: 'paused', pauseSec: pauseSec };
+    if (!rulesEngineRunning) return { key: 'stopped' };
+    if (hasScheduleLimits() && !isWithinScheduleWindow(Date.now())) {
+      var now = Date.now();
+      var beforeOpen = !isPastScheduleStop(now);
+      return { key: 'armed-schedule', scheduleText: formatScheduleWindowShort(), beforeOpen: beforeOpen };
+    }
+    if (rulesRunningWithoutProbes()) return { key: 'armed-probes' };
+    return { key: 'active' };
+  }
+
+  function formatRulesSessionBannerText(ui) {
+    if (ui.key === 'paused') {
+      return 'Paused after loss — resuming in ' + ui.pauseSec + 's · Manual trading off';
+    }
+    if (ui.key === 'armed-schedule') {
+      if (ui.beforeOpen) {
+        return 'Armed — waiting for schedule window (' + ui.scheduleText + ') · Manual trading off';
+      }
+      return 'Armed — outside schedule window (' + ui.scheduleText + ') · Manual trading off';
+    }
+    if (ui.key === 'armed-probes') {
+      return 'Armed — no live price stream · Start probing · Manual trading off';
+    }
+    if (ui.key === 'active') {
+      return 'Active — monitoring conditions · Manual trading off';
+    }
+    return '';
+  }
+
+  function formatHeaderRulesStatus(ui) {
+    if (ui.key === 'paused') return 'Rules: Paused (' + ui.pauseSec + 's)';
+    if (ui.key === 'armed-schedule') {
+      return ui.beforeOpen
+        ? 'Rules: Armed (opens ' + ui.scheduleText + ')'
+        : 'Rules: Armed (outside ' + ui.scheduleText + ')';
+    }
+    if (ui.key === 'armed-probes') return 'Rules: Armed (no live prices)';
+    if (ui.key === 'active') return 'Rules: Active';
+    return '';
+  }
+
+  function updateRulesSessionUi() {
+    var ui = getRulesUiMode();
+    var sessionActive = ui.key !== 'stopped';
+    if (tradeViewRoot) {
+      tradeViewRoot.classList.toggle('trade-rules-session', sessionActive);
+      tradeViewRoot.classList.remove('trade-rules-mode-active', 'trade-rules-mode-paused');
+      if (ui.key === 'active') tradeViewRoot.classList.add('trade-rules-mode-active');
+      if (ui.key === 'paused') tradeViewRoot.classList.add('trade-rules-mode-paused');
+    }
+    if (tradeManualSection) tradeManualSection.classList.toggle('trade-manual-locked', sessionActive);
+    setProbesSettingsLockedFn(sessionActive);
+    if (sessionBanner) {
+      sessionBanner.classList.toggle('hidden', !sessionActive);
+      sessionBanner.classList.remove('trade-rules-banner-active', 'trade-rules-banner-paused');
+      if (ui.key === 'active') sessionBanner.classList.add('trade-rules-banner-active');
+      if (ui.key === 'paused') sessionBanner.classList.add('trade-rules-banner-paused');
+    }
+    if (sessionBannerLabel) {
+      var label = 'Rules';
+      if (ui.key === 'paused') label = 'Paused';
+      else if (ui.key === 'active') label = 'Active';
+      else if (sessionActive) label = 'Armed';
+      sessionBannerLabel.textContent = label;
+    }
+    var bannerText = formatRulesSessionBannerText(ui);
+    if (sessionBannerText) sessionBannerText.textContent = bannerText;
+    if (navRulesBadge) navRulesBadge.classList.toggle('hidden', !sessionActive);
+    if (headerRulesStatus) {
+      var headerText = formatHeaderRulesStatus(ui);
+      if (sessionActive && headerText) {
+        headerRulesStatus.textContent = headerText;
+        headerRulesStatus.title = bannerText;
+        headerRulesStatus.classList.remove('hidden');
+      } else {
+        headerRulesStatus.textContent = '';
+        headerRulesStatus.classList.add('hidden');
+      }
+    }
+  }
+
+  function buildRulesStartModalSummary() {
+    var ui = getRulesUiMode();
+    var lines = [];
+    lines.push('Mode: ' + (ui.key === 'active' ? 'Active' : ui.key === 'armed-schedule' ? 'Armed (outside schedule)' : ui.key === 'armed-probes' ? 'Armed (no live prices)' : 'Armed'));
+    lines.push('BUY: ' + (getRulesBuyEnabled() ? 'enabled' : 'off') + ' · SELL: ' + (getRulesSellEnabled() ? 'enabled' : 'off'));
+    lines.push('Probes: ' + (isProbingActive() ? 'running' : 'not running'));
+    if (hasScheduleLimits()) {
+      var repeatTxt = scheduleRepeatCheck && scheduleRepeatCheck.checked ? 'daily' : 'today only';
+      lines.push('Schedule: ' + formatScheduleWindowShort() + ' (' + repeatTxt + ')');
+      lines.push(isWithinScheduleWindow(Date.now()) ? 'Within schedule now' : 'Outside schedule now — no new deals until window opens');
+    } else {
+      lines.push('Schedule: no time limit');
+    }
+    lines.push('Manual deal/order: disabled');
+    return lines.join('\n');
+  }
+
+  function hideRulesStartModal() {
+    if (rulesStartModal) {
+      rulesStartModal.classList.add('hidden');
+      rulesStartModal.setAttribute('aria-hidden', 'true');
+    }
+  }
+
+  function showRulesStartModal() {
+    if (rulesStartModalSummary) rulesStartModalSummary.textContent = buildRulesStartModalSummary();
+    if (rulesStartModal) {
+      rulesStartModal.classList.remove('hidden');
+      rulesStartModal.setAttribute('aria-hidden', 'false');
+    }
   }
 
   /** True when new deals may open (local time window). Blank start/stop = no limit. */
@@ -716,7 +863,15 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   function checkScheduleStop() {
     if (!rulesEngineRunning) return;
     if (!hasScheduleLimits()) return;
-    if (!isPastScheduleStop(Date.now())) return;
+    var now = Date.now();
+    if (isWithinScheduleWindow(now)) {
+      scheduleSessionSeenInside = true;
+      return;
+    }
+    // Started outside the window (before open or between sessions) — stay armed; do not auto-stop.
+    if (!scheduleSessionSeenInside) return;
+    if (!isPastScheduleStop(now)) return;
+    scheduleSessionSeenInside = false;
     rulesEngineRunning = false;
     if (scheduleTimerId) {
       clearInterval(scheduleTimerId);
@@ -735,6 +890,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     scheduleTimerId = setInterval(function () {
       updateScheduleDisplay();
       checkScheduleStop();
+      if (rulesEngineRunning || isPausedOnLoss()) updateEngineState();
     }, 30000);
   }
 
@@ -850,22 +1006,16 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
 
   var pauseCountdownIntervalId = null;
 
-  var prevRulesEngineRunningOnPause = false;
   function doPauseOnLoss(seconds) {
     if (pauseOnLossTimerId) clearTimeout(pauseOnLossTimerId);
     if (pauseCountdownIntervalId) clearInterval(pauseCountdownIntervalId);
-    prevRulesEngineRunningOnPause = rulesEngineRunning;
-    rulesEngineRunning = false;
     pausedUntil = Date.now() + seconds * 1000;
-    if (state) state.rulesEngineRunning = false;
-    clearScheduleTimer();
-    updateToggleButton();
     saveRules();
     updateDealEnabled();
     var logFn = typeof log === 'function' ? log : function () {};
     logFn('Rules engine paused on loss for ' + seconds + 's');
     pauseCountdownIntervalId = setInterval(function () {
-      if (pausedUntil == null || Date.now() >= pausedUntil) {
+      if (!isPausedOnLoss()) {
         if (pauseCountdownIntervalId) clearInterval(pauseCountdownIntervalId);
         pauseCountdownIntervalId = null;
         return;
@@ -879,10 +1029,6 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
         clearInterval(pauseCountdownIntervalId);
         pauseCountdownIntervalId = null;
       }
-      rulesEngineRunning = prevRulesEngineRunningOnPause;
-      if (state) state.rulesEngineRunning = rulesEngineRunning;
-      startScheduleTimer();
-      updateToggleButton();
       saveRules();
       updateDealEnabled();
       logFn('Rules engine resumed after pause on loss');
@@ -1116,16 +1262,22 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     }
   }
 
-  function formatCommonEngineStatus(remaining) {
-    if (remaining > 0) return 'Rules trading: Paused (loss) – resuming in ' + remaining + 's';
-    function dirStatus(active) {
-      if (!rulesEngineRunning) return 'Stopped';
-      if (!active) return 'Off';
-      return 'Running';
+  function formatCommonEngineStatus() {
+    var ui = getRulesUiMode();
+    if (ui.key === 'paused') {
+      return 'Rules trading: Paused (loss) – resuming in ' + ui.pauseSec + 's • manual trading off';
     }
-    var engineWord = rulesEngineRunning ? 'Running' : 'Stopped';
+    if (ui.key === 'stopped') {
+      return 'Rules trading: Stopped • BUY: off • SELL: off';
+    }
+    function dirStatus(enabled) {
+      if (!enabled) return 'Off';
+      return ui.key === 'active' ? 'Active' : 'Armed';
+    }
+    var engineWord = ui.key === 'active' ? 'Active' : 'Armed';
     var line = 'Rules trading: ' + engineWord + ' • BUY: ' + dirStatus(getRulesBuyEnabled()) + ' • SELL: ' + dirStatus(getRulesSellEnabled());
-    if (rulesRunningWithoutProbes()) line += ' • No live prices — start probing';
+    if (ui.key === 'armed-schedule') line += ' • outside window (' + ui.scheduleText + ')';
+    if (ui.key === 'armed-probes') line += ' • No live prices — start probing';
     if (rulesEngineRunning && sleepPreventionStatus) line += ' • ' + sleepPreventionStatus;
     return line;
   }
@@ -1133,7 +1285,27 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   function updateEngineState() {
     var config = getConfig();
     var ctx = getContext();
+    var ui = getRulesUiMode();
     updateScheduleDisplay();
+
+    if (ui.key === 'paused') {
+      setDealEnabled(false);
+      setOrderEnabledFn(false);
+      setProbesBackfillEnabledFn(false);
+      if (dealEngineMsg) dealEngineMsg.classList.remove('hidden');
+      if (orderEngineMsg) orderEngineMsg.classList.remove('hidden');
+      var pausedStatus = formatCommonEngineStatus();
+      if (engineStatusEl) {
+        engineStatusEl.textContent = pausedStatus;
+        engineStatusEl.className = engineStatusClass(ui);
+      }
+      var pausedDetail = 'Paused on loss — resuming in ' + ui.pauseSec + 's';
+      if (statusEl) statusEl.textContent = pausedDetail;
+      if (statusSellEl) statusSellEl.textContent = pausedDetail;
+      updateRuleStatusIndicators();
+      updateRulesSessionUi();
+      return;
+    }
 
     if (!config.running) {
       setDealEnabled(baseEnabled);
@@ -1141,13 +1313,15 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       setProbesBackfillEnabledFn(baseEnabled);
       if (dealEngineMsg) dealEngineMsg.classList.add('hidden');
       if (orderEngineMsg) orderEngineMsg.classList.add('hidden');
-    var remaining = pausedUntil != null && pausedUntil > Date.now() ? Math.ceil((pausedUntil - Date.now()) / 1000) : 0;
-    var fullStatus = formatCommonEngineStatus(remaining);
-    var statusCls = engineStatusClass(remaining);
-    if (engineStatusEl) { engineStatusEl.textContent = fullStatus; engineStatusEl.className = statusCls; }
+      var fullStatus = formatCommonEngineStatus();
+      if (engineStatusEl) {
+        engineStatusEl.textContent = fullStatus;
+        engineStatusEl.className = engineStatusClass(ui);
+      }
       if (statusEl) statusEl.textContent = 'Manual trading enabled';
       if (statusSellEl) statusSellEl.textContent = 'Manual trading enabled';
       updateRuleStatusIndicators();
+      updateRulesSessionUi();
       return;
     }
 
@@ -1157,8 +1331,8 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     if (dealEngineMsg) dealEngineMsg.classList.remove('hidden');
     if (orderEngineMsg) orderEngineMsg.classList.remove('hidden');
     if (engineStatusEl) {
-      engineStatusEl.textContent = formatCommonEngineStatus(0);
-      engineStatusEl.className = 'text-xs text-amber-400 mb-2 font-medium';
+      engineStatusEl.textContent = formatCommonEngineStatus();
+      engineStatusEl.className = engineStatusClass(ui);
     }
 
     var ruleSets = config.ruleSets || { buy: { rules: [] }, sell: { rules: [] } };
@@ -1231,6 +1405,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     prevRulesPass = pass;
     prevBlocked = blocked;
     updateRuleStatusIndicators();
+    updateRulesSessionUi();
   }
 
   function updateToggleButton() {
@@ -1243,6 +1418,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     setRulesEditable();
     if (state) state.rulesEngineRunning = rulesEngineRunning;
     if (socket && typeof socket.emit === 'function') socket.emit('rules_engine_running', rulesEngineRunning);
+    updateRulesSessionUi();
   }
 
   function setRulesEditable() {
@@ -1757,8 +1933,13 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       if (smode && ruleSets.sell) smode.value = ruleSets.sell.tpSlMode || 'rate';
       applyDynamicTpUiState();
       updateToggleButton();
-      if (rulesEngineRunning) startScheduleTimer();
-      else clearScheduleTimer();
+      if (rulesEngineRunning) {
+        scheduleSessionSeenInside = isWithinScheduleWindow(Date.now());
+        startScheduleTimer();
+      } else {
+        scheduleSessionSeenInside = false;
+        clearScheduleTimer();
+      }
       updateEngineState();
       updateRulesEstTpSlDisplay();
     }).catch(function () { updateEngineState(); });
@@ -1837,23 +2018,45 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     }
   }
 
-  function startRulesEngine() {
+  function startRulesEngine(opts) {
+    var options = opts || {};
     clearPauseOnLossState();
     rulesEngineRunning = true;
-    if (!isProbingActive() && log) log('Rules started without active price stream');
+    scheduleSessionSeenInside = isWithinScheduleWindow(Date.now());
+    if (!isProbingActive() && !options.withProbing && log) log('Rules started without active price stream');
     startScheduleTimer();
     updateToggleButton();
     saveRules();
     updateDealEnabled();
+    if (options.showStartModal !== false) showRulesStartModal();
   }
 
-  function stopRulesEngine() {
+  function stopRulesEngine(reason) {
+    if (!rulesEngineRunning && !isPausedOnLoss() && !(state && state.rulesEngineRunning)) {
+      if (!reason) return;
+    }
     clearPauseOnLossState();
     rulesEngineRunning = false;
+    scheduleSessionSeenInside = false;
     clearScheduleTimer();
+    hideRulesStartModal();
+    if (state) state.rulesEngineRunning = false;
     updateToggleButton();
     saveRules();
     updateDealEnabled();
+    if (reason) {
+      var logFn = typeof log === 'function' ? log : function () {};
+      logFn(reason);
+    }
+  }
+
+  function startRulesAndProbing() {
+    if (socket && typeof socket.emit === 'function') {
+      var logFn = typeof log === 'function' ? log : function () {};
+      logFn('Start probing clicked');
+      socket.emit('start');
+    }
+    startRulesEngine({ withProbing: true });
   }
 
   function doToggleEngine() {
@@ -1862,18 +2065,36 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       return;
     }
     if (!isProbingActive()) {
-      showRulesNoProbesModal(startRulesEngine);
+      showRulesNoProbesModal();
       return;
     }
     startRulesEngine();
   }
   if (toggleBtn) toggleBtn.addEventListener('click', doToggleEngine);
+  if (sessionBannerStop) sessionBannerStop.addEventListener('click', stopRulesEngine);
+  if (rulesStartModalOk) rulesStartModalOk.addEventListener('click', hideRulesStartModal);
+  if (rulesStartModalStop) {
+    rulesStartModalStop.addEventListener('click', function () {
+      hideRulesStartModal();
+      stopRulesEngine();
+    });
+  }
+  if (rulesStartModal) {
+    rulesStartModal.addEventListener('click', function (e) {
+      if (e.target === rulesStartModal) hideRulesStartModal();
+    });
+  }
   if (rulesNoProbesCancel) rulesNoProbesCancel.addEventListener('click', hideRulesNoProbesModal);
-  if (rulesNoProbesOk) {
-    rulesNoProbesOk.addEventListener('click', function () {
-      var cb = rulesNoProbesConfirmCallback;
+  if (rulesNoProbesRulesOnly) {
+    rulesNoProbesRulesOnly.addEventListener('click', function () {
       hideRulesNoProbesModal();
-      if (cb) cb();
+      startRulesEngine();
+    });
+  }
+  if (rulesNoProbesWithProbes) {
+    rulesNoProbesWithProbes.addEventListener('click', function () {
+      hideRulesNoProbesModal();
+      startRulesAndProbing();
     });
   }
   if (rulesNoProbesModal) {
@@ -1881,9 +2102,9 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       if (e.target === rulesNoProbesModal) hideRulesNoProbesModal();
     });
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape' && rulesNoProbesModal && !rulesNoProbesModal.classList.contains('hidden')) {
-        hideRulesNoProbesModal();
-      }
+      if (e.key !== 'Escape') return;
+      if (rulesStartModal && !rulesStartModal.classList.contains('hidden')) hideRulesStartModal();
+      else if (rulesNoProbesModal && !rulesNoProbesModal.classList.contains('hidden')) hideRulesNoProbesModal();
     });
   }
   if (buyEnabledCheck) buyEnabledCheck.addEventListener('change', function () { saveRules(); updateEngineState(); });
@@ -1987,29 +2208,6 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     }
   });
 
-  function stopRulesEngine(reason) {
-    if (!rulesEngineRunning && pausedUntil == null && !(state && state.rulesEngineRunning)) return;
-    rulesEngineRunning = false;
-    pausedUntil = null;
-    if (pauseOnLossTimerId) {
-      clearTimeout(pauseOnLossTimerId);
-      pauseOnLossTimerId = null;
-    }
-    if (pauseCountdownIntervalId) {
-      clearInterval(pauseCountdownIntervalId);
-      pauseCountdownIntervalId = null;
-    }
-    clearScheduleTimer();
-    if (state) state.rulesEngineRunning = false;
-    updateToggleButton();
-    saveRules();
-    updateDealEnabled();
-    if (reason) {
-      var logFn = typeof log === 'function' ? log : function () {};
-      logFn(reason);
-    }
-  }
-
   socket.on('disconnect', function () {
     stopRulesEngine();
     for (var rid in rulesPlacedDealIds) delete rulesPlacedDealIds[rid];
@@ -2023,18 +2221,8 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     var skipPauseForThisClose = false;
     var logFn = typeof log === 'function' ? log : function () {};
     if (panel != null && stopAfterLossCheck && stopAfterLossCheck.checked && rulesEngineRunning) {
-      if (pausedUntil != null) {
-        pausedUntil = null;
-        if (pauseOnLossTimerId) { clearTimeout(pauseOnLossTimerId); pauseOnLossTimerId = null; }
-        if (pauseCountdownIntervalId) { clearInterval(pauseCountdownIntervalId); pauseCountdownIntervalId = null; }
-      }
-      rulesEngineRunning = false;
       skipPauseForThisClose = true;
-      clearScheduleTimer();
-      updateToggleButton();
-      saveRules();
-      updateDealEnabled();
-      logFn('Rules engine stopped (Stop after loss).');
+      stopRulesEngine('Rules engine stopped (Stop after loss).');
     }
     if (!skipPauseForThisClose) {
       var seconds = getPauseOnLossSeconds();

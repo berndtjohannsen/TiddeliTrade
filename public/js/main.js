@@ -84,7 +84,7 @@ var testRulesApi = initTestRules(socket, state, log, {
     if (tradingRulesApi.applyTradeProfile) tradingRulesApi.applyTradeProfile(profile);
   }
 });
-var tradingRulesApi = initTradingRules(socket, state, dealApi.setDealEnabled, orderApi.setOrderEnabled, probesApi.setProbesPanelEnabled, probesApi.setBackfillEnabled, probesApi.getProbeValues, dealApi.triggerDealConfirm, dealApi.placeDealDirect, log);
+var tradingRulesApi = initTradingRules(socket, state, dealApi.setDealEnabled, orderApi.setOrderEnabled, probesApi.setProbesPanelEnabled, probesApi.setBackfillEnabled, probesApi.setProbesSettingsLocked, probesApi.getProbeValues, dealApi.triggerDealConfirm, dealApi.placeDealDirect, log);
 initStatus(socket, log, {
   onStopProbing: function () {
     tradingRulesApi.stopRulesEngine('Rules engine stopped (probing ended)');

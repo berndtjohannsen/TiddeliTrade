@@ -2,7 +2,7 @@
  * Worker thread: runs backtest in isolation. Crashes here won't kill the main process.
  */
 import { parentPort, workerData } from 'worker_threads';
-import { runBacktestPerDay, runBacktestCarryOver, type BacktestConfig } from '../services/rulesBacktest';
+import { runBacktestPerDay, runBacktestCarryOver, type BacktestConfig, type BacktestProgressCallback } from '../services/rulesBacktest';
 import type { RecordedSample } from '../services/priceRecorder';
 
 interface WorkerInput {
@@ -13,13 +13,25 @@ interface WorkerInput {
 
 function main(): void {
   const { samples, config, usePerDay } = workerData as WorkerInput;
-  const onProgress = (processed: number, total: number) => {
-    parentPort!.postMessage({ progress: { processed, total } });
+  const onSampleProgress: BacktestProgressCallback = (processed, total, stats) => {
+    parentPort!.postMessage({
+      progress: {
+        processed,
+        total,
+        scope: 'samples',
+        totalGainLoss: stats?.totalGainLoss,
+        winningTrades: stats?.winningTrades,
+        losingTrades: stats?.losingTrades,
+        tradeCount: stats?.tradeCount,
+      },
+    });
   };
   try {
     const report = usePerDay
-      ? runBacktestPerDay(samples, config, onProgress)
-      : runBacktestCarryOver(samples, config, onProgress);
+      ? runBacktestPerDay(samples, config, (processed, total) => {
+          parentPort!.postMessage({ progress: { processed, total, scope: 'days' } });
+        })
+      : runBacktestCarryOver(samples, config, undefined, onSampleProgress);
     parentPort!.postMessage({ report });
   } catch (err) {
     parentPort!.postMessage({
