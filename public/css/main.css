@@ -186,6 +186,13 @@
   border-color: rgb(56 189 248 / 0.35);
   background: rgb(56 189 248 / 0.08);
 }
+.trade-layout.trade-rules-mode-schedule {
+  border-left-color: rgb(148 163 184 / 0.55);
+}
+.trade-rules-session-banner.trade-rules-banner-schedule {
+  border-color: rgb(148 163 184 / 0.35);
+  background: rgb(148 163 184 / 0.08);
+}
 .trade-layout-manual.trade-manual-locked {
   opacity: 0.45;
   pointer-events: none;

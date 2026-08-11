@@ -221,6 +221,9 @@ export function initTestRules(socket, state, log, profileOpts) {
           false
         );
         appendLog('Restored saved backtest report from profile.');
+        if (savedReport.report.tradesTruncated) {
+          appendLog('Note: profile stores the first ' + (savedReport.report.trades ? savedReport.report.trades.length : 0) + ' trades only; re-run analyse for the full trade list.');
+        }
       },
       onClearProfile: function () {
         appendLog('Using Trade tab rules for analyse');

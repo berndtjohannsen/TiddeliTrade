@@ -14,7 +14,14 @@ export function initTransactionLog(socket) {
   }
 
   function renderTransaction(tx) {
+    var isOpen = tx.type === 'open';
     var time = formatLogTimestamp(tx.timestamp);
+    var timeTitle = time;
+    if (!isOpen && tx.openedAt) {
+      timeTitle = 'Closed: ' + time + ' · Opened: ' + formatLogTimestamp(tx.openedAt);
+    } else if (isOpen) {
+      timeTitle = 'Opened: ' + time;
+    }
     var profileBadge = '';
     if (tx.profile === 'live') {
       profileBadge = '<span class="shrink-0 px-1 py-0.5 rounded text-[10px] font-semibold bg-amber-600/90 text-amber-950" title="Live account">LIVE</span>';
@@ -23,7 +30,6 @@ export function initTransactionLog(socket) {
     }
     var name = tx.instrumentName || tx.epic || '—';
     var dirClass = tx.direction === 'BUY' ? 'text-emerald-500' : 'text-red-500';
-    var isOpen = tx.type === 'open';
     var plClass = isOpen ? 'text-amber-400' : (tx.profitLoss >= 0 ? 'text-emerald-500' : 'text-red-500');
     var plStr = isOpen ? 'Open' : formatMoney(tx.profitLoss, tx.currency || '');
     var entryStr = tx.entry != null ? Number(tx.entry).toFixed(2) : '—';
@@ -33,7 +39,7 @@ export function initTransactionLog(socket) {
     var rowBg = isOpen ? 'bg-slate-800/50' : '';
     var rowBorder = isOpen ? 'border-l-2 border-amber-500/70' : '';
     return '<div class="flex items-center gap-3 py-1.5 px-2 border-b border-slate-800/50 last:border-0 text-xs whitespace-nowrap flex-nowrap ' + rowBg + ' ' + rowBorder + '">' +
-      '<span class="text-slate-500 shrink-0 min-w-[10.5rem]" title="' + time + '">' + time + '</span>' +
+      '<span class="text-slate-500 shrink-0 min-w-[10.5rem]" title="' + timeTitle + '">' + time + '</span>' +
       profileBadge +
       '<span class="text-slate-300 min-w-0 truncate flex-1" title="' + (tx.epic || '') + '">' + name + '</span>' +
       '<span class="' + dirClass + ' shrink-0">' + (tx.direction || '') + (sizeStr ? ' ' + sizeStr : '') + '</span>' +

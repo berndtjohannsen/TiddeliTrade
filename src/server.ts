@@ -15,7 +15,7 @@ const io = new Server(server, {
   maxHttpBufferSize: 1e7,
 });
 
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 app.use('/js', (_req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
   next();

@@ -27,6 +27,20 @@ export interface Transaction {
   currency: string;
   /** IG account mode (demo/live) when the trade was logged. */
   profile?: IgProfileId;
+  /** IG position open time (ISO). On closed rows, `timestamp` is close detection time. */
+  openedAt?: string;
+}
+
+function txKind(t: Pick<Transaction, 'type' | 'exit' | 'profitLoss'>): 'open' | 'closed' {
+  if (t.type === 'open') return 'open';
+  if (t.type === 'closed') return 'closed';
+  return 'closed';
+}
+
+function hasClosedForDeal(state: TransactionLogState, dealId: string): boolean {
+  return state.transactions.some(
+    (t) => (t.dealId || '').trim() === dealId && txKind(t) === 'closed'
+  );
 }
 
 export interface TransactionLogState {
@@ -60,13 +74,16 @@ function save(state: TransactionLogState): void {
 export function appendTransaction(tx: Omit<Transaction, 'id'>): Transaction | null {
   const state = loadRaw();
   const did = (tx.dealId || '').trim();
+  const kind = txKind(tx);
   if (did) {
-    const txKind = tx.type === 'open' ? 'open' : 'closed';
-    const dup = state.transactions.some((t) => {
-      const tKind = t.type === 'open' ? 'open' : 'closed';
-      return tKind === txKind && (t.dealId || '').trim() === did;
-    });
+    const dup = state.transactions.some((t) => txKind(t) === kind && (t.dealId || '').trim() === did);
     if (dup) return null;
+    if (kind === 'open' && hasClosedForDeal(state, did)) return null;
+    if (kind === 'closed') {
+      state.transactions = state.transactions.filter(
+        (t) => !(txKind(t) === 'open' && (t.dealId || '').trim() === did)
+      );
+    }
   }
   const id = `tx-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   const full: Transaction = { ...tx, id };

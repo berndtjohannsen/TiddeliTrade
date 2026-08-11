@@ -64,9 +64,15 @@ function normalizeSavePayload(reportOrPayload) {
   return { report: reportOrPayload };
 }
 
-function cloneTradesForSave(trades) {
-  if (!Array.isArray(trades)) return [];
-  return trades.map(function (t) {
+function cloneTradesForSave(trades, maxTrades) {
+  if (!Array.isArray(trades)) return { trades: [], truncated: false };
+  var list = trades;
+  var truncated = false;
+  if (typeof maxTrades === 'number' && maxTrades > 0 && list.length > maxTrades) {
+    list = list.slice(0, maxTrades);
+    truncated = true;
+  }
+  var out = list.map(function (t) {
     var copy = {
       direction: t.direction,
       entryTs: t.entryTs,
@@ -83,12 +89,18 @@ function cloneTradesForSave(trades) {
     }
     return copy;
   });
+  return { trades: out, truncated: truncated };
 }
+
+/** Cap trades stored in config profiles (full report stays in session until reload). */
+var MAX_PROFILE_SAVED_TRADES = 2000;
 
 function cloneReportForSave(report) {
   if (!report) return null;
+  var clonedTrades = cloneTradesForSave(report.trades, MAX_PROFILE_SAVED_TRADES);
   return {
-    trades: cloneTradesForSave(report.trades),
+    trades: clonedTrades.trades,
+    tradesTruncated: clonedTrades.truncated,
     totalGainLoss: report.totalGainLoss,
     totalGainLossPounds: report.totalGainLossPounds,
     tradeCount: report.tradeCount,
@@ -452,15 +464,15 @@ export function initBacktestProfiles(opts) {
         return r.json();
       })
       .then(function (cfg) {
-        var instruments = Object.assign({}, (cfg.ui && cfg.ui.instruments) || {});
-        var inst = Object.assign({}, instruments[epic] || {});
+        var inst = Object.assign({}, (cfg.ui && cfg.ui.instruments && cfg.ui.instruments[epic]) || {});
         if (profileId) inst.activeTradeProfileId = profileId;
         else delete inst.activeTradeProfileId;
-        instruments[epic] = inst;
+        var instrumentsPatch = Object.create(null);
+        instrumentsPatch[epic] = inst;
         return fetch('/api/config', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ui: Object.assign({}, cfg.ui, { instruments: instruments }) })
+          body: JSON.stringify({ ui: { instruments: instrumentsPatch } })
         });
       });
   }
@@ -572,13 +584,22 @@ export function initBacktestProfiles(opts) {
         return r.json();
       })
       .then(function (cfg) {
-        var instruments = Object.assign({}, (cfg.ui && cfg.ui.instruments) || {});
-        instruments[epic] = Object.assign({}, instruments[epic] || {}, { backtestProfiles: profiles });
+        var instrumentsPatch = Object.create(null);
+        instrumentsPatch[epic] = Object.assign({}, (cfg.ui && cfg.ui.instruments && cfg.ui.instruments[epic]) || {}, {
+          backtestProfiles: profiles
+        });
         return fetch('/api/config', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ui: Object.assign({}, cfg.ui, { instruments: instruments }) })
+          body: JSON.stringify({ ui: { instruments: instrumentsPatch } })
         });
+      })
+      .then(function (r) {
+        if (!r.ok) {
+          return r.json().catch(function () { return {}; }).then(function (body) {
+            throw new Error((body && body.error) || ('Could not save profile (HTTP ' + r.status + ')'));
+          });
+        }
       })
       .then(function () {
         profilesByEpic[epic] = profiles.slice();

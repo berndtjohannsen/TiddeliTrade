@@ -247,6 +247,8 @@ const recentlyDeletedOrderIds: Record<string, number> = {};
 let previousWorkingOrderIds = new Set<string>();
 const pendingOrderCloses: Record<string, { closeAt: number; size: number; direction: 'BUY' | 'SELL'; epic: string }> = {};
 let previousPositions: Awaited<ReturnType<typeof getPositions>> = [];
+/** After first position poll post-connect, log opens for newly seen dealIds (missed at deal time). */
+let positionsBaselineEstablished = false;
 const recentlyClosedByUs: Record<string, number> = {};
 const RECENTLY_CLOSED_TTL_MS = 120000;
 /** Prevents duplicate close rows when overlapping polls both see a position disappear before either finishes await (appendTransaction dedupe races on load/save). */
@@ -309,19 +311,7 @@ async function pollAndEmitWorkingOrders(session: IgSession, io: Server): Promise
           emitScheduledCloses(io);
           io.emit('log', 'Order filled: scheduled close added for ' + match.dealId);
           try {
-            const sizeNum = match.size ?? pending.size;
-            const entry = match.level ?? 0;
-            const tx = appendTransactionOpen({
-              timestamp: new Date().toISOString(),
-              epic: match.epic ?? '',
-              instrumentName: match.instrumentName,
-              direction: match.direction,
-              size: sizeNum,
-              entry: typeof entry === 'number' && !isNaN(entry) ? entry : 0,
-              currency: match.currency ?? 'GBP',
-              profile: currentIgProfile(),
-            });
-            io.emit('transaction_added', tx);
+            emitTransactionOpenIfNew(io, match, match.epic, match.currency ?? 'GBP');
           } catch { /* ignore */ }
           await pollAndEmitPositions(session, io, positions);
         }
@@ -345,6 +335,14 @@ async function pollAndEmitPositionsImpl(
     const positions = positionsOverride ?? (await getPositions(session));
     const currentDealIds = new Set(positions.map((p) => p.dealId));
     const now = Date.now();
+    if (positionsBaselineEstablished) {
+      const prevIds = new Set(previousPositions.map((p) => p.dealId));
+      for (const p of positions) {
+        if (!prevIds.has(p.dealId)) emitTransactionOpenIfNew(io, p, p.epic, p.currency ?? 'GBP');
+      }
+    } else {
+      positionsBaselineEstablished = true;
+    }
     for (const prev of previousPositions) {
       const id = prev.dealId;
       if (currentDealIds.has(id)) continue;
@@ -429,6 +427,34 @@ function openTxTimestamp(pos: Pick<PositionLike, 'createdAt'>): string {
     if (!isNaN(t)) return new Date(t).toISOString();
   }
   return new Date().toISOString();
+}
+
+function emitTransactionOpenIfNew(
+  io: Server,
+  pos: PositionLike & { size?: number },
+  epicFallback?: string,
+  currencyFallback?: string
+): void {
+  const dealId = (pos.dealId || '').trim();
+  if (!dealId) return;
+  try {
+    const sizeNum = pos.size ?? 0;
+    const entry = pos.level ?? 0;
+    const tx = appendTransactionOpen({
+      timestamp: openTxTimestamp(pos),
+      dealId,
+      epic: pos.epic ?? epicFallback ?? '',
+      instrumentName: pos.instrumentName,
+      direction: pos.direction,
+      size: sizeNum,
+      entry: typeof entry === 'number' && !isNaN(entry) ? entry : 0,
+      currency: pos.currency ?? currencyFallback ?? 'GBP',
+      profile: currentIgProfile(),
+    });
+    if (tx) io.emit('transaction_added', tx);
+  } catch {
+    /* ignore – transaction log is best-effort */
+  }
 }
 
 function inferExitPrice(pos: PositionLike): number {
@@ -598,6 +624,7 @@ async function recordTransactionFromPosition(
 
     const tx = appendTransaction({
       timestamp: new Date().toISOString(),
+      openedAt: openTxTimestamp(pos),
       type: 'closed',
       dealId: dealIdKey,
       epic: pos.epic ?? '',
@@ -772,6 +799,7 @@ export function registerSocketHandlers(io: Server): void {
     currentSession = null;
     scheduledCloses = [];
     previousPositions = [];
+    positionsBaselineEstablished = false;
     previousWorkingOrderIds = new Set();
     for (const k of Object.keys(pendingOrderCloses)) delete pendingOrderCloses[k];
     if (closeSchedulerTimer) {
@@ -2119,22 +2147,7 @@ export function registerSocketHandlers(io: Server): void {
           } catch { /* ignore */ }
         }
         if (placedPosition) {
-          try {
-            const sizeNum = placedPosition.size ?? parseFloat(size);
-            const entry = placedPosition.level ?? (direction === 'BUY' ? params.offer : params.bid) ?? 0;
-            const tx = appendTransactionOpen({
-              timestamp: openTxTimestamp(placedPosition),
-              dealId: placedPosition.dealId,
-              epic: placedPosition.epic ?? epic,
-              instrumentName: placedPosition.instrumentName,
-              direction: placedPosition.direction,
-              size: sizeNum,
-              entry: typeof entry === 'number' && !isNaN(entry) ? entry : 0,
-              currency: placedPosition.currency ?? currencyCode,
-              profile: currentIgProfile(),
-            });
-            if (tx) io.emit('transaction_added', tx);
-          } catch { /* ignore */ }
+          emitTransactionOpenIfNew(io, placedPosition, epic, currencyCode);
         }
 
         if (dslSettings) {

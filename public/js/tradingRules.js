@@ -571,7 +571,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   var rulesStartModal = document.getElementById('rulesStartModal');
   var rulesStartModalSummary = document.getElementById('rulesStartModalSummary');
   var rulesStartModalOk = document.getElementById('rulesStartModalOk');
-  var rulesStartModalStop = document.getElementById('rulesStartModalStop');
+  var rulesStartModalCancel = document.getElementById('rulesStartModalCancel');
   var commonPanelInputs = [
     confirmCheck,
     pauseOnLossInput,
@@ -582,6 +582,8 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   ];
   /** When repeat-daily is off, schedule applies only on this calendar day (local). */
   var scheduleActiveDate = null;
+  /** Local date (YYYY-MM-DD) when the engine last entered the schedule window — used to auto-stop after end. */
+  var scheduleLastInsideDate = null;
   /** dealId → 'buy' | 'sell' for deals placed by the rules engine (tracked until position closes). */
   var rulesPlacedDealIds = Object.create(null);
   var baseEnabled = false;
@@ -625,8 +627,6 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   var RULES_DEAL_ATTEMPT_COOLDOWN_MS = 8000;
   var lastRulesDealAttemptMs = 0;
   var scheduleTimerId = null;
-  /** True once the engine has been inside the schedule window this start session (avoids auto-stop when armed outside). */
-  var scheduleSessionSeenInside = false;
   var pauseOnLossTimerId = null;
   var pausedUntil = null;
   var draggedRuleWrap = null;
@@ -686,6 +686,40 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     return startTxt + '–' + stopTxt;
   }
 
+  function isScheduleTodayOnly() {
+    return scheduleRepeatCheck && !scheduleRepeatCheck.checked;
+  }
+
+  function isScheduleExpiredDay(nowMs) {
+    if (!isScheduleTodayOnly() || !scheduleActiveDate) return false;
+    return localDateKey(new Date(nowMs)) !== scheduleActiveDate;
+  }
+
+  function markScheduleInsideIfNeeded(nowMs) {
+    if (!hasScheduleLimits() || !isWithinScheduleWindow(nowMs)) return;
+    var today = localDateKey(new Date(nowMs));
+    if (scheduleLastInsideDate !== today) {
+      scheduleLastInsideDate = today;
+      saveRules();
+    }
+  }
+
+  /** Auto-stop after schedule end if we traded inside today's window (or today-only schedule expired). */
+  function shouldAutoStopForScheduleEnd(nowMs) {
+    if (!rulesEngineRunning || !hasScheduleLimits()) return false;
+    if (isWithinScheduleWindow(nowMs)) return false;
+    if (!isPastScheduleStop(nowMs)) return false;
+    if (isScheduleExpiredDay(nowMs)) return true;
+    return scheduleLastInsideDate === localDateKey(new Date(nowMs));
+  }
+
+  function runScheduleEndStopIfNeeded(nowMs) {
+    if (!shouldAutoStopForScheduleEnd(nowMs)) return false;
+    scheduleLastInsideDate = null;
+    stopRulesEngine('Rules engine stopped (schedule end)');
+    return true;
+  }
+
   function getPauseRemainingSec() {
     if (pausedUntil == null || pausedUntil <= Date.now()) return 0;
     return Math.ceil((pausedUntil - Date.now()) / 1000);
@@ -703,7 +737,14 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     if (hasScheduleLimits() && !isWithinScheduleWindow(Date.now())) {
       var now = Date.now();
       var beforeOpen = !isPastScheduleStop(now);
-      return { key: 'armed-schedule', scheduleText: formatScheduleWindowShort(), beforeOpen: beforeOpen };
+      var today = localDateKey(new Date(now));
+      return {
+        key: 'armed-schedule',
+        scheduleText: formatScheduleWindowShort(),
+        beforeOpen: beforeOpen,
+        scheduleExpired: isScheduleExpiredDay(now),
+        doneForToday: !beforeOpen && scheduleLastInsideDate === today
+      };
     }
     if (rulesRunningWithoutProbes()) return { key: 'armed-probes' };
     return { key: 'active' };
@@ -714,10 +755,16 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       return 'Paused after loss — resuming in ' + ui.pauseSec + 's · Manual trading off';
     }
     if (ui.key === 'armed-schedule') {
-      if (ui.beforeOpen) {
-        return 'Armed — waiting for schedule window (' + ui.scheduleText + ') · Manual trading off';
+      if (ui.scheduleExpired) {
+        return 'Schedule expired (today only) — stop rules or update schedule · Manual trading off';
       }
-      return 'Armed — outside schedule window (' + ui.scheduleText + ') · Manual trading off';
+      if (ui.beforeOpen) {
+        return 'Armed — waiting for schedule (' + ui.scheduleText + ') · Manual trading off';
+      }
+      if (ui.doneForToday) {
+        return 'Schedule ended for today (' + ui.scheduleText + ') · no new deals · Manual trading off';
+      }
+      return 'Armed — next window ' + ui.scheduleText + ' · Manual trading off';
     }
     if (ui.key === 'armed-probes') {
       return 'Armed — no live price stream · Start probing · Manual trading off';
@@ -731,9 +778,10 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   function formatHeaderRulesStatus(ui) {
     if (ui.key === 'paused') return 'Rules: Paused (' + ui.pauseSec + 's)';
     if (ui.key === 'armed-schedule') {
-      return ui.beforeOpen
-        ? 'Rules: Armed (opens ' + ui.scheduleText + ')'
-        : 'Rules: Armed (outside ' + ui.scheduleText + ')';
+      if (ui.scheduleExpired) return 'Rules: Schedule expired (today only)';
+      if (ui.beforeOpen) return 'Rules: Armed (opens ' + ui.scheduleText + ')';
+      if (ui.doneForToday) return 'Rules: Done for today (' + ui.scheduleText + ')';
+      return 'Rules: Armed (next ' + ui.scheduleText + ')';
     }
     if (ui.key === 'armed-probes') return 'Rules: Armed (no live prices)';
     if (ui.key === 'active') return 'Rules: Active';
@@ -745,22 +793,27 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     var sessionActive = ui.key !== 'stopped';
     if (tradeViewRoot) {
       tradeViewRoot.classList.toggle('trade-rules-session', sessionActive);
-      tradeViewRoot.classList.remove('trade-rules-mode-active', 'trade-rules-mode-paused');
+      tradeViewRoot.classList.remove('trade-rules-mode-active', 'trade-rules-mode-paused', 'trade-rules-mode-schedule');
       if (ui.key === 'active') tradeViewRoot.classList.add('trade-rules-mode-active');
       if (ui.key === 'paused') tradeViewRoot.classList.add('trade-rules-mode-paused');
+      if (ui.key === 'armed-schedule') tradeViewRoot.classList.add('trade-rules-mode-schedule');
     }
     if (tradeManualSection) tradeManualSection.classList.toggle('trade-manual-locked', sessionActive);
     setProbesSettingsLockedFn(sessionActive);
     if (sessionBanner) {
       sessionBanner.classList.toggle('hidden', !sessionActive);
-      sessionBanner.classList.remove('trade-rules-banner-active', 'trade-rules-banner-paused');
+      sessionBanner.classList.remove('trade-rules-banner-active', 'trade-rules-banner-paused', 'trade-rules-banner-schedule');
       if (ui.key === 'active') sessionBanner.classList.add('trade-rules-banner-active');
       if (ui.key === 'paused') sessionBanner.classList.add('trade-rules-banner-paused');
+      if (ui.key === 'armed-schedule') sessionBanner.classList.add('trade-rules-banner-schedule');
     }
     if (sessionBannerLabel) {
       var label = 'Rules';
       if (ui.key === 'paused') label = 'Paused';
       else if (ui.key === 'active') label = 'Active';
+      else if (ui.key === 'armed-schedule' && ui.scheduleExpired) label = 'Expired';
+      else if (ui.key === 'armed-schedule' && ui.doneForToday) label = 'Done';
+      else if (ui.key === 'armed-schedule' && ui.beforeOpen) label = 'Waiting';
       else if (sessionActive) label = 'Armed';
       sessionBannerLabel.textContent = label;
     }
@@ -789,7 +842,17 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     if (hasScheduleLimits()) {
       var repeatTxt = scheduleRepeatCheck && scheduleRepeatCheck.checked ? 'daily' : 'today only';
       lines.push('Schedule: ' + formatScheduleWindowShort() + ' (' + repeatTxt + ')');
-      lines.push(isWithinScheduleWindow(Date.now()) ? 'Within schedule now' : 'Outside schedule now — no new deals until window opens');
+      if (isScheduleExpiredDay(Date.now())) {
+        lines.push('Schedule expired (today only) — update or stop rules');
+      } else if (isWithinScheduleWindow(Date.now())) {
+        lines.push('Within schedule now');
+      } else if (!isPastScheduleStop(Date.now())) {
+        lines.push('Before schedule start — no new deals until window opens');
+      } else if (scheduleLastInsideDate === localDateKey(new Date())) {
+        lines.push('Schedule ended for today — no new deals (engine will auto-stop)');
+      } else {
+        lines.push('Outside schedule — armed for next window, no new deals yet');
+      }
     } else {
       lines.push('Schedule: no time limit');
     }
@@ -817,8 +880,8 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     var startMin = parseScheduleTimeInput(scheduleStartInput);
     var stopMin = parseScheduleTimeInput(scheduleStopInput);
     if (startMin == null && stopMin == null) return true;
-    if (!scheduleRepeatCheck || !scheduleRepeatCheck.checked) {
-      if (scheduleActiveDate && localDateKey(new Date(nowMs)) !== scheduleActiveDate) return true;
+    if (isScheduleTodayOnly()) {
+      if (scheduleActiveDate && localDateKey(new Date(nowMs)) !== scheduleActiveDate) return false;
     }
     var d = new Date(nowMs);
     var nowMin = d.getHours() * 60 + d.getMinutes();
@@ -837,14 +900,23 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       scheduleStatusEl.title = 'Start and stop times blank — engine may run any time when started';
       return;
     }
-    var active = isWithinScheduleWindow(Date.now());
+    var now = Date.now();
+    if (isScheduleExpiredDay(now)) {
+      scheduleStatusEl.textContent = 'Expired (today only · saved ' + (scheduleActiveDate || '—') + ')';
+      scheduleStatusEl.title = 'Schedule was for a past day — stop rules or save new times';
+      return;
+    }
+    var active = isWithinScheduleWindow(now);
     var startTxt = scheduleStartInput && scheduleStartInput.value ? scheduleStartInput.value : '—';
     var stopTxt = scheduleStopInput && scheduleStopInput.value ? scheduleStopInput.value : '—';
     var repeatTxt = scheduleRepeatCheck && scheduleRepeatCheck.checked ? 'daily' : 'today only';
-    scheduleStatusEl.textContent = active ? 'Active now (' + repeatTxt + ')' : 'Outside window (' + startTxt + '–' + stopTxt + ')';
+    var beforeOpen = hasScheduleLimits() && !active && !isPastScheduleStop(now);
+    scheduleStatusEl.textContent = active
+      ? 'Active now (' + repeatTxt + ')'
+      : (beforeOpen ? 'Opens at ' + startTxt + ' (' + repeatTxt + ')' : 'Outside window (' + startTxt + '–' + stopTxt + ')');
     scheduleStatusEl.title = active
       ? 'Within schedule — new deals allowed'
-      : 'Outside schedule — no new deals until window opens';
+      : (beforeOpen ? 'Before schedule start — no new deals yet' : 'Outside schedule — no new deals until next window');
   }
 
   /** True when local time is at or after the schedule stop (not merely before start). */
@@ -852,8 +924,8 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     var startMin = parseScheduleTimeInput(scheduleStartInput);
     var stopMin = parseScheduleTimeInput(scheduleStopInput);
     if (stopMin == null) return false;
-    if (!scheduleRepeatCheck || !scheduleRepeatCheck.checked) {
-      if (scheduleActiveDate && localDateKey(new Date(nowMs)) !== scheduleActiveDate) return false;
+    if (isScheduleTodayOnly()) {
+      if (scheduleActiveDate && localDateKey(new Date(nowMs)) !== scheduleActiveDate) return true;
     }
     var nowMin = new Date(nowMs).getHours() * 60 + new Date(nowMs).getMinutes();
     if (startMin != null && stopMin != null && startMin <= stopMin && nowMin < startMin) return false;
@@ -862,26 +934,8 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
 
   function checkScheduleStop() {
     if (!rulesEngineRunning) return;
-    if (!hasScheduleLimits()) return;
-    var now = Date.now();
-    if (isWithinScheduleWindow(now)) {
-      scheduleSessionSeenInside = true;
-      return;
-    }
-    // Started outside the window (before open or between sessions) — stay armed; do not auto-stop.
-    if (!scheduleSessionSeenInside) return;
-    if (!isPastScheduleStop(now)) return;
-    scheduleSessionSeenInside = false;
-    rulesEngineRunning = false;
-    if (scheduleTimerId) {
-      clearInterval(scheduleTimerId);
-      scheduleTimerId = null;
-    }
-    updateToggleButton();
-    saveRules();
-    updateDealEnabled();
-    var logFn = typeof log === 'function' ? log : function () {};
-    logFn('Rules engine stopped (schedule end)');
+    markScheduleInsideIfNeeded(Date.now());
+    runScheduleEndStopIfNeeded(Date.now());
   }
 
   function startScheduleTimer() {
@@ -1276,7 +1330,12 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     }
     var engineWord = ui.key === 'active' ? 'Active' : 'Armed';
     var line = 'Rules trading: ' + engineWord + ' • BUY: ' + dirStatus(getRulesBuyEnabled()) + ' • SELL: ' + dirStatus(getRulesSellEnabled());
-    if (ui.key === 'armed-schedule') line += ' • outside window (' + ui.scheduleText + ')';
+    if (ui.key === 'armed-schedule') {
+      if (ui.scheduleExpired) line += ' • schedule expired (today only)';
+      else if (ui.beforeOpen) line += ' • opens ' + ui.scheduleText;
+      else if (ui.doneForToday) line += ' • done for today (' + ui.scheduleText + ')';
+      else line += ' • next window ' + ui.scheduleText;
+    }
     if (ui.key === 'armed-probes') line += ' • No live prices — start probing';
     if (rulesEngineRunning && sleepPreventionStatus) line += ' • ' + sleepPreventionStatus;
     return line;
@@ -1372,7 +1431,12 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       else if (needsPrices && (state.currentBid == null || state.currentOffer == null)) status = 'Waiting for prices';
       else if (needsNowTrend && state.currentTrend == null) status = 'Waiting for price updates (now.trend)';
       else if (pass && hasPositionOrOrder()) status = 'Conditions met – position/order exists, no new deal';
-      else if (pass && scheduleBlocked) status = 'Conditions met – outside schedule window, no new deal';
+      else if (pass && scheduleBlocked) {
+        if (isScheduleExpiredDay(Date.now())) status = 'Conditions met – schedule expired (today only), no new deal';
+        else if (!isPastScheduleStop(Date.now())) status = 'Conditions met – before schedule window, no new deal';
+        else if (scheduleLastInsideDate === localDateKey(new Date())) status = 'Conditions met – schedule ended for today, no new deal';
+        else status = 'Conditions met – outside schedule window, no new deal';
+      }
       else if (pass && !blocked) {
         var willFireThisTick = !prevRulesPass || prevBlocked;
         status =
@@ -1815,6 +1879,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
         tradingRulesScheduleStopTime: config.scheduleStopTime || '',
         tradingRulesScheduleRepeatDaily: config.scheduleRepeatDaily !== false,
         tradingRulesScheduleActiveDate: scheduleActiveDate,
+        tradingRulesScheduleLastInsideDate: scheduleLastInsideDate,
         ...rulesBuyDynamicTpConfigPayload(),
         ...rulesSellDynamicTpConfigPayload()
       };
@@ -1856,6 +1921,9 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       var schedStop = inst.tradingRulesScheduleStopTime != null ? inst.tradingRulesScheduleStopTime : (ui.tradingRulesScheduleStopTime || '');
       var schedRepeat = inst.tradingRulesScheduleRepeatDaily != null ? inst.tradingRulesScheduleRepeatDaily !== false : (ui.tradingRulesScheduleRepeatDaily !== false);
       scheduleActiveDate = inst.tradingRulesScheduleActiveDate != null ? inst.tradingRulesScheduleActiveDate : (ui.tradingRulesScheduleActiveDate || null);
+      scheduleLastInsideDate = inst.tradingRulesScheduleLastInsideDate != null
+        ? inst.tradingRulesScheduleLastInsideDate
+        : (ui.tradingRulesScheduleLastInsideDate || null);
       var ruleSets = inst.ruleSets || ui.ruleSets;
       var prevRunning = inst.tradingRulesRunning != null ? inst.tradingRulesRunning : ui.tradingRulesRunning;
       rulesEngineRunning = inst.tradingRulesRunning != null ? !!inst.tradingRulesRunning
@@ -1934,10 +2002,9 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       applyDynamicTpUiState();
       updateToggleButton();
       if (rulesEngineRunning) {
-        scheduleSessionSeenInside = isWithinScheduleWindow(Date.now());
-        startScheduleTimer();
+        markScheduleInsideIfNeeded(Date.now());
+        if (!runScheduleEndStopIfNeeded(Date.now())) startScheduleTimer();
       } else {
-        scheduleSessionSeenInside = false;
         clearScheduleTimer();
       }
       updateEngineState();
@@ -2022,7 +2089,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     var options = opts || {};
     clearPauseOnLossState();
     rulesEngineRunning = true;
-    scheduleSessionSeenInside = isWithinScheduleWindow(Date.now());
+    markScheduleInsideIfNeeded(Date.now());
     if (!isProbingActive() && !options.withProbing && log) log('Rules started without active price stream');
     startScheduleTimer();
     updateToggleButton();
@@ -2037,7 +2104,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     }
     clearPauseOnLossState();
     rulesEngineRunning = false;
-    scheduleSessionSeenInside = false;
+    scheduleLastInsideDate = null;
     clearScheduleTimer();
     hideRulesStartModal();
     if (state) state.rulesEngineRunning = false;
@@ -2073,10 +2140,10 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   if (toggleBtn) toggleBtn.addEventListener('click', doToggleEngine);
   if (sessionBannerStop) sessionBannerStop.addEventListener('click', stopRulesEngine);
   if (rulesStartModalOk) rulesStartModalOk.addEventListener('click', hideRulesStartModal);
-  if (rulesStartModalStop) {
-    rulesStartModalStop.addEventListener('click', function () {
+  if (rulesStartModalCancel) {
+    rulesStartModalCancel.addEventListener('click', function () {
       hideRulesStartModal();
-      stopRulesEngine();
+      stopRulesEngine('Rules engine stopped (cancelled at start)');
     });
   }
   if (rulesStartModal) {
@@ -2208,9 +2275,40 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     }
   });
 
-  socket.on('disconnect', function () {
-    stopRulesEngine();
+  function resumeRulesAfterReconnect() {
+    if (!rulesEngineRunning && !isPausedOnLoss()) return;
+    markScheduleInsideIfNeeded(Date.now());
+    if (runScheduleEndStopIfNeeded(Date.now())) return;
+    startScheduleTimer();
+    updateToggleButton();
+    if (state) state.rulesEngineRunning = rulesEngineRunning;
+    if (socket && typeof socket.emit === 'function') socket.emit('rules_engine_running', rulesEngineRunning);
+    updateEngineState();
+    updateDealEnabled();
+    updateRulesSessionUi();
+  }
+
+  socket.on('disconnect', function (reason) {
     for (var rid in rulesPlacedDealIds) delete rulesPlacedDealIds[rid];
+    // Only stop on explicit client disconnect(); transient drops (ping timeout, transport close, server restart) keep rules armed.
+    if (reason === 'io client disconnect') {
+      stopRulesEngine('Rules engine stopped (disconnected)');
+      return;
+    }
+    if (rulesEngineRunning || isPausedOnLoss()) {
+      clearScheduleTimer();
+      var logFn = typeof log === 'function' ? log : function () {};
+      logFn('Connection lost (' + (reason || 'unknown') + ') — rules stay armed; resume when reconnected');
+      updateEngineState();
+      updateRulesSessionUi();
+    }
+  });
+
+  socket.on('connect', function () {
+    if (!rulesEngineRunning && !isPausedOnLoss()) return;
+    resumeRulesAfterReconnect();
+    var logFn = typeof log === 'function' ? log : function () {};
+    if (rulesEngineRunning) logFn('Reconnected — rules trading resumed');
   });
 
   socket.on('transaction_added', function (tx) {
