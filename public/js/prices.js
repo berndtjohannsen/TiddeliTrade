@@ -8,7 +8,6 @@ export function initPrices(socket, state, log) {
   var nowTime = document.getElementById('nowTime');
   var nowMarketState = document.getElementById('nowMarketState');
   var nowDelay = document.getElementById('nowDelay');
-  var priceUpdateCount = 0;
 
   socket.on('price_update', function (data) {
     if (!data) {
@@ -19,7 +18,6 @@ export function initPrices(socket, state, log) {
       if (nowTime) nowTime.textContent = '—';
       if (nowMarketState) nowMarketState.textContent = '—';
       if (nowDelay) nowDelay.textContent = '—';
-      priceUpdateCount = 0;
       state.currentBid = null;
       state.currentOffer = null;
       state.currentSpread = null;
@@ -28,12 +26,6 @@ export function initPrices(socket, state, log) {
       state._prevBid = null;
       state._prevOffer = null;
       return;
-    }
-    priceUpdateCount++;
-    if (priceUpdateCount === 1) {
-      log('First price update: bid=' + data.bid + ' offer=' + data.offer);
-    } else if (priceUpdateCount % 500 === 0) {
-      log('Price update #' + priceUpdateCount);
     }
     if (nowBuy) nowBuy.textContent = data.offer || '—';
     if (nowSell) nowSell.textContent = data.bid || '—';

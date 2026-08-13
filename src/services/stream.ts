@@ -58,6 +58,14 @@ function formatPriceTimestamp(raw: string): string {
   }
 }
 
+/** Routine Lightstreamer states — omit from log to avoid noise. */
+const QUIET_LS_STATUSES = new Set([
+  'CONNECTING',
+  'CONNECTED',
+  'CONNECTED:WS-STREAMING',
+  'STABLE',
+]);
+
 /** Map PRICE DLG_FLAG to legacy MARKET_STATE-style labels for the Now panel. */
 function dlgFlagToMarketStateLabel(raw: string): string {
   const v = (raw || '').trim();
@@ -94,11 +102,10 @@ function applyPriceFields(
 function createPriceSubscription(
   item: string,
   fields: readonly string[],
-  onItemUpdate: (update: { getValue: (name: string) => string }, updateCount: number) => void
+  onItemUpdate: (update: { getValue: (name: string) => string }) => void
 ): InstanceType<typeof Subscription> {
   const sub = new Subscription('MERGE', [item], [...fields]);
   sub.setDataAdapter(PRICE_ADAPTER);
-  let updateCount = 0;
   sub.addListener({
     onSubscription: () => {
       log('Subscription active: ' + item + ' (adapter ' + PRICE_ADAPTER + ')');
@@ -107,8 +114,7 @@ function createPriceSubscription(
       log('Subscription error ' + code + ': ' + message);
     },
     onItemUpdate: (update: { getValue: (name: string) => string }) => {
-      updateCount++;
-      onItemUpdate(update, updateCount);
+      onItemUpdate(update);
     },
   });
   return sub;
@@ -138,7 +144,9 @@ export function startStream(session: IgSession, epic: string, callback: PriceUpd
 
   lsClient.addListener({
     onStatusChange: (status: string) => {
-      log('Lightstreamer status: ' + status);
+      if (!QUIET_LS_STATUSES.has(status)) {
+        log('Lightstreamer status: ' + status);
+      }
     },
     onServerError: (errorCode: number, errorMessage: string) => {
       log('Lightstreamer error ' + errorCode + ': ' + errorMessage);
@@ -156,11 +164,8 @@ export function startStream(session: IgSession, epic: string, callback: PriceUpd
     lastMarketState: '',
     lastMarketDelay: '',
   };
-  lsSubscription = createPriceSubscription(item, PRICE_FIELDS, (update, count) => {
+  lsSubscription = createPriceSubscription(item, PRICE_FIELDS, (update) => {
     applyPriceFields(update, acc);
-    if (count === 1) {
-      log('First price from server: bid=' + acc.lastBid + ' offer=' + acc.lastOffer);
-    }
     const bidNum = parseFloat(acc.lastBid);
     const offerNum = parseFloat(acc.lastOffer);
     const spread = isNaN(bidNum) || isNaN(offerNum) ? '' : (offerNum - bidNum).toFixed(5);
@@ -178,7 +183,6 @@ export function startStream(session: IgSession, epic: string, callback: PriceUpd
   });
 
   lsClient.subscribe(lsSubscription);
-  log('Subscription requested for ' + item);
 }
 
 /**
@@ -205,11 +209,8 @@ export function switchEpic(epic: string): void {
     lastMarketState: '',
     lastMarketDelay: '',
   };
-  lsSubscription = createPriceSubscription(item, PRICE_FIELDS, (update, count) => {
+  lsSubscription = createPriceSubscription(item, PRICE_FIELDS, (update) => {
     applyPriceFields(update, acc);
-    if (count === 1) {
-      log('First price from server: bid=' + acc.lastBid + ' offer=' + acc.lastOffer);
-    }
     const bidNum = parseFloat(acc.lastBid);
     const offerNum = parseFloat(acc.lastOffer);
     const spread = isNaN(bidNum) || isNaN(offerNum) ? '' : (offerNum - bidNum).toFixed(5);
@@ -227,7 +228,6 @@ export function switchEpic(epic: string): void {
   });
 
   lsClient.subscribe(lsSubscription);
-  log('Subscription requested for ' + item);
 }
 
 /**

@@ -424,10 +424,18 @@ export function captureEngineControlsSnapshot() {
   return readEngineControlsFromDom();
 }
 
+function parseMaxParallelDealsInput(input) {
+  if (!input || !input.value.trim()) return 1;
+  var n = parseInt(input.value, 10);
+  if (isNaN(n) || n < 1) return 1;
+  return Math.min(n, 10);
+}
+
 /** Write engine controls snapshot onto Trade tab DOM. */
 export function applyEngineControlsSnapshot(controls) {
   if (!controls) return;
   var pauseOnLossInput = document.getElementById('tradingRulesPauseOnLoss');
+  var maxParallelDealsInput = document.getElementById('tradingRulesMaxParallelDeals');
   var stopAfterLossCheck = document.getElementById('tradingRulesStopAfterLoss');
   var scheduleStart = document.getElementById('tradingRulesScheduleStart');
   var scheduleStop = document.getElementById('tradingRulesScheduleStop');
@@ -436,6 +444,10 @@ export function applyEngineControlsSnapshot(controls) {
     ? controls.pauseOnLossSecondsBuy
     : (controls.pauseOnLossSecondsSell != null ? controls.pauseOnLossSecondsSell : 0);
   if (pauseOnLossInput) pauseOnLossInput.value = pauseSec > 0 ? String(pauseSec) : '';
+  if (maxParallelDealsInput) {
+    var mp = controls.maxParallelDeals != null ? controls.maxParallelDeals : 1;
+    maxParallelDealsInput.value = String(Math.max(1, Math.min(10, mp)));
+  }
   if (stopAfterLossCheck) {
     stopAfterLossCheck.checked = !!(controls.stopAfterLossBuy || controls.stopAfterLossSell);
   }
@@ -446,6 +458,7 @@ export function applyEngineControlsSnapshot(controls) {
 
 function readEngineControlsFromDom() {
   var pauseOnLossInput = document.getElementById('tradingRulesPauseOnLoss');
+  var maxParallelDealsInput = document.getElementById('tradingRulesMaxParallelDeals');
   var stopAfterLossCheck = document.getElementById('tradingRulesStopAfterLoss');
   var scheduleStart = document.getElementById('tradingRulesScheduleStart');
   var scheduleStop = document.getElementById('tradingRulesScheduleStop');
@@ -462,6 +475,7 @@ function readEngineControlsFromDom() {
     stopAfterLossSell: stopAfter,
     pauseOnLossSecondsBuy: pauseSec,
     pauseOnLossSecondsSell: pauseSec,
+    maxParallelDeals: parseMaxParallelDealsInput(maxParallelDealsInput),
     scheduleStartTime: scheduleStart && scheduleStart.value ? scheduleStart.value : '',
     scheduleStopTime: scheduleStop && scheduleStop.value ? scheduleStop.value : '',
     scheduleRepeatDaily: scheduleRepeat ? scheduleRepeat.checked !== false : true,
@@ -555,6 +569,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   var dealEngineMsg = document.getElementById('dealEngineActiveMsg');
   var orderEngineMsg = document.getElementById('orderEngineActiveMsg');
   var pauseOnLossInput = document.getElementById('tradingRulesPauseOnLoss');
+  var maxParallelDealsInput = document.getElementById('tradingRulesMaxParallelDeals');
   var stopAfterLossCheck = document.getElementById('tradingRulesStopAfterLoss');
   var scheduleStartInput = document.getElementById('tradingRulesScheduleStart');
   var scheduleStopInput = document.getElementById('tradingRulesScheduleStop');
@@ -574,6 +589,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   var rulesStartModalCancel = document.getElementById('rulesStartModalCancel');
   var commonPanelInputs = [
     confirmCheck,
+    maxParallelDealsInput,
     pauseOnLossInput,
     stopAfterLossCheck,
     scheduleStartInput,
@@ -623,9 +639,28 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   var sleepPreventionStatus = null;
   var prevRulesPass = false;
   var prevBlocked = false;
-  /** Suppress rapid re-fires when pass/blocked flicker (e.g. positions poll) without a stable pass→fail cycle. */
+  /** Suppress rapid re-fires when pass/blocked flicker (e.g. positions poll). */
   var RULES_DEAL_ATTEMPT_COOLDOWN_MS = 8000;
+  /** Abandon rulesDealPending if confirm/submit hangs this long. */
+  var RULES_DEAL_PENDING_TIMEOUT_MS = 120000;
   var lastRulesDealAttemptMs = 0;
+
+  function getMaxParallelDeals() {
+    return parseMaxParallelDealsInput(maxParallelDealsInput);
+  }
+
+  function armRulesDealPending() {
+    if (!state) return false;
+    state.rulesDealPending = true;
+    state.rulesDealPendingSinceMs = Date.now();
+    return true;
+  }
+
+  function clearRulesDealPending() {
+    if (!state) return;
+    state.rulesDealPending = false;
+    state.rulesDealPendingSinceMs = null;
+  }
   var scheduleTimerId = null;
   var pauseOnLossTimerId = null;
   var pausedUntil = null;
@@ -856,6 +891,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     } else {
       lines.push('Schedule: no time limit');
     }
+    lines.push('Max parallel deals: ' + getMaxParallelDeals());
     lines.push('Manual deal/order: disabled');
     return lines.join('\n');
   }
@@ -1052,6 +1088,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       ruleSets: getRuleSetsFromDom(),
       runRuleSets: runSets,
       pauseOnLossSeconds: getPauseOnLossSeconds(),
+      maxParallelDeals: getMaxParallelDeals(),
       scheduleStartTime: scheduleStartInput && scheduleStartInput.value ? scheduleStartInput.value : '',
       scheduleStopTime: scheduleStopInput && scheduleStopInput.value ? scheduleStopInput.value : '',
       scheduleRepeatDaily: scheduleRepeatCheck ? scheduleRepeatCheck.checked !== false : true
@@ -1092,8 +1129,23 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   /** Max wait for positions list after IG accepts a rules deal — prevents duplicate place before poll catches up. */
   var RULES_PENDING_POSITION_SYNC_MS = 20000;
 
+  function countOpenDealSlots() {
+    var positions = state.currentPositions || [];
+    var orders = state.currentWorkingOrders || [];
+    return positions.length + orders.length;
+  }
+
   function hasPositionOrOrder() {
+    if (state.rulesDealPending) {
+      var pendingSince = state.rulesDealPendingSinceMs;
+      if (pendingSince != null && Date.now() - pendingSince > RULES_DEAL_PENDING_TIMEOUT_MS) {
+        clearRulesDealPending();
+      } else {
+        return true;
+      }
+    }
     if (state.dealInProgress) return true;
+    if (countOpenDealSlots() >= getMaxParallelDeals()) return true;
     var pe = state.pendingRulesPositionEpic;
     if (pe) {
       var since = state.pendingRulesPositionSinceMs;
@@ -1111,9 +1163,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
         }
       }
     }
-    var positions = state.currentPositions || [];
-    var orders = state.currentWorkingOrders || [];
-    return positions.length > 0 || orders.length > 0;
+    return false;
   }
 
   function getContext() {
@@ -1430,7 +1480,15 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       else if (needsProbes && !getProbeValuesFn()) status = 'Waiting for probe data';
       else if (needsPrices && (state.currentBid == null || state.currentOffer == null)) status = 'Waiting for prices';
       else if (needsNowTrend && state.currentTrend == null) status = 'Waiting for price updates (now.trend)';
-      else if (pass && hasPositionOrOrder()) status = 'Conditions met – position/order exists, no new deal';
+      else if (pass && hasPositionOrOrder()) {
+        var maxPar = getMaxParallelDeals();
+        var openSlots = countOpenDealSlots();
+        if (openSlots >= maxPar && !state.dealInProgress && !state.rulesDealPending) {
+          status = 'Conditions met – max parallel deals (' + maxPar + ') reached, no new deal';
+        } else {
+          status = 'Conditions met – position/order exists, no new deal';
+        }
+      }
       else if (pass && scheduleBlocked) {
         if (isScheduleExpiredDay(Date.now())) status = 'Conditions met – schedule expired (today only), no new deal';
         else if (!isPastScheduleStop(Date.now())) status = 'Conditions met – before schedule window, no new deal';
@@ -1458,14 +1516,16 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
         /* skip: avoid duplicate logs / duplicate IG attempts when blocked or pass flickers */
       } else {
         lastRulesDealAttemptMs = nowMs;
+        armRulesDealPending();
+        var placed = false;
         if (confirm) {
-          triggerDealConfirmFn({ direction: triggeredSet === 'buy' ? 'BUY' : 'SELL', ruleSet: set, fromRules: true });
+          placed = !!triggerDealConfirmFn({ direction: triggeredSet === 'buy' ? 'BUY' : 'SELL', ruleSet: set, fromRules: true });
         } else {
-          placeDealDirectFn({ direction: triggeredSet === 'buy' ? 'BUY' : 'SELL', ruleSet: set, fromRules: true });
+          placed = !!placeDealDirectFn({ direction: triggeredSet === 'buy' ? 'BUY' : 'SELL', ruleSet: set, fromRules: true });
         }
+        if (!placed) clearRulesDealPending();
       }
     }
-    if (prevRulesPass && !pass) lastRulesDealAttemptMs = 0;
     prevRulesPass = pass;
     prevBlocked = blocked;
     updateRuleStatusIndicators();
@@ -1872,6 +1932,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
         tradingRulesPauseOnLossSeconds: getPauseOnLossSeconds(),
         tradingRulesPauseOnLossSecondsBuy: getPauseOnLossSeconds(),
         tradingRulesPauseOnLossSecondsSell: getPauseOnLossSeconds(),
+        tradingRulesMaxParallelDeals: getMaxParallelDeals(),
         tradingRulesStopAfterLoss: !!(stopAfterLossCheck && stopAfterLossCheck.checked),
         tradingRulesStopAfterLossBuy: !!(stopAfterLossCheck && stopAfterLossCheck.checked),
         tradingRulesStopAfterLossSell: !!(stopAfterLossCheck && stopAfterLossCheck.checked),
@@ -1917,6 +1978,9 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
         || inst.tradingRulesStopAfterLossSell === true
         || ui.tradingRulesStopAfterLossBuy === true
         || ui.tradingRulesStopAfterLossSell === true;
+      var maxParallel = inst.tradingRulesMaxParallelDeals != null
+        ? inst.tradingRulesMaxParallelDeals
+        : (ui.tradingRulesMaxParallelDeals != null ? ui.tradingRulesMaxParallelDeals : 1);
       var schedStart = inst.tradingRulesScheduleStartTime != null ? inst.tradingRulesScheduleStartTime : (ui.tradingRulesScheduleStartTime || '');
       var schedStop = inst.tradingRulesScheduleStopTime != null ? inst.tradingRulesScheduleStopTime : (ui.tradingRulesScheduleStopTime || '');
       var schedRepeat = inst.tradingRulesScheduleRepeatDaily != null ? inst.tradingRulesScheduleRepeatDaily !== false : (ui.tradingRulesScheduleRepeatDaily !== false);
@@ -1953,6 +2017,10 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       if (confirmCheck) confirmCheck.checked = confirmUnified;
       if (pauseOnLossInput) {
         pauseOnLossInput.value = (pauseSec != null && !isNaN(pauseSec) && pauseSec >= 0) ? Math.min(pauseSec, 86400) : 0;
+      }
+      if (maxParallelDealsInput) {
+        var mp = maxParallel != null && !isNaN(Number(maxParallel)) ? Number(maxParallel) : 1;
+        maxParallelDealsInput.value = String(Math.max(1, Math.min(10, Math.floor(mp))));
       }
       if (stopAfterLossCheck) stopAfterLossCheck.checked = stopAfterLoss;
       if (scheduleStartInput) scheduleStartInput.value = schedStart || '';
@@ -2103,6 +2171,8 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       if (!reason) return;
     }
     clearPauseOnLossState();
+    clearRulesDealPending();
+    lastRulesDealAttemptMs = 0;
     rulesEngineRunning = false;
     scheduleLastInsideDate = null;
     clearScheduleTimer();
@@ -2177,6 +2247,12 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   if (buyEnabledCheck) buyEnabledCheck.addEventListener('change', function () { saveRules(); updateEngineState(); });
   if (sellEnabledCheck) sellEnabledCheck.addEventListener('change', function () { saveRules(); updateEngineState(); });
   if (confirmCheck) confirmCheck.addEventListener('change', saveRules);
+  if (maxParallelDealsInput) {
+    maxParallelDealsInput.addEventListener('change', function () {
+      saveRules();
+      updateEngineState();
+    });
+  }
   if (pauseOnLossInput) pauseOnLossInput.addEventListener('change', saveRules);
   if (stopAfterLossCheck) stopAfterLossCheck.addEventListener('change', saveRules);
   function onScheduleFieldChange() {

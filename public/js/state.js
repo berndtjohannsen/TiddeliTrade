@@ -52,5 +52,8 @@ export const state = {
    * for this epic until the positions list catches up (avoids double-submit). Cleared when epic appears or timeout.
    */
   pendingRulesPositionEpic: null,
-  pendingRulesPositionSinceMs: null
+  pendingRulesPositionSinceMs: null,
+  /** Rules engine armed a deal (confirm open or submit in flight) — blocks another rules fire. */
+  rulesDealPending: false,
+  rulesDealPendingSinceMs: null
 };

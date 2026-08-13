@@ -480,8 +480,13 @@ export function initDeal(socket, state, log) {
   });
 
   function hideDealConfirmModal() {
+    var wasRulesConfirm = pendingDealOpenFromRules;
     pendingDealParams = null;
     pendingDealOpenFromRules = false;
+    if (wasRulesConfirm) {
+      state.rulesDealPending = false;
+      state.rulesDealPendingSinceMs = null;
+    }
     if (dealConfirmModal) {
       dealConfirmModal.classList.add('hidden');
       dealConfirmModal.setAttribute('aria-hidden', 'true');
@@ -683,6 +688,8 @@ export function initDeal(socket, state, log) {
   socket.on('deal_placed', function (data) {
     dealInProgress = false;
     state.dealInProgress = false;
+    state.rulesDealPending = false;
+    state.rulesDealPendingSinceMs = null;
     clearDealMessage();
     var src = state.pendingDealPlacementSource;
     state.pendingDealPlacementSource = null;
@@ -706,6 +713,8 @@ export function initDeal(socket, state, log) {
   socket.on('deal_error', function (msg) {
     dealInProgress = false;
     state.dealInProgress = false;
+    state.rulesDealPending = false;
+    state.rulesDealPendingSinceMs = null;
     lastDealFromRulesEngine = false;
     state.pendingDealPlacementSource = null;
     if (!(msg && String(msg).toLowerCase().indexOf('already have') >= 0)) {
@@ -726,6 +735,8 @@ export function initDeal(socket, state, log) {
   socket.on('disconnect', function () {
     dealInProgress = false;
     state.dealInProgress = false;
+    state.rulesDealPending = false;
+    state.rulesDealPendingSinceMs = null;
     lastDealFromRulesEngine = false;
     state.pendingDealPlacementSource = null;
     state.dealJustPlaced = null;

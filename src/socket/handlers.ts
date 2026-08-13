@@ -20,6 +20,7 @@ import {
   getIndicativeCostsOpen,
   getHistoricalPrices,
   getDayStartPrice,
+  getDayStartPricesInRange,
   getClientSentiment,
   type MarketDetails,
 } from '../services/ig';
@@ -117,6 +118,33 @@ function buildAnalyseProgressPayload(opts: {
     losingTrades,
     tradeCount,
   };
+}
+
+/** Fetch IG daily opens for backtest days (Europe/London keys). Returns {} when not logged in or on failure. */
+async function loadDayStartsForBacktest(
+  session: IgSession | null,
+  epic: string,
+  days: string[],
+  logFn: (msg: string) => void
+): Promise<Record<string, number>> {
+  if (!session || days.length === 0) return {};
+  const sorted = [...days].sort();
+  const fromMs = new Date(sorted[0] + 'T00:00:00').getTime() - 3 * 86400000;
+  const toMs = new Date(sorted[sorted.length - 1] + 'T23:59:59').getTime() + 3 * 86400000;
+  try {
+    const map = await getDayStartPricesInRange(session, epic, fromMs, toMs);
+    const n = Object.keys(map).length;
+    if (n > 0) {
+      logFn(`[Backtest] Day start: ${n} IG daily open(s) for ${sorted[0]}…${sorted[sorted.length - 1]}`);
+    } else {
+      logFn('[Backtest] Day start: no IG daily candles in range — using first sample mid per London day');
+    }
+    return map;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logFn('[Backtest] Day start: IG fetch failed – ' + msg + ' (using first sample mid per London day)');
+    return {};
+  }
 }
 
 function runBacktestInWorker(
@@ -792,6 +820,82 @@ export function registerSocketHandlers(io: Server): void {
   let lastPriceSocketEmitTs = 0;
   const PRICE_SOCKET_EMIT_MIN_MS = 100;
 
+  async function fetchDayStartWithLog(session: IgSession, epic: string): Promise<number | null> {
+    try {
+      const price = await getDayStartPrice(session, epic);
+      if (price == null) {
+        io.emit('log', 'Day start: unavailable for ' + epic + ' (no daily candle from IG)');
+      }
+      return price;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      io.emit('log', 'Day start: failed for ' + epic + ' – ' + msg);
+      return null;
+    }
+  }
+
+  async function fetchAndEmitMarketDetails(
+    session: IgSession,
+    epic: string,
+    target?: Socket
+  ): Promise<void> {
+    try {
+      const [market, trading, dayStartBuy, clientSentiment] = await Promise.all([
+        getMarketDetails(session, epic),
+        getMarketTradingInfo(session, epic).catch(() => ({ defaultCloseAt: null, is24_7: false })),
+        fetchDayStartWithLog(session, epic),
+        getClientSentiment(session, epic, {
+          debugLog: (msg) => io.emit('log', msg),
+        }).catch((err) => {
+          io.emit('log', 'Sentiment: ' + (err?.message || err));
+          return null;
+        }),
+      ]);
+      if (clientSentiment) {
+        io.emit('log', 'Sentiment: ' + clientSentiment.longPct + '% long / ' + clientSentiment.shortPct + '% short');
+      }
+      lastClientSentimentByEpic[epic] = clientSentiment ?? null;
+      const payload = {
+        epic,
+        minDealSize: market?.minDealSize ?? null,
+        currencyCode: market?.currencyCode ?? null,
+        contractSize: market?.contractSize ?? null,
+        marginFactor: market?.marginFactor ?? null,
+        lotSize: market?.lotSize ?? null,
+        valueOfOnePip: market?.valueOfOnePip ?? null,
+        scalingFactor: market?.scalingFactor ?? null,
+        exchangeRateToAccount: market?.exchangeRateToAccount ?? null,
+        defaultCloseAt: trading.defaultCloseAt,
+        is24_7: trading.is24_7,
+        dayStartBuy: dayStartBuy ?? null,
+        clientSentiment: clientSentiment ?? null,
+      };
+      if (target) target.emit('marketDetails', payload);
+      else io.emit('marketDetails', payload);
+    } catch (err) {
+      lastClientSentimentByEpic[epic] = null;
+      const msg = err instanceof Error ? err.message : String(err);
+      io.emit('log', 'Market details: failed for ' + epic + ' – ' + msg);
+      const empty = {
+        epic,
+        minDealSize: null,
+        currencyCode: null,
+        contractSize: null,
+        marginFactor: null,
+        lotSize: null,
+        valueOfOnePip: null,
+        scalingFactor: null,
+        exchangeRateToAccount: null,
+        defaultCloseAt: null,
+        is24_7: false,
+        dayStartBuy: null,
+        clientSentiment: null,
+      };
+      if (target) target.emit('marketDetails', empty);
+      else io.emit('marketDetails', empty);
+    }
+  }
+
   function doStop(logMsg?: string): void {
     lastPriceSocketEmitTs = 0;
     loggedClosedDealIds.clear();
@@ -855,27 +959,7 @@ export function registerSocketHandlers(io: Server): void {
       socket.emit('scheduled_closes', scheduledCloses);
       const epic = cfg.epic || '';
       if (epic) {
-        try {
-          const [market, trading, dayStartBuy, clientSentiment] = await Promise.all([
-            getMarketDetails(currentSession, epic),
-            getMarketTradingInfo(currentSession, epic).catch(() => ({ defaultCloseAt: null, is24_7: false })),
-            getDayStartPrice(currentSession, epic).catch(() => null),
-            getClientSentiment(currentSession, epic, {
-              debugLog: (msg) => io.emit('log', msg),
-            }).catch((err) => {
-              io.emit('log', 'Sentiment: ' + (err?.message || err));
-              return null;
-            }),
-          ]);
-          if (clientSentiment) {
-            io.emit('log', 'Sentiment: ' + clientSentiment.longPct + '% long / ' + clientSentiment.shortPct + '% short');
-          }
-          lastClientSentimentByEpic[epic] = clientSentiment ?? null;
-          socket.emit('marketDetails', { epic, minDealSize: market?.minDealSize ?? null, currencyCode: market?.currencyCode ?? null, contractSize: market?.contractSize ?? null, marginFactor: market?.marginFactor ?? null, lotSize: market?.lotSize ?? null, valueOfOnePip: market?.valueOfOnePip ?? null, scalingFactor: market?.scalingFactor ?? null, exchangeRateToAccount: market?.exchangeRateToAccount ?? null, defaultCloseAt: trading.defaultCloseAt, is24_7: trading.is24_7, dayStartBuy: dayStartBuy ?? null, clientSentiment: clientSentiment ?? null });
-        } catch {
-          lastClientSentimentByEpic[epic] = null;
-          socket.emit('marketDetails', { epic, minDealSize: null, currencyCode: null, contractSize: null, marginFactor: null, lotSize: null, valueOfOnePip: null, scalingFactor: null, exchangeRateToAccount: null, defaultCloseAt: null, is24_7: false, dayStartBuy: null, clientSentiment: null });
-        }
+        await fetchAndEmitMarketDetails(currentSession, epic, socket);
       }
     }
     socket.emit('epic', cfg.epic || '');
@@ -915,6 +999,9 @@ export function registerSocketHandlers(io: Server): void {
         io.emit('epic', cfg.epic || '');
         io.emit('watchlistId', cfg.watchlistId || '');
         io.emit('log', 'Logged in: ' + session.accountId + ' (' + session.accountType + ') — stream not started');
+        if (cfg.epic) {
+          await fetchAndEmitMarketDetails(session, cfg.epic);
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Login failed';
         io.emit('log', 'Error: ' + msg);
@@ -964,9 +1051,7 @@ export function registerSocketHandlers(io: Server): void {
       }
       const epic = cfg.epic || 'CS.D.CFDGOLD.CFD.IP';
       try {
-        getClientSentiment(session, epic, { debugLog: (msg) => io.emit('log', msg) })
-          .then((s) => { lastClientSentimentByEpic[epic] = s ?? null; })
-          .catch(() => { lastClientSentimentByEpic[epic] = null; });
+        await fetchAndEmitMarketDetails(session, epic);
         startStream(
           session,
           epic,
@@ -1075,45 +1160,7 @@ export function registerSocketHandlers(io: Server): void {
       io.emit('epic', epic);
       io.emit('log', 'Epic set: ' + (epic || '—'));
       if (currentSession && epic) {
-        try {
-          const [market, trading, dayStartBuy, clientSentiment] = await Promise.all([
-            getMarketDetails(currentSession, epic),
-            getMarketTradingInfo(currentSession, epic).catch(() => ({ defaultCloseAt: null, is24_7: false })),
-            getDayStartPrice(currentSession, epic).catch(() => null),
-            getClientSentiment(currentSession, epic, {
-              debugLog: (msg) => io.emit('log', msg),
-            }).catch((err) => {
-              io.emit('log', 'Sentiment: ' + (err?.message || err));
-              return null;
-            }),
-          ]);
-          if (clientSentiment) {
-            io.emit('log', 'Sentiment: ' + clientSentiment.longPct + '% long / ' + clientSentiment.shortPct + '% short');
-          }
-          lastClientSentimentByEpic[epic] = clientSentiment ?? null;
-          const payload = {
-            epic,
-            minDealSize: market?.minDealSize ?? null,
-            currencyCode: market?.currencyCode || null,
-            contractSize: market?.contractSize ?? null,
-            marginFactor: market?.marginFactor ?? null,
-            lotSize: market?.lotSize ?? null,
-            valueOfOnePip: market?.valueOfOnePip ?? null,
-            scalingFactor: market?.scalingFactor ?? null,
-            exchangeRateToAccount: market?.exchangeRateToAccount ?? null,
-            defaultCloseAt: trading.defaultCloseAt,
-            is24_7: trading.is24_7,
-            dayStartBuy: dayStartBuy ?? null,
-            clientSentiment: clientSentiment ?? null,
-          };
-          io.emit('marketDetails', payload);
-        } catch {
-          lastClientSentimentByEpic[epic] = null;
-          io.emit('marketDetails', { epic, minDealSize: null, currencyCode: null, contractSize: null, marginFactor: null, lotSize: null, valueOfOnePip: null, scalingFactor: null, exchangeRateToAccount: null, defaultCloseAt: null, is24_7: false, dayStartBuy: null, clientSentiment: null });
-        }
-      } else {
-        if (epic) lastClientSentimentByEpic[epic] = null;
-        io.emit('marketDetails', { epic: epic || '', minDealSize: null, currencyCode: null, contractSize: null, marginFactor: null, lotSize: null, valueOfOnePip: null, scalingFactor: null, exchangeRateToAccount: null, defaultCloseAt: null, is24_7: false, dayStartBuy: null, clientSentiment: null });
+        await fetchAndEmitMarketDetails(currentSession, epic);
       }
       if (isStreaming() && epic) {
         try {
@@ -1525,12 +1572,20 @@ export function registerSocketHandlers(io: Server): void {
         });
       }
 
+      const daysToAnalyse = getDaysToAnalyse();
+      if (daysToAnalyse.length === 0) {
+        socket.emit('analyse_recording_report', { error: 'No recorded samples for ' + epic + noDataMsgSuffix });
+        return;
+      }
+      config.dayStartByLondonDate = await loadDayStartsForBacktest(
+        currentSession,
+        epic,
+        daysToAnalyse,
+        (msg) => io.emit('log', msg)
+      );
+
       if (usePerDay) {
-        const days = getDaysToAnalyse();
-        if (days.length === 0) {
-          socket.emit('analyse_recording_report', { error: 'No recorded samples for ' + epic + noDataMsgSuffix });
-          return;
-        }
+        const days = daysToAnalyse;
         let cancelled = false;
         let currentWorker: Worker | null = null;
         const workerPath = path.resolve(process.cwd(), 'dist', 'workers', 'backtestWorker.js');
@@ -1686,11 +1741,7 @@ export function registerSocketHandlers(io: Server): void {
         return;
       }
 
-      const days = getDaysToAnalyse();
-      if (days.length === 0) {
-        socket.emit('analyse_recording_report', { error: 'No recorded samples for ' + epic + noDataMsgSuffix });
-        return;
-      }
+      const days = daysToAnalyse;
       function groupConsecutiveDays(daysSorted: string[]): string[][] {
         if (daysSorted.length === 0) return [];
         const blocks: string[][] = [];

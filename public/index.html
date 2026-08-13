@@ -451,6 +451,10 @@
             <label for="tradingRulesConfirmBeforePlace" class="text-slate-500" data-tooltip="When unchecked, deals place automatically without confirmation dialog">Confirm before placing</label>
           </div>
           <div class="flex flex-wrap items-center gap-2">
+            <label for="tradingRulesMaxParallelDeals" class="text-slate-500 shrink-0" data-tooltip="Maximum open positions plus working orders before the rules engine stops placing new deals">Max parallel deals</label>
+            <input type="number" id="tradingRulesMaxParallelDeals" min="1" max="10" value="1" placeholder="1" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="1 = one deal at a time (default). Increase to allow stacking up to 10 open positions/orders from rules.">
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
             <label for="tradingRulesPauseOnLoss" class="text-slate-500 shrink-0" data-tooltip="When a rules deal closes with a loss, pause both engines for this many seconds before resuming">Pause on loss</label>
             <input type="number" id="tradingRulesPauseOnLoss" min="0" max="86400" value="0" placeholder="0" class="w-20 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Seconds to pause after a losing rules trade. 0 = disabled.">
             <span class="text-slate-500 text-xs shrink-0">sec</span>

@@ -78,6 +78,8 @@ export interface BacktestConfig {
   /** Seconds to pause all new opens after a losing close. 0 = disabled. */
   pauseOnLossSecondsBuy?: number;
   pauseOnLossSecondsSell?: number;
+  /** IG daily open mid by Europe/London YYYY-MM-DD (from pre-fetch). Falls back to first sample mid per London day. */
+  dayStartByLondonDate?: Record<string, number>;
 }
 
 /** Minutes since London local midnight (IG openTime/closeTime). */
@@ -740,6 +742,32 @@ function getDayKey(ts: number): string {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
 
+function londonDateKeyFromTs(ts: number): string {
+  return new Date(ts).toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+}
+
+/** First sample mid per Europe/London day — fallback when IG day open unavailable. */
+function fallbackDayStartByLondonDate(samples: { ts: number; bid: number; offer: number }[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const s of samples) {
+    const key = londonDateKeyFromTs(s.ts);
+    if (out[key] == null) out[key] = (s.bid + s.offer) / 2;
+  }
+  return out;
+}
+
+function resolveDayStartForTs(
+  ts: number,
+  config: BacktestConfig,
+  fallbackByLondon: Record<string, number>
+): number | null {
+  const key = londonDateKeyFromTs(ts);
+  const ig = config.dayStartByLondonDate?.[key];
+  if (ig != null && !isNaN(ig)) return ig;
+  const fb = fallbackByLondon[key];
+  return fb != null && !isNaN(fb) ? fb : null;
+}
+
 /** Calendar day key (local) for a sample/trade timestamp. */
 export function dayKeyFromTimestamp(ts: number): string {
   return getDayKey(ts);
@@ -1138,7 +1166,7 @@ export function runBacktest(
   let prevBlocked = false;
   let prevCanOpen = false;
   let prevMid: number | null = null;
-  const dayStart = samples.length > 0 ? samples[0].offer : null;
+  const fallbackDayStartByLondon = fallbackDayStartByLondonDate(samples);
 
   const useRuleSets = config.ruleSets && config.ruleSets.length > 0 && config.backtestRuleSets && config.backtestRuleSets.length > 0;
   const activeRuleSets: RuleSetConfig[] = useRuleSets
@@ -1174,6 +1202,7 @@ export function runBacktest(
 
     const probes = getProbes(priceHistory, s.ts, config);
     const sentiment = sentimentFromLongShort(s.longPct, s.shortPct);
+    const dayStart = resolveDayStartForTs(s.ts, config, fallbackDayStartByLondon);
 
     const ctx: Context = {
       offer: s.offer,

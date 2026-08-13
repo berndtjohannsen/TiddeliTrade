@@ -2409,6 +2409,7 @@ export function initTestRules(socket, state, log, profileOpts) {
         stopAfterLossSell: cfg.engineControls && cfg.engineControls.stopAfterLossSell,
         pauseOnLossSecondsBuy: cfg.engineControls && cfg.engineControls.pauseOnLossSecondsBuy,
         pauseOnLossSecondsSell: cfg.engineControls && cfg.engineControls.pauseOnLossSecondsSell,
+        maxParallelDeals: cfg.engineControls && cfg.engineControls.maxParallelDeals,
         scheduleStartTime: cfg.engineControls && cfg.engineControls.scheduleStartTime,
         scheduleStopTime: cfg.engineControls && cfg.engineControls.scheduleStopTime,
         scheduleRepeatDaily: cfg.engineControls && cfg.engineControls.scheduleRepeatDaily,

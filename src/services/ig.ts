@@ -1208,8 +1208,13 @@ function fmtUtcForPricesQuery(d: Date): string {
   );
 }
 
-function londonCalendarDateKey(ms: number): string {
+/** Europe/London calendar date YYYY-MM-DD for a timestamp. */
+export function londonDateKeyFromTimestamp(ms: number): string {
   return new Date(ms).toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+}
+
+function londonCalendarDateKey(ms: number): string {
+  return londonDateKeyFromTimestamp(ms);
 }
 
 function openPriceMid(open?: { bid?: number; ask?: number }): number | null {
@@ -1222,6 +1227,68 @@ function openPriceMid(open?: { bid?: number; ask?: number }): number | null {
   return null;
 }
 
+type DayCandleRow = {
+  snapshotTimeUTC?: string;
+  openPrice?: { bid?: number; ask?: number };
+};
+
+/** Map Europe/London date → daily open mid (latest candle when multiple match a day). */
+export function dayStartMidsByLondonDate(candles: DayCandleRow[]): Record<string, number> {
+  const byLondon = new Map<string, { ts: number; mid: number }>();
+  for (const p of candles) {
+    const ts = p.snapshotTimeUTC ? new Date(p.snapshotTimeUTC).getTime() : 0;
+    if (!ts) continue;
+    const mid = openPriceMid(p.openPrice);
+    if (mid == null) continue;
+    const key = londonDateKeyFromTimestamp(ts);
+    const prev = byLondon.get(key);
+    if (!prev || ts >= prev.ts) byLondon.set(key, { ts, mid });
+  }
+  const out: Record<string, number> = {};
+  for (const [key, { mid }] of byLondon.entries()) out[key] = mid;
+  return out;
+}
+
+async function fetchDayResolutionCandles(
+  session: IgSession,
+  epic: string,
+  fromDate: Date,
+  toDate: Date
+): Promise<DayCandleRow[]> {
+  const from = fmtUtcForPricesQuery(fromDate);
+  const to = fmtUtcForPricesQuery(toDate);
+  const url = `${baseUrl()}/gateway/deal/prices/${encodeURIComponent(epic)}?resolution=DAY&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&pageSize=0`;
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: { ...authHeaders(session), 'Version': '3' },
+  });
+  if (!res.ok) {
+    const errBody = (await res.json().catch(() => ({}))) as { errorCode?: string; errorMessage?: string };
+    const detail = errBody.errorCode || errBody.errorMessage
+      ? `${errBody.errorCode || ''} ${errBody.errorMessage || ''}`.trim()
+      : res.statusText;
+    throw new Error(`Day start prices ${res.status}: ${detail || res.statusText}`);
+  }
+  const data = (await res.json()) as { prices?: DayCandleRow[] };
+  return data.prices ?? [];
+}
+
+/**
+ * IG daily open mids keyed by Europe/London YYYY-MM-DD for a UTC timestamp range.
+ * Used by backtest to align dayStart with live rules.
+ */
+export async function getDayStartPricesInRange(
+  session: IgSession,
+  epic: string,
+  fromMs: number,
+  toMs: number
+): Promise<Record<string, number>> {
+  const fromDate = new Date(fromMs);
+  const toDate = new Date(toMs);
+  const candles = await fetchDayResolutionCandles(session, epic, fromDate, toDate);
+  return dayStartMidsByLondonDate(candles);
+}
+
 /**
  * Day-open level for probes/rules: open of the IG daily candle, aligned with platform charts.
  * Uses DAY resolution; from/to are UTC (was incorrectly using server local time before).
@@ -1231,33 +1298,15 @@ function openPriceMid(open?: { bid?: number; ask?: number }): number | null {
 export async function getDayStartPrice(session: IgSession, epic: string): Promise<number | null> {
   const toDate = new Date();
   const fromDate = new Date(toDate.getTime() - 7 * 24 * 60 * 60 * 1000);
-  const from = fmtUtcForPricesQuery(fromDate);
-  const to = fmtUtcForPricesQuery(toDate);
-  const url = `${baseUrl()}/gateway/deal/prices/${encodeURIComponent(epic)}?resolution=DAY&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&pageSize=0`;
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: { ...authHeaders(session), 'Version': '3' },
-  });
-  if (!res.ok) return null;
-  const data = (await res.json()) as {
-    prices?: Array<{
-      snapshotTimeUTC?: string;
-      openPrice?: { bid?: number; ask?: number };
-    }>;
-  };
-  const prices = data.prices ?? [];
-  if (prices.length === 0) return null;
-  const withTs = prices
+  const candles = await fetchDayResolutionCandles(session, epic, fromDate, toDate);
+  if (candles.length === 0) return null;
+  const byLondon = dayStartMidsByLondonDate(candles);
+  const todayLondon = londonCalendarDateKey(Date.now());
+  if (byLondon[todayLondon] != null) return byLondon[todayLondon];
+  const withTs = candles
     .map((p) => ({ p, ts: p.snapshotTimeUTC ? new Date(p.snapshotTimeUTC).getTime() : 0 }))
     .filter((x) => x.ts > 0);
   if (withTs.length === 0) return null;
-  const todayLondon = londonCalendarDateKey(Date.now());
-  const todayCandles = withTs.filter((x) => londonCalendarDateKey(x.ts) === todayLondon);
-  const chosen = (
-    todayCandles.length > 0
-      ? todayCandles.reduce((a, b) => (a.ts >= b.ts ? a : b))
-      : withTs.reduce((a, b) => (a.ts >= b.ts ? a : b))
-  ).p;
-  const mid = openPriceMid(chosen.openPrice);
-  return mid;
+  const chosen = withTs.reduce((a, b) => (a.ts >= b.ts ? a : b)).p;
+  return openPriceMid(chosen.openPrice);
 }

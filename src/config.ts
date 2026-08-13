@@ -61,6 +61,8 @@ export interface UserConfig {
     tradingRulesScheduleStopTime?: string;
     tradingRulesScheduleRepeatDaily?: boolean;
     tradingRulesScheduleActiveDate?: string;
+    /** Max open positions + working orders before rules stops placing new deals (default 1). */
+    tradingRulesMaxParallelDeals?: number;
     /** Rules to evaluate: left (live value) op right (reference). All enabled must pass. No deal if position/order exists. @deprecated Use ruleSets instead. */
     tradingRules?: Array<{ left: string; op: string; right: string; enabled?: boolean }>;
     /** Per-direction rule sets: BUY rules + deal params, SELL rules + deal params. Evaluation order: BUY first, then SELL. */
@@ -181,6 +183,7 @@ export interface InstrumentSettings {
   tradingRulesPauseOnLossSeconds?: number;
   tradingRulesPauseOnLossSecondsBuy?: number;
   tradingRulesPauseOnLossSecondsSell?: number;
+  tradingRulesMaxParallelDeals?: number;
   /** When true, a rules deal that closes at a loss stops that direction’s engine until restarted. */
   tradingRulesStopAfterLoss?: boolean;
   tradingRulesStopAfterLossBuy?: boolean;
@@ -207,6 +210,7 @@ export interface BacktestProfileEngineControls {
   stopAfterLossSell?: boolean;
   pauseOnLossSecondsBuy?: number;
   pauseOnLossSecondsSell?: number;
+  maxParallelDeals?: number;
   scheduleStartTime?: string;
   scheduleStopTime?: string;
   scheduleRepeatDaily?: boolean;
