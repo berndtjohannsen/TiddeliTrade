@@ -444,6 +444,7 @@ export function initTestRules(socket, state, log, profileOpts) {
     if (er === 'dsl') return 'DynSL';
     if (er === 'rules') return 'Rules';
     if (er === 'endOfPeriod') return 'EOD';
+    if (er === 'forcedClose') return 'Forced';
     return er || '—';
   }
 
@@ -1611,7 +1612,7 @@ export function initTestRules(socket, state, log, profileOpts) {
     var plStr = val >= 0 ? '+' + val.toFixed(2) : val.toFixed(2);
     var unit = usePounds ? ' $' : ' pts';
     var er = t.exitReason || '';
-    var tag = er === 'tp' ? 'TP' : er === 'sl' ? 'SL' : er === 'dsl' ? 'DynSL' : er === 'rules' ? 'Rules' : er === 'endOfPeriod' ? 'EOD' : '';
+    var tag = er === 'tp' ? 'TP' : er === 'sl' ? 'SL' : er === 'dsl' ? 'DynSL' : er === 'rules' ? 'Rules' : er === 'forcedClose' ? 'Forced' : er === 'endOfPeriod' ? 'EOD' : '';
     var tagHtml = tag ? ' <span class="text-slate-500" title="Close reason">' + tag + '</span>' : '';
     var dayStr = dayPrefix ? '<span class="text-slate-500">' + escapeHtml(dayPrefix) + '</span> ' : '';
     return (
@@ -1834,6 +1835,7 @@ export function initTestRules(socket, state, log, profileOpts) {
       if (c.sl > 0) closes.push(c.sl + ' SL');
       if (c.dsl > 0) closes.push(c.dsl + ' dyn. SL');
       if (c.rules > 0) closes.push(c.rules + ' rules');
+      if (c.forcedClose > 0) closes.push(c.forcedClose + ' forced close');
       if (c.endOfPeriod > 0) closes.push(c.endOfPeriod + ' end-of-period');
       if (closes.length > 0) rows.push(['Closes', closes.join(', ')]);
     }
@@ -2414,7 +2416,9 @@ export function initTestRules(socket, state, log, profileOpts) {
         scheduleStopTime: cfg.engineControls && cfg.engineControls.scheduleStopTime,
         scheduleRepeatDaily: cfg.engineControls && cfg.engineControls.scheduleRepeatDaily,
         scheduleActiveDate: cfg.engineControls && cfg.engineControls.scheduleActiveDate,
-        scheduleTimezone: cfg.engineControls && cfg.engineControls.scheduleTimezone
+        scheduleTimezone: cfg.engineControls && cfg.engineControls.scheduleTimezone,
+        forcedCloseTime: cfg.engineControls && cfg.engineControls.forcedCloseTime,
+        maxRunDays: cfg.engineControls && cfg.engineControls.maxRunDays
       });
     });
   }

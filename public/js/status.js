@@ -54,6 +54,7 @@ export function initStatus(socket, log, opts) {
       mainPlaceholder.textContent = 'Connecting…';
       mainPlaceholder.classList.remove('hidden', 'text-red-500');
     }
+    if (opts.onEngineStatusChange) opts.onEngineStatusChange();
   }
 
   socket.on('status', setStatus);

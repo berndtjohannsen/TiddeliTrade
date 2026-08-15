@@ -156,15 +156,209 @@
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 }
+.trade-session-status-banner,
 .trade-rules-session-banner {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
+  align-items: stretch;
   gap: 0.75rem;
-  padding: 0.625rem 1rem;
-  border-radius: 0.75rem;
-  border: 1px solid rgb(245 158 11 / 0.35);
+  padding: 0.75rem 1rem;
+  border-radius: 0.875rem;
+  border: 1px solid rgb(51 65 85 / 0.55);
+  background: rgb(15 23 42 / 0.45);
+  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease, padding 0.2s ease;
+}
+.trade-session-status-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+  flex: 1;
+}
+.trade-session-status-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.trade-session-status-title {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgb(148 163 184);
+}
+.trade-session-status-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: rgb(52 211 153);
+  box-shadow: 0 0 0 2px rgb(52 211 153 / 0.25);
+}
+.trade-session-status-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.625rem;
+  min-width: 0;
+}
+@media (min-width: 480px) {
+  .trade-session-status-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem;
+  }
+}
+.trade-session-status-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+  padding: 0.625rem 0.75rem;
+  border-radius: 0.625rem;
+  border: 1px solid rgb(51 65 85 / 0.45);
+  background: rgb(2 6 23 / 0.35);
+}
+.trade-session-status-block-label {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgb(100 116 139);
+}
+.trade-session-status-block-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  min-width: 0;
+}
+.trade-session-status-value {
+  font-size: 0.875rem;
+  font-weight: 700;
+  line-height: 1.25;
+}
+.trade-session-status-detail {
+  font-size: 0.75rem;
+  line-height: 1.35;
+  color: rgb(100 116 139);
+}
+.trade-session-status-value--running { color: rgb(56 189 248); }
+.trade-session-status-value--connecting { color: rgb(125 211 252); }
+.trade-session-status-value--disconnected { color: rgb(248 113 113); }
+.trade-session-status-value--stopped { color: rgb(148 163 184); }
+.trade-session-status-value--active { color: rgb(52 211 153); }
+.trade-session-status-value--armed { color: rgb(251 191 36); }
+.trade-session-status-value--paused { color: rgb(56 189 248); }
+.trade-session-status-value--waiting { color: rgb(203 213 225); }
+.trade-session-status-value--done { color: rgb(148 163 184); }
+.trade-session-status-value--expired { color: rgb(248 113 113); }
+.trade-session-status-banner.trade-session-banner-idle {
+  border-color: rgb(51 65 85 / 0.55);
+  background: rgb(15 23 42 / 0.45);
+}
+.trade-session-status-banner.trade-session-banner-probes {
+  border-color: rgb(56 189 248 / 0.4);
+  background: rgb(56 189 248 / 0.1);
+  box-shadow: 0 0 0 1px rgb(56 189 248 / 0.08);
+}
+.trade-session-status-banner.trade-session-banner-live {
+  padding: 1rem 1.25rem;
+  border-width: 1px;
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 0.04),
+    0 8px 24px rgb(0 0 0 / 0.35);
+}
+.trade-session-status-banner.trade-session-banner-live .trade-session-status-block {
+  padding: 0.75rem 0.875rem;
+  background: rgb(2 6 23 / 0.55);
+}
+.trade-session-status-banner.trade-session-banner-live .trade-session-status-value {
+  font-size: 1rem;
+}
+.trade-session-status-banner.trade-session-banner-live .trade-session-status-detail {
+  color: rgb(148 163 184);
+}
+.trade-session-status-banner.trade-session-banner-live.trade-rules-banner-active {
+  border-color: rgb(52 211 153 / 0.55);
+  background: linear-gradient(135deg, rgb(52 211 153 / 0.14) 0%, rgb(15 23 42 / 0.92) 55%);
+  box-shadow:
+    0 0 0 1px rgb(52 211 153 / 0.12),
+    0 8px 28px rgb(0 0 0 / 0.4),
+    inset 0 1px 0 rgb(52 211 153 / 0.08);
+}
+.trade-session-status-banner.trade-session-banner-live.trade-rules-banner-active .trade-session-status-title {
+  color: rgb(110 231 183);
+}
+.trade-session-status-banner.trade-session-banner-live.trade-rules-banner-active .trade-session-status-block-rules {
+  border-color: rgb(52 211 153 / 0.35);
+  background: rgb(52 211 153 / 0.08);
+}
+.trade-session-status-banner.trade-session-banner-live.trade-rules-banner-paused {
+  border-color: rgb(56 189 248 / 0.5);
+  background: linear-gradient(135deg, rgb(56 189 248 / 0.12) 0%, rgb(15 23 42 / 0.92) 55%);
+}
+.trade-session-status-banner.trade-session-banner-live.trade-rules-banner-paused .trade-session-status-title {
+  color: rgb(125 211 252);
+}
+.trade-session-status-banner.trade-session-banner-live.trade-rules-banner-paused .trade-session-status-block-rules {
+  border-color: rgb(56 189 248 / 0.35);
+  background: rgb(56 189 248 / 0.08);
+}
+.trade-session-status-banner.trade-session-banner-live.trade-rules-banner-schedule {
+  border-color: rgb(148 163 184 / 0.45);
+  background: linear-gradient(135deg, rgb(148 163 184 / 0.1) 0%, rgb(15 23 42 / 0.92) 55%);
+}
+.trade-session-status-banner.trade-session-banner-live.trade-rules-banner-schedule .trade-session-status-block-rules {
+  border-color: rgb(148 163 184 / 0.3);
+  background: rgb(148 163 184 / 0.06);
+}
+.trade-session-status-banner.trade-session-banner-live.trade-rules-banner-armed {
+  border-color: rgb(245 158 11 / 0.55);
+  background: linear-gradient(135deg, rgb(245 158 11 / 0.14) 0%, rgb(15 23 42 / 0.92) 55%);
+  box-shadow:
+    0 0 0 1px rgb(245 158 11 / 0.12),
+    0 8px 28px rgb(0 0 0 / 0.4),
+    inset 0 1px 0 rgb(245 158 11 / 0.08);
+}
+.trade-session-status-banner.trade-session-banner-live.trade-rules-banner-armed .trade-session-status-title {
+  color: rgb(252 211 77);
+}
+.trade-session-status-banner.trade-session-banner-live.trade-rules-banner-armed .trade-session-status-block-rules {
+  border-color: rgb(245 158 11 / 0.35);
+  background: rgb(245 158 11 / 0.08);
+}
+.trade-session-status-banner.trade-session-banner-live.trade-rules-banner-paused .trade-session-status-dot {
+  background: rgb(56 189 248);
+  box-shadow: 0 0 0 2px rgb(56 189 248 / 0.25);
+}
+.trade-session-status-banner.trade-session-banner-live.trade-rules-banner-armed .trade-session-status-dot {
+  background: rgb(251 191 36);
+  box-shadow: 0 0 0 2px rgb(251 191 36 / 0.25);
+}
+.trade-session-status-banner.trade-session-banner-live.trade-rules-banner-schedule .trade-session-status-dot {
+  background: rgb(148 163 184);
+  box-shadow: 0 0 0 2px rgb(148 163 184 / 0.25);
+  animation: none;
+}
+.trade-session-status-banner.trade-session-banner-live.trade-rules-banner-active .trade-session-status-dot,
+.trade-session-status-banner.trade-session-banner-live.trade-rules-banner-armed .trade-session-status-dot {
+  animation: trade-session-pulse 2s ease-in-out infinite;
+}
+@keyframes trade-session-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.65; transform: scale(0.92); }
+}
+.trade-session-status-banner.trade-rules-banner-active {
+  border-color: rgb(52 211 153 / 0.35);
+  background: rgb(52 211 153 / 0.08);
+}
+.trade-session-status-banner.trade-rules-banner-paused {
+  border-color: rgb(56 189 248 / 0.35);
+  background: rgb(56 189 248 / 0.08);
+}
+.trade-session-status-banner.trade-rules-banner-schedule {
+  border-color: rgb(148 163 184 / 0.35);
+  background: rgb(148 163 184 / 0.08);
+}
+.trade-session-status-banner.trade-rules-banner-armed {
+  border-color: rgb(245 158 11 / 0.35);
   background: rgb(245 158 11 / 0.08);
 }
 .trade-layout.trade-rules-session {
@@ -178,20 +372,8 @@
 .trade-layout.trade-rules-mode-paused {
   border-left-color: rgb(56 189 248 / 0.55);
 }
-.trade-rules-session-banner.trade-rules-banner-active {
-  border-color: rgb(52 211 153 / 0.35);
-  background: rgb(52 211 153 / 0.08);
-}
-.trade-rules-session-banner.trade-rules-banner-paused {
-  border-color: rgb(56 189 248 / 0.35);
-  background: rgb(56 189 248 / 0.08);
-}
 .trade-layout.trade-rules-mode-schedule {
   border-left-color: rgb(148 163 184 / 0.55);
-}
-.trade-rules-session-banner.trade-rules-banner-schedule {
-  border-color: rgb(148 163 184 / 0.35);
-  background: rgb(148 163 184 / 0.08);
 }
 .trade-layout-manual.trade-manual-locked {
   opacity: 0.45;

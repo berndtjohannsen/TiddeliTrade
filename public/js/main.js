@@ -88,6 +88,10 @@ var tradingRulesApi = initTradingRules(socket, state, dealApi.setDealEnabled, or
 initStatus(socket, log, {
   onStopProbing: function () {
     tradingRulesApi.stopRulesEngine('Rules engine stopped (probing ended)');
+  },
+  onEngineStatusChange: function () {
+    if (tradingRulesApi.updateDealEnabled) tradingRulesApi.updateDealEnabled();
+    if (tradingRulesApi.updateSessionUi) tradingRulesApi.updateSessionUi();
   }
 });
 probesApi.setOnProbeUpdate(function () { tradingRulesApi.updateDealEnabled(); });

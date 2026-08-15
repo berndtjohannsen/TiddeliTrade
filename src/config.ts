@@ -61,6 +61,12 @@ export interface UserConfig {
     tradingRulesScheduleStopTime?: string;
     tradingRulesScheduleRepeatDaily?: boolean;
     tradingRulesScheduleActiveDate?: string;
+    /** HH:MM (local) — flatten rules positions at this time; blank = no forced close. */
+    tradingRulesForcedCloseTime?: string;
+    /** Max calendar days to run after Start rules (day 1 = start day). Blank/0 = unlimited. */
+    tradingRulesMaxRunDays?: number;
+    /** Local YYYY-MM-DD when the current rules run started (for max run days). */
+    tradingRulesEngineStartedDate?: string;
     /** Max open positions + working orders before rules stops placing new deals (default 1). */
     tradingRulesMaxParallelDeals?: number;
     /** Rules to evaluate: left (live value) op right (reference). All enabled must pass. No deal if position/order exists. @deprecated Use ruleSets instead. */
@@ -192,6 +198,10 @@ export interface InstrumentSettings {
   tradingRulesScheduleStopTime?: string;
   tradingRulesScheduleRepeatDaily?: boolean;
   tradingRulesScheduleActiveDate?: string;
+  tradingRulesForcedCloseTime?: string;
+  tradingRulesMaxRunDays?: number;
+  /** Local YYYY-MM-DD when the current rules run started (for max run days). */
+  tradingRulesEngineStartedDate?: string;
   rulesRunningBuy?: boolean;
   rulesRunningSell?: boolean;
   /** When false, BUY rules are skipped while the engine is running. Default true. */
@@ -216,6 +226,8 @@ export interface BacktestProfileEngineControls {
   scheduleRepeatDaily?: boolean;
   scheduleActiveDate?: string;
   scheduleTimezone?: string;
+  forcedCloseTime?: string;
+  maxRunDays?: number;
 }
 
 export interface BacktestProfile {

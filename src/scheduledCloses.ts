@@ -13,8 +13,8 @@ export interface ScheduledCloseEntry {
   direction: 'BUY' | 'SELL';
   size: number;
   closeAt: number;
-  /** 'deal' = from immediate deal, 'order' = from working order that filled */
-  source?: 'deal' | 'order';
+  /** 'deal' = manual deal, 'order' = working order fill, 'rules' = rules engine deal */
+  source?: 'deal' | 'order' | 'rules';
 }
 
 export function loadScheduledCloses(): ScheduledCloseEntry[] {

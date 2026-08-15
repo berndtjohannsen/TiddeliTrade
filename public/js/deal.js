@@ -522,7 +522,9 @@ export function initDeal(socket, state, log) {
     var tpRaw = (overrides && overrides.ruleSet && overrides.ruleSet.takeProfit) ? overrides.ruleSet.takeProfit : (takeProfitEl ? takeProfitEl.value.trim() : '');
     var slRaw = (overrides && overrides.ruleSet && overrides.ruleSet.stopLoss) ? overrides.ruleSet.stopLoss : (stopLossEl ? stopLossEl.value.trim() : '');
     var mode = (overrides && overrides.ruleSet && overrides.ruleSet.tpSlMode) ? overrides.ruleSet.tpSlMode : (tpSlModeEl ? tpSlModeEl.value : 'value');
-    var closeAtVal = (overrides && overrides.ruleSet) ? undefined : (closeAtEl && closeAtEl.value ? closeAtEl.value : undefined);
+    var closeAtVal = (overrides && overrides.closeAt)
+      ? overrides.closeAt
+      : ((overrides && overrides.ruleSet) ? undefined : (closeAtEl && closeAtEl.value ? closeAtEl.value : undefined));
     var sizeNum = parseFloat(size);
     if (state.currentMinDealSize != null && !isNaN(sizeNum) && sizeNum < state.currentMinDealSize) {
       var belowMinMsg = 'Size ' + size + ' is below minimum (' + state.currentMinDealSize + ')';

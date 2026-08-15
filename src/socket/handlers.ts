@@ -1351,6 +1351,8 @@ export function registerSocketHandlers(io: Server): void {
       scheduleRepeatDaily?: boolean;
       scheduleActiveDate?: string;
       scheduleTimezone?: string;
+      forcedCloseTime?: string;
+      maxRunDays?: number;
     }) => {
       const epic = (params?.epic || '').trim();
       if (!epic) {
@@ -1469,6 +1471,11 @@ export function registerSocketHandlers(io: Server): void {
           ui?.tradingRulesScheduleActiveDate
         ) || undefined,
         scheduleTimezone: params.scheduleTimezone?.trim() || undefined,
+        forcedCloseTime: resolveScheduleString(
+          params.forcedCloseTime,
+          inst?.tradingRulesForcedCloseTime,
+          ui?.tradingRulesForcedCloseTime
+        ) || undefined,
         pauseOnLossSecondsBuy: typeof params.pauseOnLossSecondsBuy === 'number'
           ? Math.min(Math.max(params.pauseOnLossSecondsBuy, 0), 86400)
           : resolvePauseOnLossSeconds(
@@ -1713,6 +1720,7 @@ export function registerSocketHandlers(io: Server): void {
           sl: allTrades.filter((t) => t.exitReason === 'sl').length,
           dsl: allTrades.filter((t) => t.exitReason === 'dsl').length,
           rules: allTrades.filter((t) => t.exitReason === 'rules').length,
+          forcedClose: allTrades.filter((t) => t.exitReason === 'forcedClose').length,
           endOfPeriod: allTrades.filter((t) => t.exitReason === 'endOfPeriod').length,
         };
         const ruleBlockerCounts = mergeBlockerAggregateMap(blockerAggregate);
@@ -1900,6 +1908,7 @@ export function registerSocketHandlers(io: Server): void {
         sl: allTrades.filter((t) => t.exitReason === 'sl').length,
         dsl: allTrades.filter((t) => t.exitReason === 'dsl').length,
         rules: allTrades.filter((t) => t.exitReason === 'rules').length,
+        forcedClose: allTrades.filter((t) => t.exitReason === 'forcedClose').length,
         endOfPeriod: allTrades.filter((t) => t.exitReason === 'endOfPeriod').length,
       };
       const ruleBlockerCounts = mergeBlockerAggregateMap(blockerAggregate);
@@ -2101,6 +2110,55 @@ export function registerSocketHandlers(io: Server): void {
       }
     });
 
+    socket.on('rules_forced_close_sweep', async (params: { epic?: string }) => {
+      if (!currentSession) return;
+      const cfg = loadConfig();
+      const epic = (params.epic?.trim() || cfg.epic || '').trim();
+      if (!epic) return;
+      try {
+        const positions = await getPositions(currentSession);
+        const forEpic = positions.filter((p) => p.epic === epic);
+        if (forEpic.length === 0) return;
+        const now = Date.now();
+        const scheduledDealIds = new Set(
+          scheduledCloses.filter((s) => s.closeAt <= now + 60000).map((s) => s.dealId)
+        );
+        for (const pos of forEpic) {
+          if (scheduledDealIds.has(pos.dealId)) continue;
+          try {
+            let posBeforeClose = pos;
+            recentlyClosedByUs[pos.dealId] = Date.now();
+            const closeDirection = pos.direction === 'BUY' ? 'SELL' : 'BUY';
+            const closeResult = await closePosition(currentSession, {
+              dealId: pos.dealId,
+              direction: closeDirection,
+              size: pos.size,
+            });
+            let closeConf: CloseConfirmation | undefined;
+            try {
+              const conf = await pollDealConfirmation(currentSession, closeResult.dealReference, { maxAttempts: 15, intervalMs: 300 });
+              if (conf?.dealStatus === 'ACCEPTED') closeConf = { level: conf.level, profit: conf.profit, profitCurrency: conf.profitCurrency };
+            } catch { /* ignore */ }
+            closeConf = await enrichCloseConfFromHistory(currentSession, posBeforeClose, closeConf, currentSession.currencyIsoCode);
+            await recordTransactionFromPosition(io, currentSession, posBeforeClose, pos.size, closeConf, currentSession.currencyIsoCode);
+            scheduledCloses = scheduledCloses.filter((s) => s.dealId !== pos.dealId);
+            saveScheduledCloses(scheduledCloses);
+            emitScheduledCloses(io);
+            io.emit('log', 'Rules forced close: position closed ' + pos.dealId);
+            io.emit('position_closed', { dealId: pos.dealId });
+          } catch (err) {
+            delete recentlyClosedByUs[pos.dealId];
+            const msg = err instanceof Error ? err.message : 'Close failed';
+            io.emit('log', 'Rules forced close error (' + pos.dealId + '): ' + msg);
+          }
+        }
+        await pollAndEmitPositions(currentSession, io);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Rules forced close sweep failed';
+        io.emit('log', msg);
+      }
+    });
+
     socket.on('placeDeal', async (params: { epic: string; direction: string; size: string; takeProfit?: string; stopLoss?: string; closeAt?: string; bid?: number; offer?: number; source?: string }) => {
       if (!currentSession) {
         socket.emit('deal_error', 'Not logged in');
@@ -2239,7 +2297,8 @@ export function registerSocketHandlers(io: Server): void {
             }
             if (dealId) {
               const closeDirection = closeDir === 'BUY' ? 'SELL' : 'BUY';
-              scheduledCloses.push({ dealId, direction: closeDirection, size: closeSize, closeAt: closeAtMs, source: 'deal' });
+              const closeSource = params.source === 'rules' ? 'rules' : 'deal';
+              scheduledCloses.push({ dealId, direction: closeDirection, size: closeSize, closeAt: closeAtMs, source: closeSource });
               persistAndRunScheduler(currentSession, io);
               io.emit('log', 'Scheduled close at ' + closeAtIso);
               try {

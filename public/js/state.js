@@ -55,5 +55,11 @@ export const state = {
   pendingRulesPositionSinceMs: null,
   /** Rules engine armed a deal (confirm open or submit in flight) — blocks another rules fire. */
   rulesDealPending: false,
-  rulesDealPendingSinceMs: null
+  rulesDealPendingSinceMs: null,
+  /** dealId → true for positions opened by the rules engine (until closed). */
+  rulesPlacedDealIds: Object.create(null),
+  /** Rules forced-close HH:MM (local) from Trade tab — used by position panel when per-deal schedule not yet synced. */
+  rulesForcedCloseTime: '',
+  /** dealId → { iso: string, source?: string } from server scheduled_closes. */
+  scheduledCloseByDealId: Object.create(null)
 };

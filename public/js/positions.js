@@ -37,6 +37,44 @@ export function initPositions(socket, state, showDealMessage, clearDealMessage, 
       : String(val);
   }
 
+  function parseLocalTimeHHMM(hhmm) {
+    if (!hhmm || !String(hhmm).trim()) return null;
+    var parts = String(hhmm).trim().split(':');
+    if (parts.length < 2) return null;
+    var h = parseInt(parts[0], 10);
+    var min = parseInt(parts[1], 10);
+    if (isNaN(h) || isNaN(min) || h < 0 || h > 23 || min < 0 || min > 59) return null;
+    return h * 60 + min;
+  }
+
+  /** Next occurrence of local HH:MM as ISO (same logic as rules engine deal closeAt). */
+  function nextLocalTimeIso(hhmm, nowMs) {
+    var fcMin = parseLocalTimeHHMM(hhmm);
+    if (fcMin == null) return null;
+    var d = new Date(nowMs);
+    var nowMin = d.getHours() * 60 + d.getMinutes();
+    var target = new Date(d);
+    target.setSeconds(0, 0);
+    target.setMilliseconds(0);
+    if (nowMin >= fcMin) target.setDate(target.getDate() + 1);
+    target.setHours(Math.floor(fcMin / 60), fcMin % 60, 0, 0);
+    return target.toISOString();
+  }
+
+  function resolveScheduledClose(pos) {
+    var dealId = pos.dealId;
+    if (dealId && state.scheduledCloseByDealId[dealId]) return state.scheduledCloseByDealId[dealId];
+    if (pos.closeAt) {
+      var src = dealId && state.rulesPlacedDealIds[dealId] ? 'rules' : 'deal';
+      return { iso: pos.closeAt, source: src };
+    }
+    if (dealId && state.rulesPlacedDealIds[dealId] && state.rulesForcedCloseTime) {
+      var iso = nextLocalTimeIso(state.rulesForcedCloseTime, Date.now());
+      if (iso) return { iso: iso, source: 'rules' };
+    }
+    return null;
+  }
+
   function findDynamicStopLoss(dealId) {
     var dslList = state.dynamicStopLossStatus || [];
     for (var di = 0; di < dslList.length; di++) {
@@ -119,10 +157,15 @@ export function initPositions(socket, state, showDealMessage, clearDealMessage, 
       }
       var netStr = netIfClosed != null ? formatMoney(netIfClosed, pos.currency || '') : '—';
       var netClass = netIfClosed != null ? (netIfClosed >= 0 ? 'text-emerald-500' : 'text-red-500') : 'text-slate-300';
-      var hasScheduledClose = !!pos.closeAt;
+      var sched = resolveScheduledClose(pos);
+      var hasScheduledClose = !!sched;
       var openedAtStr = formatTimeWithTz(pos.createdAt);
-      var scheduledCloseStrTz = pos.closeAt ? formatTimeWithTz(pos.closeAt) : '—';
-      var scheduledCloseRow = '<dt class="text-slate-500" data-tooltip="App will auto-close at this time (app must be running)">Scheduled close</dt><dd class="font-mono text-slate-400">' + scheduledCloseStrTz + '</dd>';
+      var scheduledCloseStrTz = sched ? formatTimeWithTz(sched.iso) : '—';
+      var schedLabel = sched && sched.source === 'rules' ? 'Forced close' : 'Scheduled close';
+      var schedTip = sched && sched.source === 'rules'
+        ? 'Rules engine will flatten this position at this time (app must be running)'
+        : 'App will auto-close at this time (app must be running)';
+      var scheduledCloseRow = '<dt class="text-slate-500" data-tooltip="' + schedTip + '">' + schedLabel + '</dt><dd class="font-mono text-slate-400">' + scheduledCloseStrTz + '</dd>';
       var dslRows = buildDynamicStopLossRows(pos.dealId, pos.currency || '');
       var stopLevel = resolveStopLossLevel(pos);
       var stopLossTip = findDynamicStopLoss(pos.dealId) && (pos.stopLevel == null || isNaN(pos.stopLevel))
@@ -172,6 +215,31 @@ export function initPositions(socket, state, showDealMessage, clearDealMessage, 
           socket.emit('closePosition', { dealId: dealId, epic: epic, expiry: expiry, direction: direction, size: size });
         }
       });
+    });
+  }
+
+  function syncScheduledClosesFromServer(list) {
+    var map = Object.create(null);
+    (list || []).forEach(function (s) {
+      if (!s || !s.dealId || s.closeAt == null) return;
+      map[s.dealId] = {
+        iso: new Date(s.closeAt).toISOString(),
+        source: s.source || 'deal'
+      };
+    });
+    state.scheduledCloseByDealId = map;
+  }
+
+  socket.on('scheduled_closes', function (list) {
+    syncScheduledClosesFromServer(list);
+    var filtered = (state.currentPositions || []).filter(function (p) { return !state.recentlyClosedDealIds[p.dealId]; });
+    if (filtered.length > 0) renderPositions(filtered);
+  });
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('tiddeli:rules-schedule-changed', function () {
+      var filtered = (state.currentPositions || []).filter(function (p) { return !state.recentlyClosedDealIds[p.dealId]; });
+      if (filtered.length > 0) renderPositions(filtered);
     });
   }
 
@@ -240,6 +308,8 @@ export function initPositions(socket, state, showDealMessage, clearDealMessage, 
     clearDealMessage();
     var dealId = data && data.dealId;
     if (dealId) {
+      delete state.scheduledCloseByDealId[dealId];
+      delete state.rulesPlacedDealIds[dealId];
       state.recentlyClosedDealIds[dealId] = true;
       state.currentPositions = state.currentPositions.filter(function (p) { return p.dealId !== dealId; });
       renderPositions(state.currentPositions);

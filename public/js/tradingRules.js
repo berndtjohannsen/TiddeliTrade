@@ -3,6 +3,7 @@
  * UI groups rows by probe horizon (short / medium / long / other); config persists ruleGroups. Paraphrase line = probe-first wording when live is Buy/Sell vs a probe ref.
  */
 import { formatTimeWithTz, formatMoney } from './utils.js';
+import { state } from './state.js';
 import {
   applyDynamicTpFromConfig,
   applyDynamicTpUiState,
@@ -431,6 +432,13 @@ function parseMaxParallelDealsInput(input) {
   return Math.min(n, 10);
 }
 
+function parseMaxRunDaysInput(input) {
+  if (!input || !input.value.trim()) return 0;
+  var n = parseInt(input.value, 10);
+  if (isNaN(n) || n < 1) return 0;
+  return Math.min(n, 365);
+}
+
 /** Write engine controls snapshot onto Trade tab DOM. */
 export function applyEngineControlsSnapshot(controls) {
   if (!controls) return;
@@ -454,6 +462,16 @@ export function applyEngineControlsSnapshot(controls) {
   if (scheduleStart) scheduleStart.value = controls.scheduleStartTime || '';
   if (scheduleStop) scheduleStop.value = controls.scheduleStopTime || '';
   if (scheduleRepeat) scheduleRepeat.checked = controls.scheduleRepeatDaily !== false;
+  var forcedClose = document.getElementById('tradingRulesForcedClose');
+  var maxRunDaysInput = document.getElementById('tradingRulesMaxRunDays');
+  if (forcedClose) forcedClose.value = controls.forcedCloseTime || '';
+  if (maxRunDaysInput) {
+    maxRunDaysInput.value = controls.maxRunDays != null && controls.maxRunDays > 0 ? String(controls.maxRunDays) : '';
+  }
+  state.rulesForcedCloseTime = controls.forcedCloseTime || '';
+  if (typeof window !== 'undefined' && window.dispatchEvent) {
+    window.dispatchEvent(new CustomEvent('tiddeli:rules-schedule-changed'));
+  }
 }
 
 function readEngineControlsFromDom() {
@@ -463,6 +481,8 @@ function readEngineControlsFromDom() {
   var scheduleStart = document.getElementById('tradingRulesScheduleStart');
   var scheduleStop = document.getElementById('tradingRulesScheduleStop');
   var scheduleRepeat = document.getElementById('tradingRulesScheduleRepeatDaily');
+  var forcedClose = document.getElementById('tradingRulesForcedClose');
+  var maxRunDaysInput = document.getElementById('tradingRulesMaxRunDays');
   function parsePause(input) {
     if (!input || !input.value.trim()) return 0;
     var n = parseInt(input.value, 10);
@@ -479,6 +499,8 @@ function readEngineControlsFromDom() {
     scheduleStartTime: scheduleStart && scheduleStart.value ? scheduleStart.value : '',
     scheduleStopTime: scheduleStop && scheduleStop.value ? scheduleStop.value : '',
     scheduleRepeatDaily: scheduleRepeat ? scheduleRepeat.checked !== false : true,
+    forcedCloseTime: forcedClose && forcedClose.value ? forcedClose.value : '',
+    maxRunDays: parseMaxRunDaysInput(maxRunDaysInput),
     scheduleTimezone: typeof Intl !== 'undefined' && Intl.DateTimeFormat
       ? Intl.DateTimeFormat().resolvedOptions().timeZone
       : undefined,
@@ -574,14 +596,17 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   var scheduleStartInput = document.getElementById('tradingRulesScheduleStart');
   var scheduleStopInput = document.getElementById('tradingRulesScheduleStop');
   var scheduleRepeatCheck = document.getElementById('tradingRulesScheduleRepeatDaily');
+  var forcedCloseInput = document.getElementById('tradingRulesForcedClose');
+  var maxRunDaysInput = document.getElementById('tradingRulesMaxRunDays');
   var scheduleStatusEl = document.getElementById('tradingRulesScheduleStatus');
   var tradeViewRoot = document.getElementById('tradeViewRoot');
   var tradeManualSection = document.getElementById('tradeManualSection');
-  var sessionBanner = document.getElementById('tradeRulesSessionBanner');
-  var sessionBannerLabel = document.getElementById('tradeRulesSessionBannerLabel');
-  var sessionBannerText = document.getElementById('tradeRulesSessionBannerText');
-  var sessionBannerStop = document.getElementById('tradeRulesSessionBannerStop');
-  var headerRulesStatus = document.getElementById('headerRulesStatus');
+  var sessionBanner = document.getElementById('tradeSessionStatusBanner');
+  var sessionStatusHeading = document.getElementById('tradeSessionStatusHeading');
+  var sessionProbesLabel = document.getElementById('tradeSessionProbesLabel');
+  var sessionProbesText = document.getElementById('tradeSessionProbesText');
+  var sessionRulesLabel = document.getElementById('tradeSessionRulesLabel');
+  var sessionRulesText = document.getElementById('tradeSessionRulesText');
   var navRulesBadge = document.getElementById('appNavTradeRulesBadge');
   var rulesStartModal = document.getElementById('rulesStartModal');
   var rulesStartModalSummary = document.getElementById('rulesStartModalSummary');
@@ -594,12 +619,18 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     stopAfterLossCheck,
     scheduleStartInput,
     scheduleStopInput,
-    scheduleRepeatCheck
+    scheduleRepeatCheck,
+    forcedCloseInput,
+    maxRunDaysInput
   ];
   /** When repeat-daily is off, schedule applies only on this calendar day (local). */
   var scheduleActiveDate = null;
-  /** Local date (YYYY-MM-DD) when the engine last entered the schedule window — used to auto-stop after end. */
+  /** Local date (YYYY-MM-DD) when the engine last entered the schedule window. */
   var scheduleLastInsideDate = null;
+  /** Local date when rules forced-close sweep last ran (once per day). */
+  var forcedCloseLastRunDate = null;
+  /** Local date (YYYY-MM-DD) when the current rules run started — for max run days. */
+  var rulesEngineStartedDate = null;
   /** dealId → 'buy' | 'sell' for deals placed by the rules engine (tracked until position closes). */
   var rulesPlacedDealIds = Object.create(null);
   var baseEnabled = false;
@@ -621,6 +652,17 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
 
   function isProbingActive() {
     return state && state.engineStatus === 'running';
+  }
+
+  function isIgLoggedInLocal() {
+    var st = state && state.engineStatus ? state.engineStatus : 'ready';
+    return st === 'connected' || st === 'running';
+  }
+
+  /** Manual deal/order allowed when logged in and rules engine is not running. */
+  function canManualTrade() {
+    if (rulesEngineRunning || isPausedOnLoss()) return false;
+    return isIgLoggedInLocal();
   }
 
   function rulesRunningWithoutProbes() {
@@ -711,6 +753,103 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     return h * 60 + min;
   }
 
+  function syncRulesForcedCloseToState() {
+    state.rulesForcedCloseTime = forcedCloseInput && forcedCloseInput.value ? forcedCloseInput.value : '';
+  }
+
+  function syncRulesPlacedDealIdToState(dealId, direction) {
+    if (!dealId) return;
+    state.rulesPlacedDealIds[dealId] = direction === 'SELL' ? 'sell' : 'buy';
+    rulesPlacedDealIds[dealId] = state.rulesPlacedDealIds[dealId];
+  }
+
+  function clearRulesPlacedDealIdFromState(dealId) {
+    if (!dealId) return;
+    delete state.rulesPlacedDealIds[dealId];
+    delete rulesPlacedDealIds[dealId];
+  }
+
+  /** ISO datetime for the next rules forced-close (local HH:MM). */
+  function getNextForcedCloseIso(nowMs) {
+    var fcMin = parseScheduleTimeInput(forcedCloseInput);
+    if (fcMin == null) return null;
+    var d = new Date(nowMs);
+    var nowMin = d.getHours() * 60 + d.getMinutes();
+    var target = new Date(d);
+    target.setSeconds(0, 0);
+    target.setMilliseconds(0);
+    if (nowMin >= fcMin) target.setDate(target.getDate() + 1);
+    target.setHours(Math.floor(fcMin / 60), fcMin % 60, 0, 0);
+    return target.toISOString();
+  }
+
+  function maybeDefaultForcedCloseFromMarket() {
+    if (!forcedCloseInput || forcedCloseInput.value) return;
+    if (state.is24_7Market) return;
+    if (!state.defaultCloseAt) return;
+    var d = new Date(state.defaultCloseAt);
+    if (isNaN(d.getTime())) return;
+    var hh = String(d.getHours()).padStart(2, '0');
+    var mm = String(d.getMinutes()).padStart(2, '0');
+    forcedCloseInput.value = hh + ':' + mm;
+    syncRulesForcedCloseToState();
+  }
+
+  function isPastForcedClose(nowMs) {
+    var fcMin = parseScheduleTimeInput(forcedCloseInput);
+    if (fcMin == null) return false;
+    var nowMin = new Date(nowMs).getHours() * 60 + new Date(nowMs).getMinutes();
+    return nowMin >= fcMin;
+  }
+
+  function hasForcedCloseTime() {
+    return parseScheduleTimeInput(forcedCloseInput) != null;
+  }
+
+  /** Calendar days elapsed since startDateKey (day 1 = start day, local). */
+  function calendarDaysSinceStart(startDateKey, nowMs) {
+    if (!startDateKey) return 0;
+    var parts = startDateKey.split('-');
+    if (parts.length !== 3) return 0;
+    var y = parseInt(parts[0], 10);
+    var m = parseInt(parts[1], 10) - 1;
+    var d = parseInt(parts[2], 10);
+    if (isNaN(y) || isNaN(m) || isNaN(d)) return 0;
+    var start = new Date(y, m, d);
+    var now = new Date(nowMs);
+    var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    var diff = Math.floor((today.getTime() - start.getTime()) / 86400000);
+    return diff + 1;
+  }
+
+  function getMaxRunDays() {
+    return parseMaxRunDaysInput(maxRunDaysInput);
+  }
+
+  function runMaxRunDaysStopIfNeeded(nowMs) {
+    var maxDays = getMaxRunDays();
+    if (!rulesEngineRunning || maxDays <= 0 || !rulesEngineStartedDate) return false;
+    if (calendarDaysSinceStart(rulesEngineStartedDate, nowMs) <= maxDays) return false;
+    stopRulesEngine('Rules engine stopped (max run days: ' + maxDays + ')');
+    return true;
+  }
+
+  function runForcedCloseIfNeeded(nowMs) {
+    if (!hasForcedCloseTime() || !isPastForcedClose(nowMs)) return false;
+    var today = localDateKey(new Date(nowMs));
+    if (forcedCloseLastRunDate === today) return false;
+    forcedCloseLastRunDate = today;
+    var epicSelect = document.getElementById('epicSelect');
+    var epic = (epicSelect && epicSelect.value) || state.savedEpic;
+    if (socket && typeof socket.emit === 'function' && epic) {
+      socket.emit('rules_forced_close_sweep', { epic: epic });
+    }
+    var logFn = typeof log === 'function' ? log : function () {};
+    var fcTxt = forcedCloseInput && forcedCloseInput.value ? forcedCloseInput.value : '—';
+    logFn('Rules forced close at ' + fcTxt + ' — flattening open positions');
+    return true;
+  }
+
   function hasScheduleLimits() {
     return parseScheduleTimeInput(scheduleStartInput) != null || parseScheduleTimeInput(scheduleStopInput) != null;
   }
@@ -739,19 +878,11 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     }
   }
 
-  /** Auto-stop after schedule end if we traded inside today's window (or today-only schedule expired). */
-  function shouldAutoStopForScheduleEnd(nowMs) {
-    if (!rulesEngineRunning || !hasScheduleLimits()) return false;
-    if (isWithinScheduleWindow(nowMs)) return false;
-    if (!isPastScheduleStop(nowMs)) return false;
-    if (isScheduleExpiredDay(nowMs)) return true;
-    return scheduleLastInsideDate === localDateKey(new Date(nowMs));
-  }
-
-  function runScheduleEndStopIfNeeded(nowMs) {
-    if (!shouldAutoStopForScheduleEnd(nowMs)) return false;
+  /** Stop when today-only schedule was for a past day. */
+  function runScheduleExpiredStopIfNeeded(nowMs) {
+    if (!rulesEngineRunning || !isScheduleExpiredDay(nowMs)) return false;
     scheduleLastInsideDate = null;
-    stopRulesEngine('Rules engine stopped (schedule end)');
+    stopRulesEngine('Rules engine stopped (schedule expired — today only)');
     return true;
   }
 
@@ -766,9 +897,9 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
 
   /** @returns {{ key: string, pauseSec?: number, scheduleText?: string }} */
   function getRulesUiMode() {
+    if (!rulesEngineRunning) return { key: 'stopped' };
     var pauseSec = getPauseRemainingSec();
     if (pauseSec > 0) return { key: 'paused', pauseSec: pauseSec };
-    if (!rulesEngineRunning) return { key: 'stopped' };
     if (hasScheduleLimits() && !isWithinScheduleWindow(Date.now())) {
       var now = Date.now();
       var beforeOpen = !isPastScheduleStop(now);
@@ -785,47 +916,79 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     return { key: 'active' };
   }
 
-  function formatRulesSessionBannerText(ui) {
+  function formatRulesSessionDetail(ui) {
     if (ui.key === 'paused') {
-      return 'Paused after loss — resuming in ' + ui.pauseSec + 's · Manual trading off';
+      return 'Resuming in ' + ui.pauseSec + 's after loss';
     }
     if (ui.key === 'armed-schedule') {
-      if (ui.scheduleExpired) {
-        return 'Schedule expired (today only) — stop rules or update schedule · Manual trading off';
-      }
-      if (ui.beforeOpen) {
-        return 'Armed — waiting for schedule (' + ui.scheduleText + ') · Manual trading off';
-      }
-      if (ui.doneForToday) {
-        return 'Schedule ended for today (' + ui.scheduleText + ') · no new deals · Manual trading off';
-      }
-      return 'Armed — next window ' + ui.scheduleText + ' · Manual trading off';
+      if (ui.scheduleExpired) return 'Schedule expired (today only)';
+      if (ui.beforeOpen) return 'Opens ' + ui.scheduleText;
+      if (ui.doneForToday) return 'No new deals until tomorrow';
+      return 'Next window ' + ui.scheduleText;
     }
-    if (ui.key === 'armed-probes') {
-      return 'Armed — no live price stream · Start probing · Manual trading off';
-    }
-    if (ui.key === 'active') {
-      return 'Active — monitoring conditions · Manual trading off';
-    }
+    if (ui.key === 'armed-probes') return 'Start probing for live prices';
+    if (ui.key === 'active') return 'Monitoring conditions';
+    if (canManualTrade()) return 'Manual trading available';
+    if (isIgLoggedInLocal()) return 'Stop rules to trade manually';
+    return 'Connect to IG to trade manually';
+  }
+
+  function formatRulesSessionLabel(ui) {
+    if (ui.key === 'paused') return 'Paused';
+    if (ui.key === 'active') return 'Active';
+    if (ui.key === 'armed-schedule' && ui.scheduleExpired) return 'Expired';
+    if (ui.key === 'armed-schedule' && ui.doneForToday) return 'Done';
+    if (ui.key === 'armed-schedule' && ui.beforeOpen) return 'Waiting';
+    if (ui.key === 'stopped') return 'Stopped';
+    return 'Armed';
+  }
+
+  function rulesSessionValueClass(ui) {
+    if (ui.key === 'paused') return 'trade-session-status-value trade-session-status-value--paused';
+    if (ui.key === 'active') return 'trade-session-status-value trade-session-status-value--active';
+    if (ui.key === 'stopped') return 'trade-session-status-value trade-session-status-value--stopped';
+    if (ui.key === 'armed-schedule' && ui.scheduleExpired) return 'trade-session-status-value trade-session-status-value--expired';
+    if (ui.key === 'armed-schedule' && ui.doneForToday) return 'trade-session-status-value trade-session-status-value--done';
+    if (ui.key === 'armed-schedule' && ui.beforeOpen) return 'trade-session-status-value trade-session-status-value--waiting';
+    if (ui.key === 'armed-schedule') return 'trade-session-status-value trade-session-status-value--armed';
+    return 'trade-session-status-value trade-session-status-value--armed';
+  }
+
+  function probesSessionValueClass(probesUi) {
+    if (probesUi.key === 'running') return 'trade-session-status-value trade-session-status-value--running';
+    if (probesUi.key === 'connecting') return 'trade-session-status-value trade-session-status-value--connecting';
+    if (probesUi.key === 'disconnected') return 'trade-session-status-value trade-session-status-value--disconnected';
+    return 'trade-session-status-value trade-session-status-value--stopped';
+  }
+
+  /** @returns {{ key: string }} */
+  function getProbesUiMode() {
+    var st = state && state.engineStatus ? state.engineStatus : 'ready';
+    if (st === 'running') return { key: 'running' };
+    if (st === 'connecting') return { key: 'connecting' };
+    if (st === 'disconnected') return { key: 'disconnected' };
+    return { key: 'stopped' };
+  }
+
+  function formatProbesSessionLabel(probesUi) {
+    if (probesUi.key === 'running') return 'Running';
+    if (probesUi.key === 'connecting') return 'Connecting';
+    if (probesUi.key === 'disconnected') return 'Disconnected';
+    return 'Stopped';
+  }
+
+  function formatProbesSessionDetail(probesUi) {
+    if (probesUi.key === 'running') return 'Price stream active';
+    if (probesUi.key === 'connecting') return 'Starting stream…';
+    if (probesUi.key === 'disconnected') return 'Reconnect to resume';
     return '';
   }
 
-  function formatHeaderRulesStatus(ui) {
-    if (ui.key === 'paused') return 'Rules: Paused (' + ui.pauseSec + 's)';
-    if (ui.key === 'armed-schedule') {
-      if (ui.scheduleExpired) return 'Rules: Schedule expired (today only)';
-      if (ui.beforeOpen) return 'Rules: Armed (opens ' + ui.scheduleText + ')';
-      if (ui.doneForToday) return 'Rules: Done for today (' + ui.scheduleText + ')';
-      return 'Rules: Armed (next ' + ui.scheduleText + ')';
-    }
-    if (ui.key === 'armed-probes') return 'Rules: Armed (no live prices)';
-    if (ui.key === 'active') return 'Rules: Active';
-    return '';
-  }
-
-  function updateRulesSessionUi() {
+  function updateTradeSessionUi() {
     var ui = getRulesUiMode();
+    var probesUi = getProbesUiMode();
     var sessionActive = ui.key !== 'stopped';
+    var probesActive = probesUi.key === 'running' || probesUi.key === 'connecting';
     if (tradeViewRoot) {
       tradeViewRoot.classList.toggle('trade-rules-session', sessionActive);
       tradeViewRoot.classList.remove('trade-rules-mode-active', 'trade-rules-mode-paused', 'trade-rules-mode-schedule');
@@ -833,39 +996,49 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       if (ui.key === 'paused') tradeViewRoot.classList.add('trade-rules-mode-paused');
       if (ui.key === 'armed-schedule') tradeViewRoot.classList.add('trade-rules-mode-schedule');
     }
-    if (tradeManualSection) tradeManualSection.classList.toggle('trade-manual-locked', sessionActive);
+    if (tradeManualSection) tradeManualSection.classList.toggle('trade-manual-locked', rulesEngineRunning || isPausedOnLoss());
     setProbesSettingsLockedFn(sessionActive);
+    if (sessionStatusHeading) sessionStatusHeading.classList.toggle('hidden', !sessionActive);
     if (sessionBanner) {
-      sessionBanner.classList.toggle('hidden', !sessionActive);
-      sessionBanner.classList.remove('trade-rules-banner-active', 'trade-rules-banner-paused', 'trade-rules-banner-schedule');
-      if (ui.key === 'active') sessionBanner.classList.add('trade-rules-banner-active');
-      if (ui.key === 'paused') sessionBanner.classList.add('trade-rules-banner-paused');
-      if (ui.key === 'armed-schedule') sessionBanner.classList.add('trade-rules-banner-schedule');
-    }
-    if (sessionBannerLabel) {
-      var label = 'Rules';
-      if (ui.key === 'paused') label = 'Paused';
-      else if (ui.key === 'active') label = 'Active';
-      else if (ui.key === 'armed-schedule' && ui.scheduleExpired) label = 'Expired';
-      else if (ui.key === 'armed-schedule' && ui.doneForToday) label = 'Done';
-      else if (ui.key === 'armed-schedule' && ui.beforeOpen) label = 'Waiting';
-      else if (sessionActive) label = 'Armed';
-      sessionBannerLabel.textContent = label;
-    }
-    var bannerText = formatRulesSessionBannerText(ui);
-    if (sessionBannerText) sessionBannerText.textContent = bannerText;
-    if (navRulesBadge) navRulesBadge.classList.toggle('hidden', !sessionActive);
-    if (headerRulesStatus) {
-      var headerText = formatHeaderRulesStatus(ui);
-      if (sessionActive && headerText) {
-        headerRulesStatus.textContent = headerText;
-        headerRulesStatus.title = bannerText;
-        headerRulesStatus.classList.remove('hidden');
+      sessionBanner.classList.remove(
+        'trade-session-banner-idle',
+        'trade-session-banner-probes',
+        'trade-session-banner-live',
+        'trade-rules-banner-active',
+        'trade-rules-banner-paused',
+        'trade-rules-banner-schedule',
+        'trade-rules-banner-armed'
+      );
+      if (sessionActive) {
+        sessionBanner.classList.add('trade-session-banner-live');
+        if (ui.key === 'active') sessionBanner.classList.add('trade-rules-banner-active');
+        else if (ui.key === 'paused') sessionBanner.classList.add('trade-rules-banner-paused');
+        else if (ui.key === 'armed-schedule') sessionBanner.classList.add('trade-rules-banner-schedule');
+        else sessionBanner.classList.add('trade-rules-banner-armed');
+      } else if (probesActive) {
+        sessionBanner.classList.add('trade-session-banner-probes');
       } else {
-        headerRulesStatus.textContent = '';
-        headerRulesStatus.classList.add('hidden');
+        sessionBanner.classList.add('trade-session-banner-idle');
       }
     }
+    if (sessionProbesLabel) {
+      sessionProbesLabel.textContent = formatProbesSessionLabel(probesUi);
+      sessionProbesLabel.className = probesSessionValueClass(probesUi);
+    }
+    var probesDetail = formatProbesSessionDetail(probesUi);
+    if (sessionProbesText) {
+      sessionProbesText.textContent = probesDetail;
+      sessionProbesText.classList.toggle('hidden', !probesDetail);
+    }
+    if (sessionRulesLabel) {
+      sessionRulesLabel.textContent = formatRulesSessionLabel(ui);
+      sessionRulesLabel.className = rulesSessionValueClass(ui);
+    }
+    if (sessionRulesText) {
+      sessionRulesText.textContent = formatRulesSessionDetail(ui);
+      sessionRulesText.className = 'trade-session-status-detail';
+    }
+    if (navRulesBadge) navRulesBadge.classList.toggle('hidden', !sessionActive);
   }
 
   function buildRulesStartModalSummary() {
@@ -884,12 +1057,26 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       } else if (!isPastScheduleStop(Date.now())) {
         lines.push('Before schedule start — no new deals until window opens');
       } else if (scheduleLastInsideDate === localDateKey(new Date())) {
-        lines.push('Schedule ended for today — no new deals (engine will auto-stop)');
+        lines.push('Schedule ended for today — no new deals (engine stays armed)');
       } else {
         lines.push('Outside schedule — armed for next window, no new deals yet');
       }
     } else {
       lines.push('Schedule: no time limit');
+    }
+    if (hasForcedCloseTime()) {
+      lines.push('Forced close: ' + (forcedCloseInput && forcedCloseInput.value ? forcedCloseInput.value : '—') + ' (local)');
+    } else {
+      lines.push('Forced close: none');
+    }
+    var maxDays = getMaxRunDays();
+    if (maxDays > 0 && rulesEngineStartedDate) {
+      var elapsed = calendarDaysSinceStart(rulesEngineStartedDate, Date.now());
+      lines.push('Max run days: ' + maxDays + ' (day ' + elapsed + ' of ' + maxDays + ')');
+    } else if (maxDays > 0) {
+      lines.push('Max run days: ' + maxDays);
+    } else {
+      lines.push('Max run days: unlimited');
     }
     lines.push('Max parallel deals: ' + getMaxParallelDeals());
     lines.push('Manual deal/order: disabled');
@@ -969,9 +1156,19 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   }
 
   function checkScheduleStop() {
-    if (!rulesEngineRunning) return;
+    if (!rulesEngineRunning) {
+      runForcedCloseIfNeeded(Date.now());
+      return;
+    }
     markScheduleInsideIfNeeded(Date.now());
-    runScheduleEndStopIfNeeded(Date.now());
+    runForcedCloseIfNeeded(Date.now());
+    if (runMaxRunDaysStopIfNeeded(Date.now())) return;
+    runScheduleExpiredStopIfNeeded(Date.now());
+  }
+
+  function syncScheduleTimer() {
+    if (rulesEngineRunning || isPausedOnLoss() || hasForcedCloseTime()) startScheduleTimer();
+    else clearScheduleTimer();
   }
 
   function startScheduleTimer() {
@@ -1091,7 +1288,9 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       maxParallelDeals: getMaxParallelDeals(),
       scheduleStartTime: scheduleStartInput && scheduleStartInput.value ? scheduleStartInput.value : '',
       scheduleStopTime: scheduleStopInput && scheduleStopInput.value ? scheduleStopInput.value : '',
-      scheduleRepeatDaily: scheduleRepeatCheck ? scheduleRepeatCheck.checked !== false : true
+      scheduleRepeatDaily: scheduleRepeatCheck ? scheduleRepeatCheck.checked !== false : true,
+      forcedCloseTime: forcedCloseInput && forcedCloseInput.value ? forcedCloseInput.value : '',
+      maxRunDays: getMaxRunDays()
     };
   }
 
@@ -1397,7 +1596,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     var ui = getRulesUiMode();
     updateScheduleDisplay();
 
-    if (ui.key === 'paused') {
+    if (ui.key === 'paused' && rulesEngineRunning) {
       setDealEnabled(false);
       setOrderEnabledFn(false);
       setProbesBackfillEnabledFn(false);
@@ -1412,14 +1611,15 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       if (statusEl) statusEl.textContent = pausedDetail;
       if (statusSellEl) statusSellEl.textContent = pausedDetail;
       updateRuleStatusIndicators();
-      updateRulesSessionUi();
+      updateTradeSessionUi();
       return;
     }
 
     if (!config.running) {
-      setDealEnabled(baseEnabled);
-      setOrderEnabledFn(baseEnabled);
-      setProbesBackfillEnabledFn(baseEnabled);
+      var manualEnabled = canManualTrade();
+      setDealEnabled(manualEnabled);
+      setOrderEnabledFn(manualEnabled);
+      setProbesBackfillEnabledFn(isProbingActive());
       if (dealEngineMsg) dealEngineMsg.classList.add('hidden');
       if (orderEngineMsg) orderEngineMsg.classList.add('hidden');
       var fullStatus = formatCommonEngineStatus();
@@ -1427,10 +1627,18 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
         engineStatusEl.textContent = fullStatus;
         engineStatusEl.className = engineStatusClass(ui);
       }
-      if (statusEl) statusEl.textContent = 'Manual trading enabled';
-      if (statusSellEl) statusSellEl.textContent = 'Manual trading enabled';
+      if (statusEl) {
+        statusEl.textContent = manualEnabled
+          ? 'Manual trading enabled'
+          : (isIgLoggedInLocal() ? 'Stop rules to enable manual trading' : 'Connect to IG to trade manually');
+      }
+      if (statusSellEl) {
+        statusSellEl.textContent = manualEnabled
+          ? 'Manual trading enabled'
+          : (isIgLoggedInLocal() ? 'Stop rules to enable manual trading' : 'Connect to IG to trade manually');
+      }
       updateRuleStatusIndicators();
-      updateRulesSessionUi();
+      updateTradeSessionUi();
       return;
     }
 
@@ -1518,10 +1726,17 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
         lastRulesDealAttemptMs = nowMs;
         armRulesDealPending();
         var placed = false;
+        var dealOpts = {
+          direction: triggeredSet === 'buy' ? 'BUY' : 'SELL',
+          ruleSet: set,
+          fromRules: true
+        };
+        var rulesCloseAt = getNextForcedCloseIso(nowMs);
+        if (rulesCloseAt) dealOpts.closeAt = rulesCloseAt;
         if (confirm) {
-          placed = !!triggerDealConfirmFn({ direction: triggeredSet === 'buy' ? 'BUY' : 'SELL', ruleSet: set, fromRules: true });
+          placed = !!triggerDealConfirmFn(dealOpts);
         } else {
-          placed = !!placeDealDirectFn({ direction: triggeredSet === 'buy' ? 'BUY' : 'SELL', ruleSet: set, fromRules: true });
+          placed = !!placeDealDirectFn(dealOpts);
         }
         if (!placed) clearRulesDealPending();
       }
@@ -1529,7 +1744,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     prevRulesPass = pass;
     prevBlocked = blocked;
     updateRuleStatusIndicators();
-    updateRulesSessionUi();
+    updateTradeSessionUi();
   }
 
   function updateToggleButton() {
@@ -1542,7 +1757,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     setRulesEditable();
     if (state) state.rulesEngineRunning = rulesEngineRunning;
     if (socket && typeof socket.emit === 'function') socket.emit('rules_engine_running', rulesEngineRunning);
-    updateRulesSessionUi();
+    updateTradeSessionUi();
   }
 
   function setRulesEditable() {
@@ -1941,6 +2156,9 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
         tradingRulesScheduleRepeatDaily: config.scheduleRepeatDaily !== false,
         tradingRulesScheduleActiveDate: scheduleActiveDate,
         tradingRulesScheduleLastInsideDate: scheduleLastInsideDate,
+        tradingRulesForcedCloseTime: config.forcedCloseTime || '',
+        tradingRulesMaxRunDays: config.maxRunDays > 0 ? config.maxRunDays : undefined,
+        tradingRulesEngineStartedDate: rulesEngineStartedDate || undefined,
         ...rulesBuyDynamicTpConfigPayload(),
         ...rulesSellDynamicTpConfigPayload()
       };
@@ -1984,6 +2202,13 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       var schedStart = inst.tradingRulesScheduleStartTime != null ? inst.tradingRulesScheduleStartTime : (ui.tradingRulesScheduleStartTime || '');
       var schedStop = inst.tradingRulesScheduleStopTime != null ? inst.tradingRulesScheduleStopTime : (ui.tradingRulesScheduleStopTime || '');
       var schedRepeat = inst.tradingRulesScheduleRepeatDaily != null ? inst.tradingRulesScheduleRepeatDaily !== false : (ui.tradingRulesScheduleRepeatDaily !== false);
+      var forcedClose = inst.tradingRulesForcedCloseTime != null ? inst.tradingRulesForcedCloseTime : (ui.tradingRulesForcedCloseTime || '');
+      var maxRunDays = inst.tradingRulesMaxRunDays != null
+        ? inst.tradingRulesMaxRunDays
+        : (ui.tradingRulesMaxRunDays != null ? ui.tradingRulesMaxRunDays : 0);
+      rulesEngineStartedDate = inst.tradingRulesEngineStartedDate != null
+        ? inst.tradingRulesEngineStartedDate
+        : (ui.tradingRulesEngineStartedDate || null);
       scheduleActiveDate = inst.tradingRulesScheduleActiveDate != null ? inst.tradingRulesScheduleActiveDate : (ui.tradingRulesScheduleActiveDate || null);
       scheduleLastInsideDate = inst.tradingRulesScheduleLastInsideDate != null
         ? inst.tradingRulesScheduleLastInsideDate
@@ -2026,6 +2251,11 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       if (scheduleStartInput) scheduleStartInput.value = schedStart || '';
       if (scheduleStopInput) scheduleStopInput.value = schedStop || '';
       if (scheduleRepeatCheck) scheduleRepeatCheck.checked = schedRepeat;
+      if (forcedCloseInput) forcedCloseInput.value = forcedClose || '';
+      if (maxRunDaysInput) {
+        maxRunDaysInput.value = maxRunDays != null && Number(maxRunDays) > 0 ? String(Math.min(365, Math.floor(Number(maxRunDays)))) : '';
+      }
+      syncRulesForcedCloseToState();
       applyDynamicTpFromConfig(inst, ui);
       for (var gi = 0; gi < RULE_GROUP_ORDER.length; gi++) {
         var gk = RULE_GROUP_ORDER[gi];
@@ -2068,13 +2298,18 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       if (ssl && ruleSets.sell) ssl.value = ruleSets.sell.stopLoss || '';
       if (smode && ruleSets.sell) smode.value = ruleSets.sell.tpSlMode || 'rate';
       applyDynamicTpUiState();
+      if (rulesEngineRunning && !rulesEngineStartedDate) {
+        rulesEngineStartedDate = localDateKey(new Date());
+        saveRules();
+      }
       updateToggleButton();
       if (rulesEngineRunning) {
         markScheduleInsideIfNeeded(Date.now());
-        if (!runScheduleEndStopIfNeeded(Date.now())) startScheduleTimer();
+        if (!runMaxRunDaysStopIfNeeded(Date.now()) && !runScheduleExpiredStopIfNeeded(Date.now())) syncScheduleTimer();
       } else {
-        clearScheduleTimer();
+        syncScheduleTimer();
       }
+      runForcedCloseIfNeeded(Date.now());
       updateEngineState();
       updateRulesEstTpSlDisplay();
     }).catch(function () { updateEngineState(); });
@@ -2157,9 +2392,10 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     var options = opts || {};
     clearPauseOnLossState();
     rulesEngineRunning = true;
+    rulesEngineStartedDate = localDateKey(new Date());
     markScheduleInsideIfNeeded(Date.now());
     if (!isProbingActive() && !options.withProbing && log) log('Rules started without active price stream');
-    startScheduleTimer();
+    syncScheduleTimer();
     updateToggleButton();
     saveRules();
     updateDealEnabled();
@@ -2175,7 +2411,8 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     lastRulesDealAttemptMs = 0;
     rulesEngineRunning = false;
     scheduleLastInsideDate = null;
-    clearScheduleTimer();
+    rulesEngineStartedDate = null;
+    syncScheduleTimer();
     hideRulesStartModal();
     if (state) state.rulesEngineRunning = false;
     updateToggleButton();
@@ -2208,7 +2445,6 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     startRulesEngine();
   }
   if (toggleBtn) toggleBtn.addEventListener('click', doToggleEngine);
-  if (sessionBannerStop) sessionBannerStop.addEventListener('click', stopRulesEngine);
   if (rulesStartModalOk) rulesStartModalOk.addEventListener('click', hideRulesStartModal);
   if (rulesStartModalCancel) {
     rulesStartModalCancel.addEventListener('click', function () {
@@ -2257,7 +2493,12 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   if (stopAfterLossCheck) stopAfterLossCheck.addEventListener('change', saveRules);
   function onScheduleFieldChange() {
     updateScheduleDisplay();
+    syncRulesForcedCloseToState();
+    syncScheduleTimer();
     saveRules();
+    if (typeof window !== 'undefined' && window.dispatchEvent) {
+      window.dispatchEvent(new CustomEvent('tiddeli:rules-schedule-changed'));
+    }
   }
   if (scheduleStartInput) {
     scheduleStartInput.addEventListener('change', onScheduleFieldChange);
@@ -2268,6 +2509,11 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     scheduleStopInput.addEventListener('input', updateScheduleDisplay);
   }
   if (scheduleRepeatCheck) scheduleRepeatCheck.addEventListener('change', onScheduleFieldChange);
+  if (forcedCloseInput) {
+    forcedCloseInput.addEventListener('change', onScheduleFieldChange);
+    forcedCloseInput.addEventListener('input', updateScheduleDisplay);
+  }
+  if (maxRunDaysInput) maxRunDaysInput.addEventListener('change', onScheduleFieldChange);
   var tradingRulesDynamicTp = document.getElementById('tradingRulesDynamicTp');
   if (tradingRulesDynamicTp) {
     tradingRulesDynamicTp.addEventListener('change', function () {
@@ -2347,36 +2593,38 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     var m = state.dealJustPlaced;
     state.dealJustPlaced = null;
     if (m && m.source === 'rules' && m.dealId) {
-      rulesPlacedDealIds[m.dealId] = m.direction === 'SELL' ? 'sell' : 'buy';
+      syncRulesPlacedDealIdToState(m.dealId, m.direction);
     }
   });
 
   function resumeRulesAfterReconnect() {
     if (!rulesEngineRunning && !isPausedOnLoss()) return;
     markScheduleInsideIfNeeded(Date.now());
-    if (runScheduleEndStopIfNeeded(Date.now())) return;
-    startScheduleTimer();
+    if (runMaxRunDaysStopIfNeeded(Date.now())) return;
+    if (runScheduleExpiredStopIfNeeded(Date.now())) return;
+    syncScheduleTimer();
     updateToggleButton();
     if (state) state.rulesEngineRunning = rulesEngineRunning;
     if (socket && typeof socket.emit === 'function') socket.emit('rules_engine_running', rulesEngineRunning);
     updateEngineState();
     updateDealEnabled();
-    updateRulesSessionUi();
+    updateTradeSessionUi();
   }
 
   socket.on('disconnect', function (reason) {
     for (var rid in rulesPlacedDealIds) delete rulesPlacedDealIds[rid];
+    state.rulesPlacedDealIds = Object.create(null);
     // Only stop on explicit client disconnect(); transient drops (ping timeout, transport close, server restart) keep rules armed.
     if (reason === 'io client disconnect') {
       stopRulesEngine('Rules engine stopped (disconnected)');
       return;
     }
     if (rulesEngineRunning || isPausedOnLoss()) {
-      clearScheduleTimer();
+      syncScheduleTimer();
       var logFn = typeof log === 'function' ? log : function () {};
       logFn('Connection lost (' + (reason || 'unknown') + ') — rules stay armed; resume when reconnected');
       updateEngineState();
-      updateRulesSessionUi();
+      updateTradeSessionUi();
     }
   });
 
@@ -2390,7 +2638,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   socket.on('transaction_added', function (tx) {
     if (!tx || tx.type !== 'closed' || !tx.dealId) return;
     var panel = rulesPlacedDealIds[tx.dealId];
-    if (panel != null) delete rulesPlacedDealIds[tx.dealId];
+    if (panel != null) clearRulesPlacedDealIdFromState(tx.dealId);
     if (typeof tx.profitLoss !== 'number' || tx.profitLoss >= 0) return;
     var skipPauseForThisClose = false;
     var logFn = typeof log === 'function' ? log : function () {};
@@ -2409,6 +2657,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   });
   socket.on('working_orders', updateEngineState);
   socket.on('marketDetails', function () {
+    maybeDefaultForcedCloseFromMarket();
     setTimeout(updateScheduleDisplay, 0);
     setTimeout(updateDealEnabled, 0);
     setTimeout(updateRulesEstTpSlDisplay, 0);
@@ -2426,6 +2675,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   loadRules();
   updateScheduleDisplay();
   updateRulesEstTpSlDisplay();
+  updateTradeSessionUi();
   function persistRulesTpSlUi() {
     updateRulesEstTpSlDisplay();
     saveRules();
@@ -2440,6 +2690,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
 
   return {
     stopRulesEngine: stopRulesEngine,
+    updateSessionUi: updateTradeSessionUi,
     setBaseEnabled: function (enabled) {
       baseEnabled = !!enabled;
       updateDealEnabled();

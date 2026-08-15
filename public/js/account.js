@@ -72,7 +72,7 @@ export function initAccount(socket, state, setBaseEnabled, clearDealMessage, onW
     accountInfo.textContent = 'Account: ' + data.accountId + env + ': ' + (data.accountType || '');
     accountInfo.classList.remove('hidden');
     if (mainPlaceholder) mainPlaceholder.textContent = '';
-    var sessionActive = state.engineStatus === 'running';
+    var sessionActive = state.engineStatus === 'running' || state.engineStatus === 'connected';
     setBaseEnabled(sessionActive);
     if (onWorkspaceConnectionChange) onWorkspaceConnectionChange(sessionActive);
     if (sessionActive) socket.emit('getWatchlists');

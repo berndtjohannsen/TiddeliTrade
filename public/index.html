@@ -19,7 +19,6 @@
     </div>
     <div class="flex flex-col gap-1 flex-1 justify-center max-w-md min-w-0">
       <p id="headerInstrument" class="text-sm text-slate-300 truncate" title="Instrument">—</p>
-      <p id="headerRulesStatus" class="text-xs text-amber-400 hidden min-w-0 truncate" title="Automated rules trading session"></p>
       <p id="headerMessage" class="text-xs text-amber-400 hidden min-w-0"></p>
     </div>
     <div class="flex items-center gap-3 flex-1 justify-end flex-wrap">
@@ -341,12 +340,29 @@
     <div class="flex flex-col gap-4 items-stretch w-full">
       <p id="mainPlaceholder" class="text-slate-500 text-sm hidden">Connect to log in.</p>
       <div id="tradeViewRoot" class="trade-layout hidden">
-      <div id="tradeRulesSessionBanner" class="trade-rules-session-banner hidden trade-layout-probes" role="status" aria-live="polite">
-        <div class="flex flex-wrap items-center gap-x-3 gap-y-1 min-w-0 flex-1">
-          <span id="tradeRulesSessionBannerLabel" class="text-xs font-semibold text-amber-300 shrink-0">Rules</span>
-          <span id="tradeRulesSessionBannerText" class="text-xs text-slate-200 min-w-0">—</span>
+      <div id="tradeSessionStatusBanner" class="trade-session-status-banner trade-session-banner-idle trade-layout-probes" role="status" aria-live="polite">
+        <div class="trade-session-status-inner">
+          <div id="tradeSessionStatusHeading" class="trade-session-status-heading hidden">
+            <span class="trade-session-status-dot" aria-hidden="true"></span>
+            <span class="trade-session-status-title">Live session</span>
+          </div>
+          <div class="trade-session-status-grid">
+            <div class="trade-session-status-block">
+              <span class="trade-session-status-block-label">Probes</span>
+              <div class="trade-session-status-block-body">
+                <span id="tradeSessionProbesLabel" class="trade-session-status-value trade-session-status-value--stopped">Stopped</span>
+                <span id="tradeSessionProbesText" class="trade-session-status-detail hidden"></span>
+              </div>
+            </div>
+            <div class="trade-session-status-block trade-session-status-block-rules">
+              <span class="trade-session-status-block-label">Rules</span>
+              <div class="trade-session-status-block-body">
+                <span id="tradeSessionRulesLabel" class="trade-session-status-value trade-session-status-value--stopped">Stopped</span>
+                <span id="tradeSessionRulesText" class="trade-session-status-detail">Manual trading available</span>
+              </div>
+            </div>
+          </div>
         </div>
-        <button type="button" id="tradeRulesSessionBannerStop" class="shrink-0 px-3 py-1 rounded-lg bg-red-700 hover:bg-red-600 text-white text-xs font-medium transition-colors">Stop rules</button>
       </div>
       <section id="probesPanel" class="trade-layout-probes bg-slate-900 border border-slate-800 rounded-xl p-4 w-full min-w-0 hidden">
         <div class="flex items-center gap-2 mb-2 flex-wrap">
@@ -467,12 +483,18 @@
             <span class="text-slate-500 text-xs shrink-0" data-tooltip="Local time window when running engines may open new deals. Leave blank for no limit.">Active from</span>
             <input type="time" id="tradingRulesScheduleStart" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Earliest time to open new deals (local). Blank = no start limit.">
             <span class="text-slate-500 text-xs shrink-0">to</span>
-            <input type="time" id="tradingRulesScheduleStop" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Latest time to open new deals (local). At stop time running engines are stopped. Blank = no stop limit.">
+            <input type="time" id="tradingRulesScheduleStop" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Latest time to open new deals (local). Does not close positions — use Forced close below.">
             <label class="flex items-center gap-1.5 shrink-0">
               <input type="checkbox" id="tradingRulesScheduleRepeatDaily" checked class="rounded bg-slate-800 border-slate-600 text-sky-500 focus:ring-sky-500">
               <span class="text-slate-500 text-xs" data-tooltip="When checked, the time window applies every day. When unchecked, it applies only on the day you save these settings.">Repeat each day</span>
             </label>
             <span id="tradingRulesScheduleStatus" class="text-xs font-mono text-slate-400" data-tooltip="Whether the engine may open new deals right now">—</span>
+          </div>
+          <div class="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-800">
+            <label for="tradingRulesForcedClose" class="text-slate-500 text-xs shrink-0" data-tooltip="Flatten all rules positions at this time (local). Blank = no forced close (positions rely on TP/SL only). Defaults from IG session close when available.">Forced close</label>
+            <input type="time" id="tradingRulesForcedClose" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="App closes rules positions at this time (server scheduled close). Leave blank for continuous / overnight holding.">
+            <label for="tradingRulesMaxRunDays" class="text-slate-500 text-xs shrink-0" data-tooltip="Stop the rules engine after this many calendar days (day 1 = start day). Blank = no limit — engine stays armed until you stop it.">Max run days</label>
+            <input type="number" id="tradingRulesMaxRunDays" min="1" max="365" placeholder="∞" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Calendar days from when you Start rules (inclusive). Blank = unlimited.">
           </div>
         </div>
         <p class="text-xs text-slate-500" data-tooltip="When both enabled: BUY evaluated first, then SELL.">When both enabled: BUY first, then SELL.</p>

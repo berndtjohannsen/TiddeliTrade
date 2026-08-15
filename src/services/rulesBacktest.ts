@@ -72,6 +72,8 @@ export interface BacktestConfig {
   /** HH:MM — schedule window for new opens (see scheduleTimezone). Blank = no limit. */
   scheduleStartTime?: string;
   scheduleStopTime?: string;
+  /** HH:MM (local) — flatten rules positions at this clock time during backtest. */
+  forcedCloseTime?: string;
   scheduleRepeatDaily?: boolean;
   scheduleActiveDate?: string;
   scheduleTimezone?: string;
@@ -623,7 +625,7 @@ export function buildDynamicSlReportMeta(config: BacktestConfig): {
   };
 }
 
-export type ExitReason = 'tp' | 'sl' | 'dsl' | 'rules' | 'endOfPeriod';
+export type ExitReason = 'tp' | 'sl' | 'dsl' | 'rules' | 'forcedClose' | 'endOfPeriod';
 
 /** One rule row as configured when the trade opened (AND with others in the set). */
 export interface BacktestTradeRuleLine {
@@ -653,6 +655,7 @@ export interface CloseReasonCounts {
   sl: number;
   dsl: number;
   rules: number;
+  forcedClose: number;
   endOfPeriod: number;
 }
 
@@ -835,6 +838,7 @@ export function runBacktestPerDay(
     sl: allTrades.filter((t) => t.exitReason === 'sl').length,
     dsl: allTrades.filter((t) => t.exitReason === 'dsl').length,
     rules: allTrades.filter((t) => t.exitReason === 'rules').length,
+    forcedClose: allTrades.filter((t) => t.exitReason === 'forcedClose').length,
     endOfPeriod: allTrades.filter((t) => t.exitReason === 'endOfPeriod').length,
   };
   const dslMeta = buildDynamicSlReportMeta(config);
@@ -957,6 +961,7 @@ export function runBacktestCarryOver(
     sl: allTrades.filter((t) => t.exitReason === 'sl').length,
     dsl: allTrades.filter((t) => t.exitReason === 'dsl').length,
     rules: allTrades.filter((t) => t.exitReason === 'rules').length,
+    forcedClose: allTrades.filter((t) => t.exitReason === 'forcedClose').length,
     endOfPeriod: allTrades.filter((t) => t.exitReason === 'endOfPeriod').length,
   };
   const dslMeta = buildDynamicSlReportMeta(config);
@@ -1357,6 +1362,35 @@ export function runBacktest(
         prevCanOpen = false;
         continue;
       }
+
+      // Forced intraday flatten at configured local clock time (after TP/SL).
+      const fcMin = parseScheduleTimeHHMM(config.forcedCloseTime);
+      if (fcMin != null && openPosition) {
+        const tz = config.scheduleTimezone || 'Europe/London';
+        const nowMin = minutesInTimezone(s.ts, tz);
+        if (nowMin >= fcMin) {
+          const pos = openPosition;
+          const exitPrice = pos.direction === 'BUY' ? s.bid : s.offer;
+          const pnl = pos.direction === 'BUY'
+            ? (s.bid - pos.entryPrice)
+            : (pos.entryPrice - s.offer);
+          recordTrade({
+            direction: pos.direction,
+            entryTs: pos.entryTs,
+            entryPrice: pos.entryPrice,
+            exitTs: s.ts,
+            exitPrice,
+            profitLoss: pnl,
+            exitReason: 'forcedClose',
+            entryRules: er,
+          });
+          openPosition = null;
+          prevRulesPass = false;
+          prevBlocked = false;
+          prevCanOpen = false;
+          continue;
+        }
+      }
     }
 
     // Close when rules stop passing – only if no TP/SL/dynamic SL; only while dealing is open.
@@ -1447,6 +1481,7 @@ export function runBacktest(
     sl: trades.filter((t) => t.exitReason === 'sl').length,
     dsl: trades.filter((t) => t.exitReason === 'dsl').length,
     rules: trades.filter((t) => t.exitReason === 'rules').length,
+    forcedClose: trades.filter((t) => t.exitReason === 'forcedClose').length,
     endOfPeriod: trades.filter((t) => t.exitReason === 'endOfPeriod').length,
   };
   const winningTrades = trades.filter((t) => t.profitLoss > 0).length;
