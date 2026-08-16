@@ -439,12 +439,26 @@ function parseMaxRunDaysInput(input) {
   return Math.min(n, 365);
 }
 
+function parseStopAfterConsecutiveLossesInput(input) {
+  if (!input || !input.value.trim()) return 0;
+  var n = parseInt(input.value, 10);
+  if (isNaN(n) || n < 1) return 0;
+  return Math.min(n, 20);
+}
+
+/** Merge saved streak with legacy stop-after-any-loss flag (treated as 1). */
+function resolveStopAfterConsecutiveLossesFromSaved(explicit, legacyStopAfterAnyLoss) {
+  var n = typeof explicit === 'number' && !isNaN(explicit) ? explicit : 0;
+  if (n >= 1) return Math.min(n, 20);
+  return legacyStopAfterAnyLoss ? 1 : 0;
+}
+
 /** Write engine controls snapshot onto Trade tab DOM. */
 export function applyEngineControlsSnapshot(controls) {
   if (!controls) return;
   var pauseOnLossInput = document.getElementById('tradingRulesPauseOnLoss');
   var maxParallelDealsInput = document.getElementById('tradingRulesMaxParallelDeals');
-  var stopAfterLossCheck = document.getElementById('tradingRulesStopAfterLoss');
+  var stopAfterConsecutiveInput = document.getElementById('tradingRulesStopAfterConsecutiveLosses');
   var scheduleStart = document.getElementById('tradingRulesScheduleStart');
   var scheduleStop = document.getElementById('tradingRulesScheduleStop');
   var scheduleRepeat = document.getElementById('tradingRulesScheduleRepeatDaily');
@@ -456,8 +470,10 @@ export function applyEngineControlsSnapshot(controls) {
     var mp = controls.maxParallelDeals != null ? controls.maxParallelDeals : 1;
     maxParallelDealsInput.value = String(Math.max(1, Math.min(10, mp)));
   }
-  if (stopAfterLossCheck) {
-    stopAfterLossCheck.checked = !!(controls.stopAfterLossBuy || controls.stopAfterLossSell);
+  if (stopAfterConsecutiveInput) {
+    var legacyStop = !!(controls.stopAfterLossBuy || controls.stopAfterLossSell);
+    var streak = resolveStopAfterConsecutiveLossesFromSaved(controls.stopAfterConsecutiveLosses, legacyStop);
+    stopAfterConsecutiveInput.value = streak > 0 ? String(streak) : '';
   }
   if (scheduleStart) scheduleStart.value = controls.scheduleStartTime || '';
   if (scheduleStop) scheduleStop.value = controls.scheduleStopTime || '';
@@ -477,7 +493,7 @@ export function applyEngineControlsSnapshot(controls) {
 function readEngineControlsFromDom() {
   var pauseOnLossInput = document.getElementById('tradingRulesPauseOnLoss');
   var maxParallelDealsInput = document.getElementById('tradingRulesMaxParallelDeals');
-  var stopAfterLossCheck = document.getElementById('tradingRulesStopAfterLoss');
+  var stopAfterConsecutiveInput = document.getElementById('tradingRulesStopAfterConsecutiveLosses');
   var scheduleStart = document.getElementById('tradingRulesScheduleStart');
   var scheduleStop = document.getElementById('tradingRulesScheduleStop');
   var scheduleRepeat = document.getElementById('tradingRulesScheduleRepeatDaily');
@@ -488,11 +504,9 @@ function readEngineControlsFromDom() {
     var n = parseInt(input.value, 10);
     return !isNaN(n) && n >= 0 ? Math.min(n, 86400) : 0;
   }
-  var stopAfter = !!(stopAfterLossCheck && stopAfterLossCheck.checked);
   var pauseSec = parsePause(pauseOnLossInput);
   return {
-    stopAfterLossBuy: stopAfter,
-    stopAfterLossSell: stopAfter,
+    stopAfterConsecutiveLosses: parseStopAfterConsecutiveLossesInput(stopAfterConsecutiveInput),
     pauseOnLossSecondsBuy: pauseSec,
     pauseOnLossSecondsSell: pauseSec,
     maxParallelDeals: parseMaxParallelDealsInput(maxParallelDealsInput),
@@ -592,7 +606,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   var orderEngineMsg = document.getElementById('orderEngineActiveMsg');
   var pauseOnLossInput = document.getElementById('tradingRulesPauseOnLoss');
   var maxParallelDealsInput = document.getElementById('tradingRulesMaxParallelDeals');
-  var stopAfterLossCheck = document.getElementById('tradingRulesStopAfterLoss');
+  var stopAfterConsecutiveInput = document.getElementById('tradingRulesStopAfterConsecutiveLosses');
   var scheduleStartInput = document.getElementById('tradingRulesScheduleStart');
   var scheduleStopInput = document.getElementById('tradingRulesScheduleStop');
   var scheduleRepeatCheck = document.getElementById('tradingRulesScheduleRepeatDaily');
@@ -616,7 +630,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     confirmCheck,
     maxParallelDealsInput,
     pauseOnLossInput,
-    stopAfterLossCheck,
+    stopAfterConsecutiveInput,
     scheduleStartInput,
     scheduleStopInput,
     scheduleRepeatCheck,
@@ -672,6 +686,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   function engineStatusClass(ui) {
     if (!ui) ui = getRulesUiMode();
     if (ui.key === 'paused') return 'text-xs text-sky-400 mb-2 font-medium';
+    if (ui.key === 'halted-loss') return 'text-xs text-amber-400 mb-2 font-medium';
     if (ui.key === 'stopped') return 'text-xs text-slate-500 mb-2';
     if (ui.key === 'active') return 'text-xs text-emerald-400 mb-2 font-medium';
     return 'text-xs text-amber-400 mb-2 font-medium';
@@ -706,6 +721,13 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   var scheduleTimerId = null;
   var pauseOnLossTimerId = null;
   var pausedUntil = null;
+  var consecutiveLossCount = 0;
+  /** Local calendar day (YYYY-MM-DD) for the current loss streak. */
+  var lossStreakDayKey = null;
+  /** Local calendar day when stop/halt was triggered; blocks new deals until next day. */
+  var lossHaltedDayKey = null;
+  /** Last seen local day — detects midnight rollover. */
+  var lossHandlingWatchDayKey = null;
   var draggedRuleWrap = null;
   var getProbeValuesFn = getProbeValues || function () { return null; };
   var triggerDealConfirmFn = typeof triggerDealConfirm === 'function' ? triggerDealConfirm : function () { return false; };
@@ -736,11 +758,51 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     return !isNaN(n) && n >= 0 ? Math.min(n, 86400) : 0;
   }
 
+  function getStopAfterConsecutiveLosses() {
+    return parseStopAfterConsecutiveLossesInput(stopAfterConsecutiveInput);
+  }
+
   function localDateKey(d) {
     var y = d.getFullYear();
     var m = d.getMonth() + 1;
     var day = d.getDate();
     return y + '-' + (m < 10 ? '0' : '') + m + '-' + (day < 10 ? '0' : '') + day;
+  }
+
+  function closeDateKeyFromTx(tx) {
+    var ts = tx && tx.timestamp ? Date.parse(tx.timestamp) : NaN;
+    if (isNaN(ts)) ts = Date.now();
+    return localDateKey(new Date(ts));
+  }
+
+  function syncLossStreakForCloseDay(closeDayKey) {
+    if (lossStreakDayKey !== closeDayKey) {
+      lossStreakDayKey = closeDayKey;
+      consecutiveLossCount = 0;
+    }
+  }
+
+  function isLossHaltedToday(nowMs) {
+    nowMs = nowMs != null ? nowMs : Date.now();
+    return lossHaltedDayKey != null && lossHaltedDayKey === localDateKey(new Date(nowMs));
+  }
+
+  function haltRulesForLossDay(closeDayKey, message) {
+    lossHaltedDayKey = closeDayKey;
+    var logFn = typeof log === 'function' ? log : function () {};
+    logFn(message + ' Resumes next local calendar day.');
+    updateDealEnabled();
+  }
+
+  /** Reset streak at midnight; halt from a prior day clears automatically. */
+  function syncLossHandlingDayRollover(nowMs) {
+    nowMs = nowMs != null ? nowMs : Date.now();
+    var today = localDateKey(new Date(nowMs));
+    if (lossHandlingWatchDayKey != null && lossHandlingWatchDayKey !== today) {
+      consecutiveLossCount = 0;
+      lossStreakDayKey = null;
+    }
+    lossHandlingWatchDayKey = today;
   }
 
   function parseScheduleTimeInput(input) {
@@ -900,6 +962,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     if (!rulesEngineRunning) return { key: 'stopped' };
     var pauseSec = getPauseRemainingSec();
     if (pauseSec > 0) return { key: 'paused', pauseSec: pauseSec };
+    if (isLossHaltedToday()) return { key: 'halted-loss' };
     if (hasScheduleLimits() && !isWithinScheduleWindow(Date.now())) {
       var now = Date.now();
       var beforeOpen = !isPastScheduleStop(now);
@@ -920,6 +983,9 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     if (ui.key === 'paused') {
       return 'Resuming in ' + ui.pauseSec + 's after loss';
     }
+    if (ui.key === 'halted-loss') {
+      return 'Halted for today (loss) — resumes tomorrow';
+    }
     if (ui.key === 'armed-schedule') {
       if (ui.scheduleExpired) return 'Schedule expired (today only)';
       if (ui.beforeOpen) return 'Opens ' + ui.scheduleText;
@@ -935,6 +1001,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
 
   function formatRulesSessionLabel(ui) {
     if (ui.key === 'paused') return 'Paused';
+    if (ui.key === 'halted-loss') return 'Halted';
     if (ui.key === 'active') return 'Active';
     if (ui.key === 'armed-schedule' && ui.scheduleExpired) return 'Expired';
     if (ui.key === 'armed-schedule' && ui.doneForToday) return 'Done';
@@ -945,6 +1012,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
 
   function rulesSessionValueClass(ui) {
     if (ui.key === 'paused') return 'trade-session-status-value trade-session-status-value--paused';
+    if (ui.key === 'halted-loss') return 'trade-session-status-value trade-session-status-value--done';
     if (ui.key === 'active') return 'trade-session-status-value trade-session-status-value--active';
     if (ui.key === 'stopped') return 'trade-session-status-value trade-session-status-value--stopped';
     if (ui.key === 'armed-schedule' && ui.scheduleExpired) return 'trade-session-status-value trade-session-status-value--expired';
@@ -1079,6 +1147,15 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       lines.push('Max run days: unlimited');
     }
     lines.push('Max parallel deals: ' + getMaxParallelDeals());
+    var pauseSec = getPauseOnLossSeconds();
+    if (pauseSec > 0) lines.push('Loss handling: pause ' + pauseSec + 's after each loss');
+    lines.push('Loss handling: per local calendar day (close date)');
+    var streak = getStopAfterConsecutiveLosses();
+    if (streak > 0) {
+      lines.push('Loss handling: halt for today after ' + streak + ' loss' + (streak === 1 ? '' : 'es') + ' in a row');
+    } else if (pauseSec <= 0) {
+      lines.push('Loss handling: none');
+    }
     lines.push('Manual deal/order: disabled');
     return lines.join('\n');
   }
@@ -1156,14 +1233,16 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   }
 
   function checkScheduleStop() {
+    var nowMs = Date.now();
+    syncLossHandlingDayRollover(nowMs);
     if (!rulesEngineRunning) {
-      runForcedCloseIfNeeded(Date.now());
+      runForcedCloseIfNeeded(nowMs);
       return;
     }
-    markScheduleInsideIfNeeded(Date.now());
-    runForcedCloseIfNeeded(Date.now());
-    if (runMaxRunDaysStopIfNeeded(Date.now())) return;
-    runScheduleExpiredStopIfNeeded(Date.now());
+    markScheduleInsideIfNeeded(nowMs);
+    runForcedCloseIfNeeded(nowMs);
+    if (runMaxRunDaysStopIfNeeded(nowMs)) return;
+    runScheduleExpiredStopIfNeeded(nowMs);
   }
 
   function syncScheduleTimer() {
@@ -1570,6 +1649,9 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     if (ui.key === 'paused') {
       return 'Rules trading: Paused (loss) – resuming in ' + ui.pauseSec + 's • manual trading off';
     }
+    if (ui.key === 'halted-loss') {
+      return 'Rules trading: Halted for today (loss) – resumes tomorrow • manual trading off';
+    }
     if (ui.key === 'stopped') {
       return 'Rules trading: Stopped • BUY: off • SELL: off';
     }
@@ -1591,6 +1673,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   }
 
   function updateEngineState() {
+    syncLossHandlingDayRollover(Date.now());
     var config = getConfig();
     var ctx = getContext();
     var ui = getRulesUiMode();
@@ -1610,6 +1693,24 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       var pausedDetail = 'Paused on loss — resuming in ' + ui.pauseSec + 's';
       if (statusEl) statusEl.textContent = pausedDetail;
       if (statusSellEl) statusSellEl.textContent = pausedDetail;
+      updateRuleStatusIndicators();
+      updateTradeSessionUi();
+      return;
+    }
+
+    if (ui.key === 'halted-loss' && rulesEngineRunning) {
+      setDealEnabled(false);
+      setOrderEnabledFn(false);
+      setProbesBackfillEnabledFn(false);
+      if (dealEngineMsg) dealEngineMsg.classList.remove('hidden');
+      if (orderEngineMsg) orderEngineMsg.classList.remove('hidden');
+      if (engineStatusEl) {
+        engineStatusEl.textContent = formatCommonEngineStatus();
+        engineStatusEl.className = engineStatusClass(ui);
+      }
+      var haltedDetail = 'Halted for today (loss) — resumes tomorrow';
+      if (statusEl) statusEl.textContent = haltedDetail;
+      if (statusSellEl) statusSellEl.textContent = haltedDetail;
       updateRuleStatusIndicators();
       updateTradeSessionUi();
       return;
@@ -1663,7 +1764,8 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     var triggeredSet = buyPass ? 'buy' : (sellPass ? 'sell' : null);
     var pass = !!triggeredSet;
     var scheduleBlocked = hasScheduleLimits() && !isWithinScheduleWindow(Date.now());
-    var blocked = hasPositionOrOrder() || scheduleBlocked;
+    var lossHalted = isLossHaltedToday();
+    var blocked = hasPositionOrOrder() || scheduleBlocked || lossHalted;
 
     var activeBuyRules = runBuy ? buyRules : [];
     var activeSellRules = runSell ? sellRules : [];
@@ -1702,6 +1804,9 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
         else if (!isPastScheduleStop(Date.now())) status = 'Conditions met – before schedule window, no new deal';
         else if (scheduleLastInsideDate === localDateKey(new Date())) status = 'Conditions met – schedule ended for today, no new deal';
         else status = 'Conditions met – outside schedule window, no new deal';
+      }
+      else if (pass && lossHalted) {
+        status = 'Conditions met – halted for today (loss), resumes tomorrow';
       }
       else if (pass && !blocked) {
         var willFireThisTick = !prevRulesPass || prevBlocked;
@@ -1780,7 +1885,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       if (commonEl) commonEl.disabled = commonLocked;
     }
     if (pauseOnLossInput) pauseOnLossInput.disabled = commonLocked;
-    if (stopAfterLossCheck) stopAfterLossCheck.disabled = commonLocked;
+    if (stopAfterConsecutiveInput) stopAfterConsecutiveInput.disabled = commonLocked;
     var buyDslIds = ['tradingRulesDynamicTp', 'tradingRulesDynamicTpTrigger', 'tradingRulesDynamicTpLock'];
     var sellDslIds = ['tradingRulesSellDynamicTp', 'tradingRulesSellDynamicTpTrigger', 'tradingRulesSellDynamicTpLock'];
     for (var db = 0; db < buyDslIds.length; db++) {
@@ -2148,9 +2253,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
         tradingRulesPauseOnLossSecondsBuy: getPauseOnLossSeconds(),
         tradingRulesPauseOnLossSecondsSell: getPauseOnLossSeconds(),
         tradingRulesMaxParallelDeals: getMaxParallelDeals(),
-        tradingRulesStopAfterLoss: !!(stopAfterLossCheck && stopAfterLossCheck.checked),
-        tradingRulesStopAfterLossBuy: !!(stopAfterLossCheck && stopAfterLossCheck.checked),
-        tradingRulesStopAfterLossSell: !!(stopAfterLossCheck && stopAfterLossCheck.checked),
+        tradingRulesStopAfterConsecutiveLosses: getStopAfterConsecutiveLosses() || undefined,
         tradingRulesScheduleStartTime: config.scheduleStartTime || '',
         tradingRulesScheduleStopTime: config.scheduleStopTime || '',
         tradingRulesScheduleRepeatDaily: config.scheduleRepeatDaily !== false,
@@ -2196,6 +2299,12 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
         || inst.tradingRulesStopAfterLossSell === true
         || ui.tradingRulesStopAfterLossBuy === true
         || ui.tradingRulesStopAfterLossSell === true;
+      var stopAfterConsecutive = resolveStopAfterConsecutiveLossesFromSaved(
+        inst.tradingRulesStopAfterConsecutiveLosses != null
+          ? inst.tradingRulesStopAfterConsecutiveLosses
+          : (ui.tradingRulesStopAfterConsecutiveLosses != null ? ui.tradingRulesStopAfterConsecutiveLosses : 0),
+        stopAfterLoss
+      );
       var maxParallel = inst.tradingRulesMaxParallelDeals != null
         ? inst.tradingRulesMaxParallelDeals
         : (ui.tradingRulesMaxParallelDeals != null ? ui.tradingRulesMaxParallelDeals : 1);
@@ -2247,7 +2356,9 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
         var mp = maxParallel != null && !isNaN(Number(maxParallel)) ? Number(maxParallel) : 1;
         maxParallelDealsInput.value = String(Math.max(1, Math.min(10, Math.floor(mp))));
       }
-      if (stopAfterLossCheck) stopAfterLossCheck.checked = stopAfterLoss;
+      if (stopAfterConsecutiveInput) {
+        stopAfterConsecutiveInput.value = stopAfterConsecutive > 0 ? String(stopAfterConsecutive) : '';
+      }
       if (scheduleStartInput) scheduleStartInput.value = schedStart || '';
       if (scheduleStopInput) scheduleStopInput.value = schedStop || '';
       if (scheduleRepeatCheck) scheduleRepeatCheck.checked = schedRepeat;
@@ -2388,9 +2499,16 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     }
   }
 
+  function clearConsecutiveLossCount() {
+    consecutiveLossCount = 0;
+    lossStreakDayKey = localDateKey(new Date());
+  }
+
   function startRulesEngine(opts) {
     var options = opts || {};
     clearPauseOnLossState();
+    clearConsecutiveLossCount();
+    syncLossHandlingDayRollover(Date.now());
     rulesEngineRunning = true;
     rulesEngineStartedDate = localDateKey(new Date());
     markScheduleInsideIfNeeded(Date.now());
@@ -2407,6 +2525,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       if (!reason) return;
     }
     clearPauseOnLossState();
+    clearConsecutiveLossCount();
     clearRulesDealPending();
     lastRulesDealAttemptMs = 0;
     rulesEngineRunning = false;
@@ -2490,7 +2609,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     });
   }
   if (pauseOnLossInput) pauseOnLossInput.addEventListener('change', saveRules);
-  if (stopAfterLossCheck) stopAfterLossCheck.addEventListener('change', saveRules);
+  if (stopAfterConsecutiveInput) stopAfterConsecutiveInput.addEventListener('change', saveRules);
   function onScheduleFieldChange() {
     updateScheduleDisplay();
     syncRulesForcedCloseToState();
@@ -2639,12 +2758,24 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     if (!tx || tx.type !== 'closed' || !tx.dealId) return;
     var panel = rulesPlacedDealIds[tx.dealId];
     if (panel != null) clearRulesPlacedDealIdFromState(tx.dealId);
+    var closeDayKey = closeDateKeyFromTx(tx);
+    if (panel != null && typeof tx.profitLoss === 'number' && tx.profitLoss >= 0) {
+      syncLossStreakForCloseDay(closeDayKey);
+      consecutiveLossCount = 0;
+      return;
+    }
     if (typeof tx.profitLoss !== 'number' || tx.profitLoss >= 0) return;
+    syncLossStreakForCloseDay(closeDayKey);
     var skipPauseForThisClose = false;
-    var logFn = typeof log === 'function' ? log : function () {};
-    if (panel != null && stopAfterLossCheck && stopAfterLossCheck.checked && rulesEngineRunning) {
-      skipPauseForThisClose = true;
-      stopRulesEngine('Rules engine stopped (Stop after loss).');
+    if (panel != null && rulesEngineRunning) {
+      var streakLimit = getStopAfterConsecutiveLosses();
+      if (streakLimit > 0) {
+        consecutiveLossCount += 1;
+        if (consecutiveLossCount >= streakLimit) {
+          skipPauseForThisClose = true;
+          haltRulesForLossDay(closeDayKey, 'Rules halted for today (' + consecutiveLossCount + ' consecutive losses).');
+        }
+      }
     }
     if (!skipPauseForThisClose) {
       var seconds = getPauseOnLossSeconds();

@@ -28,6 +28,8 @@ socket.on('log', log);
 socket.on('marketDetails', function (data) {
   state.defaultCloseAt = data && data.defaultCloseAt ? data.defaultCloseAt : null;
   state.is24_7Market = !!(data && data.is24_7);
+  state.dealingWeekLondon = data && data.dealingWeekLondon ? data.dealingWeekLondon : null;
+  state.dealingScheduleSource = data && data.dealingScheduleSource ? data.dealingScheduleSource : null;
   state.clientSentiment = data && data.clientSentiment ? data.clientSentiment : null;
   var el = document.getElementById('marketClosesAt');
   if (el) {
@@ -95,6 +97,9 @@ initStatus(socket, log, {
   }
 });
 probesApi.setOnProbeUpdate(function () { tradingRulesApi.updateDealEnabled(); });
+socket.on('marketDetails', function () {
+  if (probesApi.refreshProbes) probesApi.refreshProbes();
+});
 var transactionLogApi = initTransactionLog(socket);
 
 function setTradePanelsVisible(visible) {

@@ -5,6 +5,14 @@ import { formatTimeWithTz } from './utils.js';
 import { getRulesForBacktest } from './tradingRules.js';
 import { initBacktestProfiles } from './backtestProfiles.js';
 
+function resolveStopAfterConsecutiveLossesFromEngineControls(engineControls) {
+  if (!engineControls) return undefined;
+  var n = engineControls.stopAfterConsecutiveLosses;
+  if (typeof n === 'number' && !isNaN(n) && n >= 1) return Math.min(n, 20);
+  if (engineControls.stopAfterLossBuy || engineControls.stopAfterLossSell) return 1;
+  return undefined;
+}
+
 export function initTestRules(socket, state, log, profileOpts) {
   var recordBtn = document.getElementById('testRulesRecordBtn');
   var logBody = document.getElementById('testRulesLogBody');
@@ -1842,6 +1850,9 @@ export function initTestRules(socket, state, log, profileOpts) {
     if (r.nonConsecutiveWarning) {
       rows.push(['Note', r.nonConsecutiveWarning]);
     }
+    if (r.probeCoverageWarnings && r.probeCoverageWarnings.length > 0) {
+      rows.push(['Probe coverage', r.probeCoverageWarnings.join(' ')]);
+    }
     if (r.dynamicStopLossNote) {
       rows.push(['Dynamic SL', r.dynamicStopLossNote]);
     } else if (usedDynamicSl || r.dynamicStopLossApplied) {
@@ -2074,6 +2085,11 @@ export function initTestRules(socket, state, log, profileOpts) {
       if (data.sampleQuality && data.sampleQuality.hasWarnings && data.sampleQuality.summaryWarnings) {
         for (var qi = 0; qi < data.sampleQuality.summaryWarnings.length; qi++) {
           appendLog('Recording: ' + data.sampleQuality.summaryWarnings[qi]);
+        }
+      }
+      if (report.probeCoverageWarnings && report.probeCoverageWarnings.length > 0) {
+        for (var pi = 0; pi < report.probeCoverageWarnings.length; pi++) {
+          appendLog('Probes: ' + report.probeCoverageWarnings[pi]);
         }
       }
       if (data.usedDynamicSl || (data.report && data.report.dynamicStopLossApplied)) {
@@ -2407,8 +2423,7 @@ export function initTestRules(socket, state, log, profileOpts) {
         contractSize: contractSize,
         dynamicSlBuy: cfg.dynamicSlBuy,
         dynamicSlSell: cfg.dynamicSlSell,
-        stopAfterLossBuy: cfg.engineControls && cfg.engineControls.stopAfterLossBuy,
-        stopAfterLossSell: cfg.engineControls && cfg.engineControls.stopAfterLossSell,
+        stopAfterConsecutiveLosses: resolveStopAfterConsecutiveLossesFromEngineControls(cfg.engineControls),
         pauseOnLossSecondsBuy: cfg.engineControls && cfg.engineControls.pauseOnLossSecondsBuy,
         pauseOnLossSecondsSell: cfg.engineControls && cfg.engineControls.pauseOnLossSecondsSell,
         maxParallelDeals: cfg.engineControls && cfg.engineControls.maxParallelDeals,

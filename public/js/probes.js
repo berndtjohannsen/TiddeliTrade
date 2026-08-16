@@ -1,28 +1,17 @@
 /**
  * Probes – price statistics at configurable short/medium/long periods.
- * Weekend exclusion for Mon–Fri markets only; 24/7 markets (from API marketTimes) use all data.
+ * In-market samples only (TRADEABLE live, IG dealing schedule for backfill/backtest).
  */
+import {
+  analyzeProbeCoverage,
+  formatProbeSampleCount,
+  isProbeEligibleSample,
+  probeFilterOptsFromState
+} from './probeSamples.js';
+
 const MAX_SAMPLES = 100000;
 const SAMPLE_INTERVAL_MS = 1000;
 var lastSampleTs = 0;
-
-/** Returns true if sample should be included. For 24/7 (state.is24_7Market): always. For Mon–Fri: exclude weekends. */
-function isTradingSample(ts, now, is24_7) {
-  if (is24_7) return true;
-  var ageMs = now - (ts || 0);
-  if (ageMs < 2 * 60 * 60 * 1000) return true; /* live data: always include */
-  var d = new Date(ts).getUTCDay();
-  return d >= 1 && d <= 5;
-}
-
-/** Extend window (ms) backwards over weekends. No extension for 24/7 markets. */
-function extendWindowOverWeekends(periodMs, is24_7) {
-  if (is24_7) return periodMs;
-  if (periodMs < 24 * 60 * 60 * 1000) return periodMs;
-  var days = Math.ceil(periodMs / (24 * 60 * 60 * 1000));
-  var weekendDays = Math.floor((days + 5) / 7) * 2;
-  return periodMs + weekendDays * 24 * 60 * 60 * 1000;
-}
 
 export function initProbes(socket, state, log) {
   state.priceHistory = state.priceHistory || [];
@@ -31,6 +20,7 @@ export function initProbes(socket, state, log) {
   var longInput = document.getElementById('probeLongPeriod');
   var periodInputsWrap = document.getElementById('probesPeriodInputs');
   var sessionStopBtn = document.getElementById('probesSessionStopBtn');
+  var coverageWarningEl = document.getElementById('probesCoverageWarning');
   var STOP_PROBE_TOOLTIP_DEFAULT = 'Stop price stream and probes';
   var STOP_PROBE_TOOLTIP_LOCKED = 'Stop rules trading first — probing cannot be stopped while rules are active';
   var shortTrend = document.getElementById('probeShortTrend');
@@ -134,23 +124,45 @@ export function initProbes(socket, state, log) {
     else el.classList.add('text-slate-500');
   }
 
+  function setSampleCountEl(el, row) {
+    if (!el || !row) return;
+    el.textContent = formatProbeSampleCount(row.count, row.expectedCount, row.coveragePct);
+    el.classList.toggle('text-amber-400', row.lowCoverage);
+    el.classList.toggle('text-slate-500', !row.lowCoverage);
+    var tip = 'In-market samples in lookback (excludes closed/out-of-hours ticks)';
+    if (row.expectedCount > 0) {
+      tip += '. Expected ~' + row.expectedCount + ' at 1 Hz during open hours';
+      if (row.coveragePct != null) tip += ' (' + row.coveragePct + '% coverage)';
+    }
+    if (row.lowCoverage) tip += '. Sparse — probe stats may be unreliable.';
+    el.title = tip;
+  }
+
   function render() {
     var history = state.priceHistory || [];
     var now = Date.now();
-    var is24_7 = !!state.is24_7Market;
+    var filterOpts = probeFilterOptsFromState(state);
     var p = getPeriods();
     var shortMs = p.short * 60 * 1000;
     var mediumMs = p.medium * 60 * 1000;
     var longMs = p.long * 60 * 1000;
-    var shortWindow = extendWindowOverWeekends(shortMs, is24_7);
-    var mediumWindow = extendWindowOverWeekends(mediumMs, is24_7);
-    var longWindow = extendWindowOverWeekends(longMs, is24_7);
-    var shortSamp = history.filter(function (s) { return s.ts >= now - shortWindow && isTradingSample(s.ts, now, is24_7); });
-    var mediumSamp = history.filter(function (s) { return s.ts >= now - mediumWindow && isTradingSample(s.ts, now, is24_7); });
-    var longSamp = history.filter(function (s) { return s.ts >= now - longWindow && isTradingSample(s.ts, now, is24_7); });
+    var shortSamp = history.filter(function (s) {
+      return s.ts >= now - shortMs && s.ts <= now && isProbeEligibleSample(s, filterOpts);
+    });
+    var mediumSamp = history.filter(function (s) {
+      return s.ts >= now - mediumMs && s.ts <= now && isProbeEligibleSample(s, filterOpts);
+    });
+    var longSamp = history.filter(function (s) {
+      return s.ts >= now - longMs && s.ts <= now && isProbeEligibleSample(s, filterOpts);
+    });
     var shortStats = computeStats(shortSamp);
     var mediumStats = computeStats(mediumSamp);
     var longStats = computeStats(longSamp);
+    var coverage = analyzeProbeCoverage(history, now, p.short, p.medium, p.long, filterOpts);
+    var coverageByProbe = {};
+    for (var ci = 0; ci < coverage.rows.length; ci++) {
+      coverageByProbe[coverage.rows[ci].probe] = coverage.rows[ci];
+    }
     var shortTrendVal = computeTrend(shortSamp);
     var mediumTrendVal = computeTrend(mediumSamp);
     var longTrendVal = computeTrend(longSamp);
@@ -167,25 +179,29 @@ export function initProbes(socket, state, log) {
     if (shortRange) shortRange.textContent = formatVal(shortStats.range);
     if (shortStdDev) shortStdDev.textContent = formatVal(shortStats.stdDev);
     if (shortSpread) shortSpread.textContent = formatVal(shortStats.avgSpread);
-    if (shortSamples) shortSamples.textContent = shortStats.count;
+    setSampleCountEl(shortSamples, coverageByProbe.short);
     if (mediumMin) mediumMin.textContent = formatVal(mediumStats.min);
     if (mediumMax) mediumMax.textContent = formatVal(mediumStats.max);
     if (mediumAvg) mediumAvg.textContent = formatVal(mediumStats.avg);
     if (mediumRange) mediumRange.textContent = formatVal(mediumStats.range);
     if (mediumStdDev) mediumStdDev.textContent = formatVal(mediumStats.stdDev);
     if (mediumSpread) mediumSpread.textContent = formatVal(mediumStats.avgSpread);
-    if (mediumSamples) mediumSamples.textContent = mediumStats.count;
+    setSampleCountEl(mediumSamples, coverageByProbe.medium);
     if (longMin) longMin.textContent = formatVal(longStats.min);
     if (longMax) longMax.textContent = formatVal(longStats.max);
     if (longAvg) longAvg.textContent = formatVal(longStats.avg);
     if (longRange) longRange.textContent = formatVal(longStats.range);
     if (longStdDev) longStdDev.textContent = formatVal(longStats.stdDev);
     if (longSpread) longSpread.textContent = formatVal(longStats.avgSpread);
-    if (longSamples) {
-      longSamples.textContent = longStats.count;
-      longSamples.title = (longStats.count > 0 && longStats.count === mediumStats.count)
-        ? 'Same data as Medium – run Backfill for 24h history'
-        : 'Number of price updates in the period';
+    setSampleCountEl(longSamples, coverageByProbe.long);
+    if (coverageWarningEl) {
+      if (coverage.hasWarnings) {
+        coverageWarningEl.textContent = coverage.warnings.join(' ');
+        coverageWarningEl.classList.remove('hidden');
+      } else {
+        coverageWarningEl.textContent = '';
+        coverageWarningEl.classList.add('hidden');
+      }
     }
     var shortT = shortTrendVal || lastShortTrend;
     var mediumT = mediumTrendVal || lastMediumTrend;
@@ -198,7 +214,7 @@ export function initProbes(socket, state, log) {
     if (onProbeUpdateCallback) onProbeUpdateCallback();
   }
 
-  function addSample(bid, offer, spread) {
+  function addSample(bid, offer, spread, marketState) {
     var bidNum = typeof bid === 'number' ? bid : parseFloat(bid);
     var offerNum = typeof offer === 'number' ? offer : parseFloat(offer);
     var spreadNum = typeof spread === 'number' ? spread : parseFloat(spread);
@@ -208,7 +224,12 @@ export function initProbes(socket, state, log) {
     lastSampleTs = now;
     var mid = (bidNum + offerNum) / 2;
     if (isNaN(spreadNum)) spreadNum = 0;
-    state.priceHistory.push({ ts: now, mid: mid, spread: spreadNum });
+    state.priceHistory.push({
+      ts: now,
+      mid: mid,
+      spread: spreadNum,
+      marketState: marketState != null ? String(marketState) : null
+    });
     if (state.priceHistory.length > MAX_SAMPLES) {
       state.priceHistory = state.priceHistory.slice(-MAX_SAMPLES);
     }
@@ -223,7 +244,7 @@ export function initProbes(socket, state, log) {
       render();
       return;
     }
-    addSample(data.bid, data.offer, data.spread);
+    addSample(data.bid, data.offer, data.spread, data.marketState);
   });
 
   socket.on('probes_backfill', function (payload) {
@@ -351,6 +372,7 @@ export function initProbes(socket, state, log) {
     setOnProbeUpdate: function (fn) {
       onProbeUpdateCallback = fn;
     },
-    getProbeValues: function () { return lastProbeValues; }
+    getProbeValues: function () { return lastProbeValues; },
+    refreshProbes: function () { render(); }
   };
 }

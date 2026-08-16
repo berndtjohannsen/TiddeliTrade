@@ -842,7 +842,7 @@ export function registerSocketHandlers(io: Server): void {
     try {
       const [market, trading, dayStartBuy, clientSentiment] = await Promise.all([
         getMarketDetails(session, epic),
-        getMarketTradingInfo(session, epic).catch(() => ({ defaultCloseAt: null, is24_7: false })),
+        getMarketTradingInfo(session, epic).catch(() => ({ defaultCloseAt: null, is24_7: false, marketTimes: undefined })),
         fetchDayStartWithLog(session, epic),
         getClientSentiment(session, epic, {
           debugLog: (msg) => io.emit('log', msg),
@@ -855,6 +855,19 @@ export function registerSocketHandlers(io: Server): void {
         io.emit('log', 'Sentiment: ' + clientSentiment.longPct + '% long / ' + clientSentiment.shortPct + '% short');
       }
       lastClientSentimentByEpic[epic] = clientSentiment ?? null;
+      let dealingWeekLondon: ReturnType<typeof dealingWeekFromMarketTimes> = null;
+      let dealingScheduleSource: 'ig' | 'default' | null = null;
+      if (trading.is24_7) {
+        dealingWeekLondon = null;
+      } else {
+        dealingWeekLondon = dealingWeekFromMarketTimes(trading.marketTimes, trading.is24_7);
+        if (dealingWeekLondon) {
+          dealingScheduleSource = 'ig';
+        } else {
+          dealingWeekLondon = defaultDealingWeekLondonMonFri();
+          dealingScheduleSource = 'default';
+        }
+      }
       const payload = {
         epic,
         minDealSize: market?.minDealSize ?? null,
@@ -867,6 +880,8 @@ export function registerSocketHandlers(io: Server): void {
         exchangeRateToAccount: market?.exchangeRateToAccount ?? null,
         defaultCloseAt: trading.defaultCloseAt,
         is24_7: trading.is24_7,
+        dealingWeekLondon,
+        dealingScheduleSource,
         dayStartBuy: dayStartBuy ?? null,
         clientSentiment: clientSentiment ?? null,
       };
@@ -888,6 +903,8 @@ export function registerSocketHandlers(io: Server): void {
         exchangeRateToAccount: null,
         defaultCloseAt: null,
         is24_7: false,
+        dealingWeekLondon: defaultDealingWeekLondonMonFri(),
+        dealingScheduleSource: 'default' as const,
         dayStartBuy: null,
         clientSentiment: null,
       };
@@ -1344,6 +1361,7 @@ export function registerSocketHandlers(io: Server): void {
       dynamicSlSell?: DynamicStopLossOverride;
       stopAfterLossBuy?: boolean;
       stopAfterLossSell?: boolean;
+      stopAfterConsecutiveLosses?: number;
       pauseOnLossSecondsBuy?: number;
       pauseOnLossSecondsSell?: number;
       scheduleStartTime?: string;
@@ -1415,14 +1433,24 @@ export function registerSocketHandlers(io: Server): void {
         if (typeof pick !== 'number' || isNaN(pick) || pick < 0) return 0;
         return Math.min(pick, 86400);
       };
-      const resolveStopAfterLoss = (side: 'buy' | 'sell'): boolean => {
-        const instSide = side === 'buy' ? inst?.tradingRulesStopAfterLossBuy : inst?.tradingRulesStopAfterLossSell;
-        const paramSide = side === 'buy' ? params.stopAfterLossBuy : params.stopAfterLossSell;
-        if (typeof paramSide === 'boolean') return paramSide;
-        if (inst?.tradingRulesStopAfterLoss === true) return true;
-        if (instSide === true) return true;
-        const uiSide = side === 'buy' ? ui?.tradingRulesStopAfterLossBuy : ui?.tradingRulesStopAfterLossSell;
-        return uiSide === true;
+      const resolveStopAfterConsecutiveLosses = (): number => {
+        let streak = 0;
+        if (typeof params.stopAfterConsecutiveLosses === 'number') {
+          streak = Math.min(Math.max(params.stopAfterConsecutiveLosses, 0), 20);
+        } else {
+          const pick = inst?.tradingRulesStopAfterConsecutiveLosses ?? ui?.tradingRulesStopAfterConsecutiveLosses;
+          if (typeof pick === 'number' && !isNaN(pick) && pick >= 1) streak = Math.min(pick, 20);
+        }
+        if (streak >= 1) return streak;
+        const legacyStopAfterAnyLoss =
+          params.stopAfterLossBuy === true
+          || params.stopAfterLossSell === true
+          || inst?.tradingRulesStopAfterLoss === true
+          || inst?.tradingRulesStopAfterLossBuy === true
+          || inst?.tradingRulesStopAfterLossSell === true
+          || ui?.tradingRulesStopAfterLossBuy === true
+          || ui?.tradingRulesStopAfterLossSell === true;
+        return legacyStopAfterAnyLoss ? 1 : 0;
       };
       const resolveScheduleString = (
         paramVal: string | undefined,
@@ -1452,8 +1480,7 @@ export function registerSocketHandlers(io: Server): void {
         dealingWeekLondon,
         dynamicStopLossBuy: resolveDynamicStopLossForBacktest(epic, cfg, 'rules-buy', params.dynamicSlBuy),
         dynamicStopLossSell: resolveDynamicStopLossForBacktest(epic, cfg, 'rules-sell', params.dynamicSlSell),
-        stopAfterLossBuy: resolveStopAfterLoss('buy'),
-        stopAfterLossSell: resolveStopAfterLoss('sell'),
+        stopAfterConsecutiveLosses: resolveStopAfterConsecutiveLosses(),
         scheduleStartTime: resolveScheduleString(
           params.scheduleStartTime,
           inst?.tradingRulesScheduleStartTime,

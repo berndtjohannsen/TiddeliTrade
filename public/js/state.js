@@ -25,8 +25,12 @@ export const state = {
   recentlyDeletedDealIds: {},
   savedWatchlistId: '',
   savedEpic: '',
-  /** From marketDetails: true if market trades 24/7 (crypto). Used by probes for weekend exclusion. */
+  /** From marketDetails: true if market trades 24/7 (crypto). Probes include all samples when true. */
   is24_7Market: false,
+  /** From marketDetails: IG dealing week (Sun=0 … Sat=6, Europe/London minutes). Used for probe filter when not 24/7. */
+  dealingWeekLondon: null,
+  /** From marketDetails: 'ig' | 'default' — how dealingWeekLondon was resolved. */
+  dealingScheduleSource: null,
   /** From marketDetails: today/next market close time (ISO string). Used for engine auto-stop. */
   defaultCloseAt: null,
   /** From marketDetails: IG client sentiment { longPct, shortPct } or null. */

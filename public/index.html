@@ -236,6 +236,31 @@
       </div>
     </div>
   </div>
+  <div id="backtestProfileImportModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-xl w-full max-w-md mx-4 overflow-hidden">
+      <div class="px-4 py-3 border-b border-slate-700">
+        <h2 class="text-lg font-semibold text-slate-200">Import profile</h2>
+      </div>
+      <div class="p-4 space-y-3 text-sm">
+        <ul id="backtestProfileImportPreview" class="text-slate-400 text-xs space-y-0.5 font-mono list-none"></ul>
+        <ul id="backtestProfileImportWarnings" class="hidden text-amber-400/90 text-xs space-y-0.5 list-disc pl-4"></ul>
+        <div>
+          <label for="backtestProfileImportName" class="block text-slate-500 text-xs mb-1">Profile name</label>
+          <input type="text" id="backtestProfileImportName" class="w-full rounded-lg bg-slate-800 border border-slate-600 text-slate-200 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-violet-500/50" autocomplete="off" spellcheck="false">
+        </div>
+        <label class="flex items-center gap-2 text-slate-400 text-xs cursor-pointer">
+          <input type="checkbox" id="backtestProfileImportActivate" checked class="rounded bg-slate-800 border-slate-600 text-violet-500 focus:ring-violet-500">
+          Activate on Trade after import
+        </label>
+        <p id="backtestProfileImportError" class="hidden text-red-400 text-xs"></p>
+      </div>
+      <div class="px-4 py-3 border-t border-slate-700 flex gap-2 justify-end">
+        <button type="button" id="backtestProfileImportCancel" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium transition-colors">Cancel</button>
+        <button type="button" id="backtestProfileImportOk" class="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium transition-colors">Import</button>
+      </div>
+    </div>
+  </div>
+  <input type="file" id="backtestProfileImportFile" accept=".json,application/json,.tiddeli-profile.json" class="hidden">
   <div id="backtestProfileRenameModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
     <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-xl w-full max-w-sm mx-4 overflow-hidden">
       <div class="px-4 py-3 border-b border-slate-700">
@@ -392,6 +417,7 @@
             <span class="text-slate-500 text-xs">Now</span>
           </div>
         </div>
+        <p id="probesCoverageWarning" class="text-xs text-amber-400 mb-2 hidden" data-tooltip="Probe lookbacks with too few in-market samples — stats may be unreliable"></p>
         <div class="grid grid-cols-4 gap-2 text-xs">
           <div class="rounded-lg bg-slate-800 border border-slate-700 p-2 space-y-0.5">
             <dl class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
@@ -459,6 +485,7 @@
           <select id="tradeProfileSelect" class="flex-1 min-w-[140px] max-w-xs px-2 py-1 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-xs focus:ring-2 focus:ring-emerald-500 outline-none disabled:opacity-50" title="Trade profile">
             <option value="">Custom (manual edits)</option>
           </select>
+          <button type="button" id="tradeProfileExportBtn" class="shrink-0 px-2 py-1 rounded-lg bg-slate-800 border border-slate-700 text-slate-400 hover:text-slate-200 text-xs disabled:opacity-40 disabled:cursor-not-allowed" disabled data-tooltip="Download the selected profile as a file (no recordings)">Export</button>
         </div>
         <p id="tradingRulesLockedMsg" class="text-xs text-amber-400 mb-2 hidden" data-tooltip="Engine settings cannot be edited while BUY or SELL engine is running">Settings locked – stop all engines to edit</p>
         <div class="space-y-2 text-sm mb-2">
@@ -470,14 +497,19 @@
             <label for="tradingRulesMaxParallelDeals" class="text-slate-500 shrink-0" data-tooltip="Maximum open positions plus working orders before the rules engine stops placing new deals">Max parallel deals</label>
             <input type="number" id="tradingRulesMaxParallelDeals" min="1" max="10" value="1" placeholder="1" class="w-16 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="1 = one deal at a time (default). Increase to allow stacking up to 10 open positions/orders from rules.">
           </div>
-          <div class="flex flex-wrap items-center gap-2">
-            <label for="tradingRulesPauseOnLoss" class="text-slate-500 shrink-0" data-tooltip="When a rules deal closes with a loss, pause both engines for this many seconds before resuming">Pause on loss</label>
-            <input type="number" id="tradingRulesPauseOnLoss" min="0" max="86400" value="0" placeholder="0" class="w-20 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Seconds to pause after a losing rules trade. 0 = disabled.">
-            <span class="text-slate-500 text-xs shrink-0">sec</span>
-          </div>
-          <div class="flex items-center gap-2">
-            <input type="checkbox" id="tradingRulesStopAfterLoss" class="rounded bg-slate-800 border-slate-600 text-sky-500 focus:ring-sky-500">
-            <label for="tradingRulesStopAfterLoss" class="text-slate-500 text-xs" data-tooltip="When any rules deal closes at a loss, stop the whole engine (BUY and SELL) until you start it again. Does not affect manual deals.">Stop after loss</label>
+          <div class="rounded-lg border border-slate-800 bg-slate-950/50 p-2.5 space-y-2">
+            <p class="text-xs text-slate-500 font-medium" data-tooltip="How the rules engine reacts when a rules deal closes at a loss">Loss handling</p>
+            <p class="text-[11px] text-slate-600 leading-snug" data-tooltip="Streak counter and stop/halt use the close date (local calendar day). Everything resets at midnight; a halt resumes the next day without restarting rules.">Per local calendar day (by close date). Resets at midnight.</p>
+            <div class="flex flex-wrap items-center gap-2">
+              <label for="tradingRulesPauseOnLoss" class="text-slate-500 shrink-0 text-xs" data-tooltip="After each losing close, pause new deals for this many seconds (cooldown). Streak counting uses close date.">Pause after each loss</label>
+              <input type="number" id="tradingRulesPauseOnLoss" min="0" max="86400" value="0" placeholder="0" class="w-20 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Seconds to pause after a losing rules trade. 0 = disabled.">
+              <span class="text-slate-500 text-xs shrink-0">sec</span>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <label for="tradingRulesStopAfterConsecutiveLosses" class="text-slate-500 shrink-0 text-xs" data-tooltip="Halt new deals for the rest of the local calendar day after this many losing closes in a row on the same day (wins reset the counter). 0 = off, 1 = first loss.">Stop after</label>
+              <input type="number" id="tradingRulesStopAfterConsecutiveLosses" min="0" max="20" value="0" placeholder="0" class="w-14 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Consecutive losing rules trades on the same local day before halting for the rest of that day. 0 = disabled, 1 = halt after first loss.">
+              <span class="text-slate-500 text-xs shrink-0">losses in a row</span>
+            </div>
           </div>
           <div class="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-800">
             <span class="text-slate-500 text-xs shrink-0" data-tooltip="Local time window when running engines may open new deals. Leave blank for no limit.">Active from</span>
@@ -845,9 +877,11 @@
           <div class="flex flex-wrap items-center gap-2">
             <span class="text-slate-400 font-medium">Saved profiles</span>
             <button type="button" id="backtestProfileSaveBtn" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-[11px]" data-tooltip="Save current Trade profile (rules, probes, engine controls) and analyse options">Save current…</button>
+            <button type="button" id="backtestProfileExportBtn" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-[11px]" data-tooltip="Download the active profile as a file (.tiddeli-profile.json) — no recordings">Export…</button>
+            <button type="button" id="backtestProfileImportBtn" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-[11px]" data-tooltip="Import a profile file (.tiddeli-profile.json) onto this instrument — recordings are not included">Import…</button>
             <span id="backtestProfileActiveLabel" class="text-violet-400/90 text-[11px] hidden"></span>
           </div>
-          <p class="text-[10px] text-slate-500">Click a profile to activate it on Trade (same rules used for backtest).</p>
+          <p class="text-[10px] text-slate-500">Click a profile to activate it on Trade. Use Export… for the active profile, or ↓ on a row.</p>
           <ul id="backtestProfilesList" class="flex flex-col gap-0.5 max-h-36 overflow-y-auto text-[11px]"></ul>
         </div>
         <div class="flex flex-col gap-1">

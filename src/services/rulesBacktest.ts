@@ -6,6 +6,30 @@
 import type { RecordedSample } from './priceRecorder';
 import type { DynamicStopLossSettings } from './dynamicStopLoss';
 import {
+  type DealingDaySlotLondon,
+  type DealingWeekLondon,
+  DealingOpenLookup,
+  defaultDealingWeekLondonMonFri,
+  dealingWeekFromMarketTimes,
+  isDealingOpenLondon,
+  londonMinutesSinceMidnight,
+  londonWeekdayIndexSun0,
+  parseIgTimeToMinutes,
+} from './dealingSchedule';
+import {
+  analyzeProbeCoverage,
+  precomputeProbeEligibleFlags,
+  type ProbeSampleFilterOpts,
+} from './probeSamples';
+
+export type { DealingDaySlotLondon, DealingWeekLondon };
+export {
+  defaultDealingWeekLondonMonFri,
+  dealingWeekFromMarketTimes,
+  isDealingOpenLondon,
+  parseIgTimeToMinutes,
+};
+import {
   advanceTrailingStopSim,
   createTrailingStopSimState,
   isTrailingStopHit,
@@ -66,9 +90,8 @@ export interface BacktestConfig {
    * Omitted/null = no dealing-hours gate.
    */
   dealingWeekLondon?: DealingWeekLondon | null;
-  /** When true, a losing close stops that direction until the next backtest day/block. */
-  stopAfterLossBuy?: boolean;
-  stopAfterLossSell?: boolean;
+  /** Halt for the rest of the close day after this many consecutive losing closes. 0 = disabled, 1 = first loss. */
+  stopAfterConsecutiveLosses?: number;
   /** HH:MM — schedule window for new opens (see scheduleTimezone). Blank = no limit. */
   scheduleStartTime?: string;
   scheduleStopTime?: string;
@@ -82,103 +105,6 @@ export interface BacktestConfig {
   pauseOnLossSecondsSell?: number;
   /** IG daily open mid by Europe/London YYYY-MM-DD (from pre-fetch). Falls back to first sample mid per London day. */
   dayStartByLondonDate?: Record<string, number>;
-}
-
-/** Minutes since London local midnight (IG openTime/closeTime). */
-export interface DealingDaySlotLondon {
-  openMin: number;
-  closeMin: number;
-}
-
-/** Sunday=0 … Saturday=6 in Europe/London. */
-export type DealingWeekLondon = (DealingDaySlotLondon | null)[];
-
-/**
- * When IG does not return parsable marketTimes but the instrument is not 24/7, use typical UK cash-index
- * hours (Mon–Fri 08:00–21:59 London, Sat/Sun closed). Safer than allowing all times.
- */
-export function defaultDealingWeekLondonMonFri(): DealingWeekLondon {
-  const slot: DealingDaySlotLondon = { openMin: 8 * 60, closeMin: 21 * 60 + 59 };
-  return [null, slot, slot, slot, slot, slot, null];
-}
-
-const LONDON_WD: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-const londonWeekdayFmt = new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/London', weekday: 'short' });
-const londonHmFmt = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false });
-
-function londonWeekdayIndexSun0(ts: number): number {
-  const part = londonWeekdayFmt.formatToParts(new Date(ts)).find((p) => p.type === 'weekday')?.value;
-  return LONDON_WD[part ?? ''] ?? 0;
-}
-
-function londonMinutesSinceMidnight(ts: number): number {
-  const parts = londonHmFmt.formatToParts(new Date(ts));
-  const h = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0', 10);
-  const m = parseInt(parts.find((p) => p.type === 'minute')?.value ?? '0', 10);
-  return (Number.isNaN(h) ? 0 : h) * 60 + (Number.isNaN(m) ? 0 : m);
-}
-
-/** Parse IG openTime/closeTime (e.g. "22:02", "1970-01-01T21:59:00") to minutes since midnight. */
-export function parseIgTimeToMinutes(raw: string | undefined | null): number | null {
-  if (raw == null) return null;
-  const s = String(raw).trim();
-  if (!s) return null;
-  const iso = s.match(/T(\d{1,2}):(\d{2})(?::\d{2})?/);
-  if (iso) {
-    const h = parseInt(iso[1], 10);
-    const min = parseInt(iso[2], 10);
-    if (!isNaN(h) && h >= 0 && h <= 23 && !isNaN(min) && min >= 0 && min <= 59) return h * 60 + min;
-  }
-  const parts = s.split(/[:\s]+/).filter(Boolean);
-  const h = parseInt(parts[0] ?? '', 10);
-  const min = parseInt(parts[1] ?? '0', 10);
-  if (isNaN(h) || h < 0 || h > 23) return null;
-  const mm = isNaN(min) || min < 0 || min > 59 ? 0 : min;
-  return h * 60 + mm;
-}
-
-function normalizeMarketTimesToSevenSlots(
-  marketTimes: Array<{ openTime?: string; closeTime?: string }>
-): (typeof marketTimes[0] | null)[] {
-  const out: (typeof marketTimes[0] | null)[] = [null, null, null, null, null, null, null];
-  if (marketTimes.length === 7) {
-    // IG lists Monday first; layout here is Sunday=0 … Saturday=6.
-    for (let i = 0; i < 7; i++) out[(i + 1) % 7] = marketTimes[i] ?? null;
-    return out;
-  }
-  if (marketTimes.length === 5) {
-    for (let i = 0; i < 5; i++) out[i + 1] = marketTimes[i] ?? null;
-    return out;
-  }
-  for (let i = 0; i < Math.min(marketTimes.length, 7); i++) out[i] = marketTimes[i] ?? null;
-  return out;
-}
-
-function slotFromMarketTimeRow(row: { openTime?: string; closeTime?: string } | null): DealingDaySlotLondon | null {
-  if (!row) return null;
-  const openMin = parseIgTimeToMinutes(row.openTime);
-  const closeMin = parseIgTimeToMinutes(row.closeTime);
-  if (openMin == null || closeMin == null) return null;
-  return { openMin, closeMin };
-}
-
-/**
- * Build weekly dealing slots from IG marketTimes (Europe/London wall times, same as computeDefaultCloseAt in ig.ts).
- * Returns null when 24/7 or no usable schedule (caller treats as no gate).
- */
-export function dealingWeekFromMarketTimes(
-  marketTimes: Array<{ openTime?: string; closeTime?: string }> | undefined | null,
-  is24_7: boolean
-): DealingWeekLondon | null {
-  if (is24_7) return null;
-  if (!marketTimes || marketTimes.length === 0) return null;
-  const normalized = normalizeMarketTimesToSevenSlots(marketTimes);
-  const week: DealingWeekLondon = [];
-  for (let i = 0; i < 7; i++) {
-    week.push(slotFromMarketTimeRow(normalized[i] ?? null));
-  }
-  const anyOpen = week.some((s) => s != null);
-  return anyOpen ? week : null;
 }
 
 function parseScheduleTimeHHMM(s: string | undefined | null): number | null {
@@ -248,22 +174,6 @@ export function isAutoStopBlockingOpens(ts: number, config: BacktestConfig): boo
   return isScheduleBlockingOpens(ts, config);
 }
 
-/** True if IG-style dealing is open at ts (London calendar day + overnight sessions). */
-export function isDealingOpenLondon(ts: number, week: DealingWeekLondon | null | undefined): boolean {
-  if (!week || week.length !== 7) return true;
-  const wd = londonWeekdayIndexSun0(ts);
-  const min = londonMinutesSinceMidnight(ts);
-  const prevWd = (wd + 6) % 7;
-  const prev = week[prevWd];
-  // Overnight from prevWd ends on the *next* calendar day only (wd === prevWd+1 mod 7)
-  if (prev && prev.openMin > prev.closeMin && wd === (prevWd + 1) % 7 && min <= prev.closeMin) return true;
-  const today = week[wd];
-  if (!today) return false;
-  const { openMin, closeMin } = today;
-  if (openMin < closeMin) return min >= openMin && min <= closeMin;
-  return min >= openMin || min <= closeMin;
-}
-
 interface ProbeStats {
   min: number | null;
   max: number | null;
@@ -284,22 +194,6 @@ interface Context {
   currentTrend: string | null;
   sentiment: string | null;
   probes: { short: ProbeStats; medium: ProbeStats; long: ProbeStats };
-}
-
-function isTradingSample(ts: number, now: number, is24_7: boolean): boolean {
-  if (is24_7) return true;
-  const ageMs = now - ts;
-  if (ageMs < 2 * 60 * 60 * 1000) return true;
-  const d = new Date(ts).getUTCDay();
-  return d >= 1 && d <= 5;
-}
-
-function extendWindowOverWeekends(periodMs: number, is24_7: boolean): number {
-  if (is24_7) return periodMs;
-  if (periodMs < 24 * 60 * 60 * 1000) return periodMs;
-  const days = Math.ceil(periodMs / (24 * 60 * 60 * 1000));
-  const weekendDays = Math.floor((days + 5) / 7) * 2;
-  return periodMs + weekendDays * 24 * 60 * 60 * 1000;
 }
 
 function computeStats(samples: { mid: number; spread: number }[]): Omit<ProbeStats, 'trendDir' | 'trendPct'> {
@@ -340,57 +234,65 @@ function computeTrend(samples: { mid: number }[]): { dir: string; pct: number } 
   return { dir, pct };
 }
 
-/** Binary search: first index where arr[i].ts >= minTs. Assumes arr sorted by ts. */
-function findWindowStart(arr: { ts: number }[], minTs: number): number {
-  if (arr.length === 0 || arr[arr.length - 1].ts < minTs) return arr.length;
-  let lo = 0;
-  let hi = arr.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (arr[mid].ts < minTs) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
+function probeFilterOpts(config: BacktestConfig): ProbeSampleFilterOpts {
+  return { is24_7: config.is24_7, dealingWeekLondon: config.dealingWeekLondon };
 }
 
-function getProbes(
-  priceHistory: { ts: number; mid: number; spread: number }[],
-  nowTs: number,
-  config: BacktestConfig
-): { short: ProbeStats; medium: ProbeStats; long: ProbeStats } {
-  const shortMs = config.probeShortMinutes * 60 * 1000;
-  const mediumMs = config.probeMediumMinutes * 60 * 1000;
-  const longMs = config.probeLongMinutes * 60 * 1000;
-  const shortWindow = extendWindowOverWeekends(shortMs, config.is24_7);
-  const mediumWindow = extendWindowOverWeekends(mediumMs, config.is24_7);
-  const longWindow = extendWindowOverWeekends(longMs, config.is24_7);
+type BacktestPriceSample = {
+  ts: number;
+  mid: number;
+  spread: number;
+  probeEligible: boolean;
+  marketState?: string | null;
+};
 
-  const startIdx = findWindowStart(priceHistory, nowTs - longWindow);
-  const shortSamp: { mid: number; spread: number }[] = [];
-  const mediumSamp: { mid: number; spread: number }[] = [];
-  const longSamp: { mid: number; spread: number }[] = [];
-  for (let j = startIdx; j < priceHistory.length; j++) {
-    const s = priceHistory[j];
-    if (s.ts >= nowTs - longWindow && isTradingSample(s.ts, nowTs, config.is24_7)) {
-      const e = { mid: s.mid, spread: s.spread };
-      longSamp.push(e);
-      if (s.ts >= nowTs - mediumWindow) mediumSamp.push(e);
-      if (s.ts >= nowTs - shortWindow) shortSamp.push(e);
-    }
+type ProbeWindowEntry = { mid: number; spread: number; ts: number };
+
+/** Incremental short/medium/long probe windows — O(1) per tick instead of rescanning history. */
+class ProbeWindowTracker {
+  private readonly shortMs: number;
+  private readonly mediumMs: number;
+  private readonly longMs: number;
+  private readonly short: ProbeWindowEntry[] = [];
+  private readonly medium: ProbeWindowEntry[] = [];
+  private readonly long: ProbeWindowEntry[] = [];
+
+  constructor(config: BacktestConfig) {
+    this.shortMs = config.probeShortMinutes * 60 * 1000;
+    this.mediumMs = config.probeMediumMinutes * 60 * 1000;
+    this.longMs = config.probeLongMinutes * 60 * 1000;
   }
 
-  const shortStats = computeStats(shortSamp);
-  const mediumStats = computeStats(mediumSamp);
-  const longStats = computeStats(longSamp);
-  const shortTrend = computeTrend(shortSamp);
-  const mediumTrend = computeTrend(mediumSamp);
-  const longTrend = computeTrend(longSamp);
+  advance(sample: BacktestPriceSample, nowTs: number): { short: ProbeStats; medium: ProbeStats; long: ProbeStats } {
+    if (sample.probeEligible) {
+      const entry: ProbeWindowEntry = { mid: sample.mid, spread: sample.spread, ts: sample.ts };
+      this.long.push(entry);
+      if (sample.ts >= nowTs - this.mediumMs) this.medium.push(entry);
+      if (sample.ts >= nowTs - this.shortMs) this.short.push(entry);
+    }
+    this.trimBefore(this.long, nowTs - this.longMs);
+    this.trimBefore(this.medium, nowTs - this.mediumMs);
+    this.trimBefore(this.short, nowTs - this.shortMs);
+    return this.snapshot();
+  }
 
-  return {
-    short: { ...shortStats, trendDir: shortTrend?.dir ?? null, trendPct: shortTrend?.pct ?? null },
-    medium: { ...mediumStats, trendDir: mediumTrend?.dir ?? null, trendPct: mediumTrend?.pct ?? null },
-    long: { ...longStats, trendDir: longTrend?.dir ?? null, trendPct: longTrend?.pct ?? null },
-  };
+  private trimBefore(arr: ProbeWindowEntry[], minTs: number): void {
+    while (arr.length > 0 && arr[0].ts < minTs) arr.shift();
+  }
+
+  private snapshot(): { short: ProbeStats; medium: ProbeStats; long: ProbeStats } {
+    const shortStats = computeStats(this.short);
+    const mediumStats = computeStats(this.medium);
+    const longStats = computeStats(this.long);
+    const shortTrend = computeTrend(this.short);
+    const mediumTrend = computeTrend(this.medium);
+    const longTrend = computeTrend(this.long);
+    return {
+      short: { ...shortStats, trendDir: shortTrend?.dir ?? null, trendPct: shortTrend?.pct ?? null },
+      medium: { ...mediumStats, trendDir: mediumTrend?.dir ?? null, trendPct: mediumTrend?.pct ?? null },
+      long: { ...longStats, trendDir: longTrend?.dir ?? null, trendPct: longTrend?.pct ?? null },
+    };
+  }
 }
 
 function sentimentFromLongShort(longPct: number | null, shortPct: number | null): string | null {
@@ -699,6 +601,8 @@ export interface BacktestReport {
   dynamicStopLossNote?: string;
   /** One row per calendar day included in this analysis run. */
   analysedDays?: BacktestDaySummary[];
+  /** Warnings when in-market probe windows are empty or sparse (end-of-run snapshot). */
+  probeCoverageWarnings?: string[];
 }
 
 /** One row in the sole-blocker report (legacy rules or a BUY/SELL rule set). */
@@ -843,7 +747,7 @@ export function runBacktestPerDay(
   };
   const dslMeta = buildDynamicSlReportMeta(config);
 
-  return {
+  const report: BacktestReport = {
     trades: allTrades,
     totalGainLoss,
     totalGainLossPounds,
@@ -862,6 +766,8 @@ export function runBacktestPerDay(
     ruleBlockerCounts: ruleBlockerCounts.length > 0 ? ruleBlockerCounts : undefined,
     ...dslMeta,
   };
+  const probeHistory = buildProbeHistoryForCoverage(samples, config);
+  return attachProbeCoverageWarnings(report, probeHistory, config, endTs);
 }
 
 /** Group sorted days into consecutive blocks. Returns array of day arrays. */
@@ -966,7 +872,7 @@ export function runBacktestCarryOver(
   };
   const dslMeta = buildDynamicSlReportMeta(config);
 
-  return {
+  const report: BacktestReport = {
     trades: allTrades,
     totalGainLoss,
     totalGainLossPounds,
@@ -986,6 +892,8 @@ export function runBacktestCarryOver(
     ruleBlockerCounts: ruleBlockerCounts.length > 0 ? ruleBlockerCounts : undefined,
     ...dslMeta,
   };
+  const probeHistory = buildProbeHistoryForCoverage(samples, config);
+  return attachProbeCoverageWarnings(report, probeHistory, config, endTs);
 }
 
 /** Async version: yields between days to prevent event-loop blocking and allow GC. */
@@ -1020,7 +928,7 @@ export function runBacktestPerDayAsync(
       const totalGainLossPounds = denom > 0 ? totalGainLoss * denom : undefined;
       const avgTradePnlPounds = (denom > 0 && allTrades.length > 0) ? (totalGainLoss / allTrades.length) * denom : undefined;
       const ruleBlockerCounts = mergeBlockerAggregateMap(blockerAggregate);
-      done({
+      const asyncReport: BacktestReport = {
         trades: allTrades,
         totalGainLoss,
         totalGainLossPounds,
@@ -1036,7 +944,9 @@ export function runBacktestPerDayAsync(
         openAtEnd: openAtEndTotal,
         daysAnalysed: days.length,
         ruleBlockerCounts: ruleBlockerCounts.length > 0 ? ruleBlockerCounts : undefined,
-      });
+      };
+      const probeHistory = buildProbeHistoryForCoverage(samples, config);
+      done(attachProbeCoverageWarnings(asyncReport, probeHistory, config, endTs));
       return;
     }
     const day = days[index];
@@ -1067,9 +977,33 @@ export function runBacktestPerDayAsync(
   processDay(0);
 }
 
-function getLongWindowMs(config: BacktestConfig): number {
-  const longMs = config.probeLongMinutes * 60 * 1000;
-  return extendWindowOverWeekends(longMs, config.is24_7);
+function buildProbeHistoryForCoverage(samples: RecordedSample[], config: BacktestConfig): BacktestPriceSample[] {
+  const flags = precomputeProbeEligibleFlags(samples, probeFilterOpts(config));
+  return samples.map((s, i) => ({
+    ts: s.ts,
+    mid: (s.bid + s.offer) / 2,
+    spread: s.spread,
+    probeEligible: flags[i],
+  }));
+}
+
+function attachProbeCoverageWarnings(
+  report: BacktestReport,
+  priceHistory: BacktestPriceSample[],
+  config: BacktestConfig,
+  atTs: number
+): BacktestReport {
+  if (priceHistory.length === 0) return report;
+  const coverage = analyzeProbeCoverage(
+    priceHistory,
+    atTs,
+    config.probeShortMinutes,
+    config.probeMediumMinutes,
+    config.probeLongMinutes,
+    probeFilterOpts(config)
+  );
+  if (coverage.hasWarnings) report.probeCoverageWarnings = coverage.warnings;
+  return report;
 }
 
 export interface BacktestProgressSnapshot {
@@ -1108,8 +1042,10 @@ export function runBacktest(
   onProgress?: BacktestProgressCallback
 ): BacktestReport {
   const trades: BacktestTrade[] = [];
-  const priceHistory: { ts: number; mid: number; spread: number }[] = [];
-  const longWindowMs = getLongWindowMs(config);
+  const filterOpts = probeFilterOpts(config);
+  const probeEligibleFlags = precomputeProbeEligibleFlags(samples, filterOpts);
+  const canOpenLookup = new DealingOpenLookup(config.dealingWeekLondon ?? null);
+  const probeTracker = new ProbeWindowTracker(config);
   type Position = {
     direction: 'BUY' | 'SELL';
     entryTs: number;
@@ -1122,6 +1058,16 @@ export function runBacktest(
   let buyStoppedAfterLoss = false;
   let sellStoppedAfterLoss = false;
   let pausedUntilTs: number | null = null;
+  let consecutiveLossCount = 0;
+  let lossStreakDayKey: string | null = null;
+  let prevLoopDayKey: string | null = null;
+
+  function resetLossHandlingForNewDay(): void {
+    buyStoppedAfterLoss = false;
+    sellStoppedAfterLoss = false;
+    consecutiveLossCount = 0;
+    lossStreakDayKey = null;
+  }
 
   function isEnginePaused(ts: number): boolean {
     return pausedUntilTs != null && ts < pausedUntilTs;
@@ -1135,12 +1081,23 @@ export function runBacktest(
   }
 
   function onTradeClosed(trade: BacktestTrade): void {
-    if (trade.profitLoss >= 0) return;
-    const stopAfterLoss = config.stopAfterLossBuy || config.stopAfterLossSell;
-    if (stopAfterLoss) {
-      buyStoppedAfterLoss = true;
-      sellStoppedAfterLoss = true;
+    const closeDayKey = getDayKey(trade.exitTs);
+    if (trade.profitLoss >= 0) {
+      if (lossStreakDayKey === closeDayKey) consecutiveLossCount = 0;
       return;
+    }
+    if (lossStreakDayKey !== closeDayKey) {
+      lossStreakDayKey = closeDayKey;
+      consecutiveLossCount = 0;
+    }
+    const streakLimit = config.stopAfterConsecutiveLosses ?? 0;
+    if (streakLimit > 0) {
+      consecutiveLossCount += 1;
+      if (consecutiveLossCount >= streakLimit) {
+        buyStoppedAfterLoss = true;
+        sellStoppedAfterLoss = true;
+        return;
+      }
     }
     const buySec = config.pauseOnLossSecondsBuy ?? 0;
     const sellSec = config.pauseOnLossSecondsSell ?? 0;
@@ -1192,20 +1149,20 @@ export function runBacktest(
       onProgress(done, totalSamples, snapshotTradeStats(trades));
     }
     const s = samples[i];
-    const mid = (s.bid + s.offer) / 2;
-    priceHistory.push({ ts: s.ts, mid, spread: s.spread });
-
-    const trimFrom = findWindowStart(priceHistory, s.ts - longWindowMs);
-    if (trimFrom > 0) {
-      priceHistory.splice(0, trimFrom);
+    const loopDayKey = getDayKey(s.ts);
+    if (prevLoopDayKey !== null && loopDayKey !== prevLoopDayKey) {
+      resetLossHandlingForNewDay();
     }
+    prevLoopDayKey = loopDayKey;
+    const mid = (s.bid + s.offer) / 2;
+    const sample: BacktestPriceSample = { ts: s.ts, mid, spread: s.spread, probeEligible: probeEligibleFlags[i] };
 
     const currentTrend = prevMid != null
       ? (mid > prevMid ? 'up' : mid < prevMid ? 'down' : 'flat')
       : null;
     prevMid = mid;
 
-    const probes = getProbes(priceHistory, s.ts, config);
+    const probes = probeTracker.advance(sample, s.ts);
     const sentiment = sentimentFromLongShort(s.longPct, s.shortPct);
     const dayStart = resolveDayStartForTs(s.ts, config, fallbackDayStartByLondon);
 
@@ -1237,7 +1194,7 @@ export function runBacktest(
     }
     const blocked = openPosition !== null;
     const pass = rulesPass;
-    const dealingOpen = isDealingOpenLondon(s.ts, config.dealingWeekLondon ?? null);
+    const dealingOpen = canOpenLookup.isOpen(s.ts);
     const canOpenHere = pass && dealingOpen && !isScheduleBlockingOpens(s.ts, config) && !isEnginePaused(s.ts);
 
     // Sole blockers: flat, no deal would open; exactly one rule fails (per legacy list or per BUY/SELL set).
@@ -1503,7 +1460,7 @@ export function runBacktest(
   ruleBlockerCounts.sort((a, b) => b.soleBlockerCount - a.soleBlockerCount);
   const dslMeta = buildDynamicSlReportMeta(config);
 
-  return {
+  const report: BacktestReport = {
     trades,
     totalGainLoss,
     totalGainLossPounds,
@@ -1521,4 +1478,6 @@ export function runBacktest(
     ruleBlockerCounts: ruleBlockerCounts.length > 0 ? ruleBlockerCounts : undefined,
     ...dslMeta,
   };
+  const lastTs = samples.length > 0 ? samples[samples.length - 1].ts : 0;
+  return attachProbeCoverageWarnings(report, buildProbeHistoryForCoverage(samples, config), config, lastTs);
 }

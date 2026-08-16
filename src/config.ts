@@ -103,6 +103,8 @@ export interface UserConfig {
     tradingRulesStopAfterLossSell?: boolean;
     /** Unified stop-after-loss (both directions). */
     tradingRulesStopAfterLoss?: boolean;
+    /** Stop rules engine after N consecutive losing closes. 0 = disabled. */
+    tradingRulesStopAfterConsecutiveLosses?: number;
     /** Seconds to pause engine after a losing trade. 0 = disabled. */
     tradingRulesPauseOnLossSeconds?: number;
     tradingRulesPauseOnLossSecondsBuy?: number;
@@ -194,6 +196,8 @@ export interface InstrumentSettings {
   tradingRulesStopAfterLoss?: boolean;
   tradingRulesStopAfterLossBuy?: boolean;
   tradingRulesStopAfterLossSell?: boolean;
+  /** Stop rules engine after N consecutive losing closes. 0 = disabled. */
+  tradingRulesStopAfterConsecutiveLosses?: number;
   tradingRulesScheduleStartTime?: string;
   tradingRulesScheduleStopTime?: string;
   tradingRulesScheduleRepeatDaily?: boolean;
@@ -216,8 +220,12 @@ export interface InstrumentSettings {
 
 /** Named snapshot of strategy + analyse options + last simulated result. */
 export interface BacktestProfileEngineControls {
+  /** @deprecated Legacy — migrated to stopAfterConsecutiveLosses = 1 on load. */
   stopAfterLossBuy?: boolean;
+  /** @deprecated Legacy — migrated to stopAfterConsecutiveLosses = 1 on load. */
   stopAfterLossSell?: boolean;
+  /** Halt for the rest of the close day after N consecutive losses. 0 = off, 1 = first loss. */
+  stopAfterConsecutiveLosses?: number;
   pauseOnLossSecondsBuy?: number;
   pauseOnLossSecondsSell?: number;
   maxParallelDeals?: number;
@@ -242,6 +250,24 @@ export interface BacktestProfile {
   lastResult?: BacktestProfileLastResult;
   /** Full backtest report as shown in Research (trades, quality, blockers, summary). */
   savedReport?: BacktestProfileSavedReport;
+  /** Extra keys from newer app versions are preserved on import/export. */
+  [key: string]: unknown;
+}
+
+/** Personal profile file envelope (.tiddeli-profile.json). */
+export interface TradeProfileExportEnvelope {
+  format: 'tiddeli-trade-profile';
+  formatVersion: number;
+  shareLevel: 'personal' | string;
+  exportedAt: string | null;
+  appVersion: string | null;
+  source: {
+    epic: string | null;
+    instrumentName: string | null;
+    timezone: string | null;
+    exportedProfileId: string | null;
+  };
+  profile: Omit<BacktestProfile, 'id' | 'savedAt'> & Partial<Pick<BacktestProfile, 'id' | 'savedAt'>>;
 }
 
 export interface BacktestProfileStrategy {

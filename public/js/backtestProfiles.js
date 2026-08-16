@@ -8,6 +8,16 @@ import {
   setActiveBacktestEngineControlsOverride,
   setActiveBacktestStrategyOverride
 } from './tradingRules.js';
+import {
+  buildPersonalExportEnvelope,
+  defaultImportedProfileName,
+  describeImportPreview,
+  downloadProfileExport,
+  parseProfileImportText,
+  prepareImportedProfile,
+  profileExportFilename,
+  readProfileImportFile
+} from './tradeProfileTransfer.js';
 
 function newProfileId() {
   return 'bp-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
@@ -206,7 +216,19 @@ export function initBacktestProfiles(opts) {
 
   var listEl = document.getElementById('backtestProfilesList');
   var tradeSelectEl = document.getElementById('tradeProfileSelect');
+  var tradeExportBtn = document.getElementById('tradeProfileExportBtn');
   var saveBtn = document.getElementById('backtestProfileSaveBtn');
+  var exportToolbarBtn = document.getElementById('backtestProfileExportBtn');
+  var importBtn = document.getElementById('backtestProfileImportBtn');
+  var importFileInput = document.getElementById('backtestProfileImportFile');
+  var importModal = document.getElementById('backtestProfileImportModal');
+  var importPreviewEl = document.getElementById('backtestProfileImportPreview');
+  var importWarningsEl = document.getElementById('backtestProfileImportWarnings');
+  var importNameInput = document.getElementById('backtestProfileImportName');
+  var importActivateCheck = document.getElementById('backtestProfileImportActivate');
+  var importErrorEl = document.getElementById('backtestProfileImportError');
+  var importCancelBtn = document.getElementById('backtestProfileImportCancel');
+  var importOkBtn = document.getElementById('backtestProfileImportOk');
   var activeLabel = document.getElementById('backtestProfileActiveLabel');
   var saveModal = document.getElementById('backtestProfileSaveModal');
   var saveIntro = document.getElementById('backtestProfileSaveIntro');
@@ -230,6 +252,94 @@ export function initBacktestProfiles(opts) {
   var pendingSavePayload = null;
   var pendingDelete = null;
   var pendingRename = null;
+  var pendingImport = null;
+  var cachedAppVersion = null;
+
+  function resolveAppVersion() {
+    if (cachedAppVersion) return Promise.resolve(cachedAppVersion);
+    return fetch('/api/version')
+      .then(function (r) {
+        return r.json();
+      })
+      .then(function (data) {
+        cachedAppVersion = (data && data.version) || '0.0.0';
+        return cachedAppVersion;
+      })
+      .catch(function () {
+        cachedAppVersion = '0.0.0';
+        return cachedAppVersion;
+      });
+  }
+
+  function getInstrumentNameForEpic(epic) {
+    var epicSelect = document.getElementById('epicSelect');
+    if (epicSelect && epicSelect.options) {
+      for (var i = 0; i < epicSelect.options.length; i++) {
+        var opt = epicSelect.options[i];
+        if (opt.value === epic) return opt.textContent || epic;
+      }
+    }
+    return epic || '';
+  }
+
+  function buildExportMeta(epic) {
+    var tz;
+    try {
+      tz = typeof Intl !== 'undefined' && Intl.DateTimeFormat
+        ? Intl.DateTimeFormat().resolvedOptions().timeZone
+        : undefined;
+    } catch (_e) {
+      tz = undefined;
+    }
+    return {
+      epic: epic,
+      instrumentName: getInstrumentNameForEpic(epic),
+      timezone: tz
+    };
+  }
+
+  function exportProfileToFile(profile, epic) {
+    if (!profile || !epic) return Promise.reject(new Error('Nothing to export'));
+    return resolveAppVersion().then(function (appVersion) {
+      var meta = buildExportMeta(epic);
+      meta.appVersion = appVersion;
+      var envelope = buildPersonalExportEnvelope(profile, meta);
+      downloadProfileExport(envelope, profileExportFilename(profile.name));
+    });
+  }
+
+  function syncTradeExportButton(epic) {
+    if (!tradeExportBtn) return;
+    var activeId = tradeSelectEl && tradeSelectEl.value ? tradeSelectEl.value : getActiveTradeProfileId(epic);
+    var hasProfile = !!(epic && activeId && findProfile(epic, activeId));
+    tradeExportBtn.disabled = !hasProfile;
+    tradeExportBtn.title = hasProfile
+      ? 'Download the selected profile as a file (no recordings)'
+      : 'Select a saved profile from the dropdown first';
+  }
+
+  function resolveProfileForExport(epic) {
+    if (!epic) return null;
+    var activeId = getActiveTradeProfileId(epic);
+    if (activeId) {
+      var active = findProfile(epic, activeId);
+      if (active) return active;
+    }
+    if (tradeSelectEl && tradeSelectEl.value) {
+      return findProfile(epic, tradeSelectEl.value);
+    }
+    return null;
+  }
+
+  function exportResolvedProfile(epic) {
+    var profile = resolveProfileForExport(epic);
+    if (!profile) {
+      return Promise.reject(
+        new Error('No profile selected — activate one in the list or pick from Trade profile dropdown')
+      );
+    }
+    return exportProfileToFile(profile, epic);
+  }
 
   function setSaveError(msg) {
     if (!saveError) return;
@@ -503,6 +613,7 @@ export function initBacktestProfiles(opts) {
     tradeSelectEl.innerHTML = html;
     tradeSelectEl.value = activeId && findProfile(epic, activeId) ? activeId : '';
     tradeSelectEl.disabled = !epic;
+    syncTradeExportButton(epic);
   }
 
   function activateTradeProfile(profile, epic, options) {
@@ -703,6 +814,9 @@ export function initBacktestProfiles(opts) {
           ' trades</span>' +
           '</span>' +
           '</button>' +
+          '<button type="button" class="shrink-0 px-1.5 py-0.5 rounded text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200" data-profile-export="' +
+          p.id +
+          '" title="Export this profile">↓</button>' +
           '<button type="button" class="shrink-0 px-1.5 py-0.5 rounded text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200" data-profile-rename="' +
           p.id +
           '" title="Rename profile">✎</button>' +
@@ -811,6 +925,144 @@ export function initBacktestProfiles(opts) {
     return persistProfiles(epic, profiles);
   }
 
+  function setImportError(msg) {
+    if (!importErrorEl) return;
+    if (msg) {
+      importErrorEl.textContent = msg;
+      importErrorEl.classList.remove('hidden');
+    } else {
+      importErrorEl.textContent = '';
+      importErrorEl.classList.add('hidden');
+    }
+  }
+
+  function hideImportModal() {
+    pendingImport = null;
+    setImportError('');
+    if (importModal) {
+      importModal.classList.add('hidden');
+      importModal.setAttribute('aria-hidden', 'true');
+    }
+  }
+
+  function showImportModal(parsed, epic) {
+    if (!parsed || !parsed.ok || !parsed.profile) return;
+    pendingImport = {
+      epic: epic,
+      envelope: parsed.envelope,
+      profile: parsed.profile,
+      warnings: parsed.warnings || []
+    };
+    var sourceName =
+      parsed.envelope && parsed.envelope.source && parsed.envelope.source.instrumentName
+        ? parsed.envelope.source.instrumentName
+        : null;
+    var suggested = suggestUniqueProfileName(
+      defaultImportedProfileName(parsed.profile, sourceName),
+      epic
+    );
+    if (importPreviewEl) {
+      var lines = describeImportPreview(parsed.envelope, parsed.profile, epic);
+      importPreviewEl.innerHTML = lines
+        .map(function (line) {
+          return '<li>' + escapeHtml(line) + '</li>';
+        })
+        .join('');
+    }
+    if (importWarningsEl) {
+      if (pendingImport.warnings.length > 0) {
+        importWarningsEl.innerHTML = pendingImport.warnings
+          .map(function (w) {
+            return '<li>' + escapeHtml(w) + '</li>';
+          })
+          .join('');
+        importWarningsEl.classList.remove('hidden');
+      } else {
+        importWarningsEl.innerHTML = '';
+        importWarningsEl.classList.add('hidden');
+      }
+    }
+    if (importNameInput) {
+      importNameInput.value = suggested;
+      importNameInput.disabled = false;
+    }
+    if (importActivateCheck) importActivateCheck.checked = true;
+    setImportError('');
+    if (importModal) {
+      importModal.classList.remove('hidden');
+      importModal.setAttribute('aria-hidden', 'false');
+    }
+    if (importNameInput) {
+      setTimeout(function () {
+        importNameInput.focus();
+        importNameInput.select();
+      }, 0);
+    }
+  }
+
+  function importProfileFromPending() {
+    if (!pendingImport) return Promise.reject(new Error('Nothing to import'));
+    var epic = pendingImport.epic || getEpic();
+    if (!epic) return Promise.reject(new Error('Select an instrument first'));
+    var name = importNameInput ? importNameInput.value : '';
+    var trimmed = (name || '').trim();
+    if (!trimmed) return Promise.reject(new Error('Enter a profile name'));
+    if (profileNameTaken(epic, trimmed)) {
+      return Promise.reject(new Error('Another profile already uses that name'));
+    }
+    var sourceName =
+      pendingImport.envelope && pendingImport.envelope.source
+        ? pendingImport.envelope.source.instrumentName
+        : null;
+    var profile = prepareImportedProfile(pendingImport.profile, {
+      name: trimmed,
+      sourceInstrumentName: sourceName
+    });
+    var profiles = getProfilesForEpic(epic).slice();
+    profiles.push(profile);
+    var activate = !!(importActivateCheck && importActivateCheck.checked);
+    return persistProfiles(epic, profiles).then(function () {
+      if (activate) {
+        activateTradeProfile(profile, epic, { skipApply: false, skipReport: false });
+      } else {
+        renderTradeSelect(epic);
+        renderList(epic);
+      }
+      return profile;
+    });
+  }
+
+  function handleImportFileSelected(file) {
+    var epic = getEpic();
+    if (!epic) {
+      if (activeLabel) {
+        activeLabel.textContent = 'Select an instrument first';
+        activeLabel.classList.remove('hidden');
+      }
+      return;
+    }
+    readProfileImportFile(file)
+      .then(function (text) {
+        return parseProfileImportText(text);
+      })
+      .then(function (parsed) {
+        if (!parsed.ok) {
+          if (activeLabel) {
+            activeLabel.textContent = parsed.error || 'Invalid profile file';
+            activeLabel.classList.remove('hidden');
+          }
+          return;
+        }
+        showImportModal(parsed, epic);
+      })
+      .catch(function (err) {
+        if (activeLabel) {
+          activeLabel.textContent = err && err.message ? err.message : 'Import failed';
+          activeLabel.classList.remove('hidden');
+        }
+      });
+  }
+
   function promptSaveAfterAnalyse(payload, epicOverride) {
     var normalized = normalizeSavePayload(payload);
     if (!normalized || !normalized.report) return;
@@ -874,6 +1126,87 @@ export function initBacktestProfiles(opts) {
     });
   }
 
+  if (exportToolbarBtn) {
+    exportToolbarBtn.addEventListener('click', function () {
+      var epic = getEpic();
+      if (!epic) {
+        if (activeLabel) {
+          activeLabel.textContent = 'Select an instrument first';
+          activeLabel.classList.remove('hidden');
+        }
+        return;
+      }
+      exportResolvedProfile(epic).catch(function (err) {
+        if (activeLabel) {
+          activeLabel.textContent = err && err.message ? err.message : 'Export failed';
+          activeLabel.classList.remove('hidden');
+        }
+      });
+    });
+  }
+
+  if (importBtn && importFileInput) {
+    importBtn.addEventListener('click', function () {
+      if (!getEpic()) {
+        if (activeLabel) {
+          activeLabel.textContent = 'Select an instrument first';
+          activeLabel.classList.remove('hidden');
+        }
+        return;
+      }
+      importFileInput.value = '';
+      importFileInput.click();
+    });
+    importFileInput.addEventListener('change', function () {
+      var file = importFileInput.files && importFileInput.files[0];
+      if (file) handleImportFileSelected(file);
+    });
+  }
+
+  if (importCancelBtn) importCancelBtn.addEventListener('click', hideImportModal);
+  if (importOkBtn) {
+    importOkBtn.addEventListener('click', function () {
+      if (importOkBtn.disabled) return;
+      importOkBtn.disabled = true;
+      importProfileFromPending()
+        .then(function () {
+          hideImportModal();
+        })
+        .catch(function (err) {
+          setImportError(err && err.message ? err.message : 'Could not import profile');
+        })
+        .finally(function () {
+          importOkBtn.disabled = false;
+        });
+    });
+  }
+  if (importNameInput) {
+    importNameInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        if (importOkBtn) importOkBtn.click();
+      }
+    });
+  }
+  if (importModal) {
+    importModal.addEventListener('click', function (e) {
+      if (e.target === importModal) hideImportModal();
+    });
+  }
+
+  if (tradeExportBtn) {
+    tradeExportBtn.addEventListener('click', function () {
+      var epic = getEpic();
+      if (!epic) return;
+      exportResolvedProfile(epic).catch(function (err) {
+        if (activeLabel) {
+          activeLabel.textContent = err && err.message ? err.message : 'Export failed';
+          activeLabel.classList.remove('hidden');
+        }
+      });
+    });
+  }
+
   if (saveCancelBtn) saveCancelBtn.addEventListener('click', hideSaveModal);
   if (saveOkBtn) saveOkBtn.addEventListener('click', submitSaveModal);
   if (saveNameInput) {
@@ -916,7 +1249,8 @@ export function initBacktestProfiles(opts) {
 
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Escape') return;
-    if (saveModal && !saveModal.classList.contains('hidden')) hideSaveModal();
+    if (importModal && !importModal.classList.contains('hidden')) hideImportModal();
+    else if (saveModal && !saveModal.classList.contains('hidden')) hideSaveModal();
     else if (renameModal && !renameModal.classList.contains('hidden')) hideRenameModal();
     else if (deleteModal && !deleteModal.classList.contains('hidden')) hideDeleteModal();
   });
@@ -925,6 +1259,7 @@ export function initBacktestProfiles(opts) {
     tradeSelectEl.addEventListener('change', function () {
       var epic = getEpic();
       if (!epic) return;
+      syncTradeExportButton(epic);
       var id = tradeSelectEl.value || '';
       if (!id) {
         clearTradeProfileSelection(epic);
@@ -948,6 +1283,23 @@ export function initBacktestProfiles(opts) {
       if (loadId) {
         var p = findProfile(epic, loadId);
         if (p) activateTradeProfile(p, epic);
+        return;
+      }
+      var exportId = t.getAttribute('data-profile-export');
+      if (!exportId && t.closest) {
+        var exportBtn = t.closest('[data-profile-export]');
+        if (exportBtn) exportId = exportBtn.getAttribute('data-profile-export');
+      }
+      if (exportId) {
+        var exportProfile = findProfile(epic, exportId);
+        if (exportProfile) {
+          exportProfileToFile(exportProfile, epic).catch(function (err) {
+            if (activeLabel) {
+              activeLabel.textContent = err && err.message ? err.message : 'Export failed';
+              activeLabel.classList.remove('hidden');
+            }
+          });
+        }
         return;
       }
       var delId = t.getAttribute('data-profile-delete');
