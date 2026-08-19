@@ -593,7 +593,7 @@ export interface BacktestReport {
   closeReasonCounts?: CloseReasonCounts;
   /** When carry-over and days were non-consecutive, we split into blocks and closed at each block end. */
   nonConsecutiveWarning?: string;
-  /** Per-rule sole blocker counts: times that rule was the only one failing when no deal opened (flat, no position). */
+  /** Per-rule missed-open episodes: rule alone blocked an open while flat, market open, schedule OK (rising edge ≈ extra trades if removed). */
   ruleBlockerCounts?: RuleBlockerCountRow[];
   /** True when backtest simulated dynamic stop loss for at least one direction. */
   dynamicStopLossApplied?: boolean;
@@ -605,12 +605,13 @@ export interface BacktestReport {
   probeCoverageWarnings?: string[];
 }
 
-/** One row in the sole-blocker report (legacy rules or a BUY/SELL rule set). */
+/** One row in the missed-open report (legacy rules or a BUY/SELL rule set). */
 export type RuleBlockerCountRow = {
   left: string;
   op: string;
   right: string;
-  soleBlockerCount: number;
+  /** Times this rule alone blocked an open (flat, in-market, schedule OK) on a rising edge — ≈ max extra trades if removed. */
+  missedOpenEpisodeCount: number;
   /** Present when using per-direction rule sets. */
   direction?: 'BUY' | 'SELL';
 };
@@ -623,7 +624,7 @@ function blockerRowKey(row: Pick<RuleBlockerCountRow, 'left' | 'op' | 'right'> &
     : `legacy${BLOCKER_AGG_SEP}${row.left}${BLOCKER_AGG_SEP}${row.op}${BLOCKER_AGG_SEP}${row.right}`;
 }
 
-function parseBlockerAggregateKey(key: string): Omit<RuleBlockerCountRow, 'soleBlockerCount'> | null {
+function parseBlockerAggregateKey(key: string): Omit<RuleBlockerCountRow, 'missedOpenEpisodeCount'> | null {
   const parts = key.split(BLOCKER_AGG_SEP);
   if (parts.length !== 4) return null;
   const [tag, left, op, right] = parts;
@@ -638,9 +639,9 @@ function mergeBlockerAggregateMap(blockerAggregate: Map<string, number>): RuleBl
     if (count <= 0) continue;
     const parsed = parseBlockerAggregateKey(key);
     if (!parsed) continue;
-    out.push({ ...parsed, soleBlockerCount: count });
+    out.push({ ...parsed, missedOpenEpisodeCount: count });
   }
-  out.sort((a, b) => b.soleBlockerCount - a.soleBlockerCount);
+  out.sort((a, b) => b.missedOpenEpisodeCount - a.missedOpenEpisodeCount);
   return out;
 }
 
@@ -714,7 +715,7 @@ export function runBacktestPerDay(
       if (report.ruleBlockerCounts) {
         for (const b of report.ruleBlockerCounts) {
           const k = blockerRowKey(b);
-          blockerAggregate.set(k, (blockerAggregate.get(k) ?? 0) + b.soleBlockerCount);
+          blockerAggregate.set(k, (blockerAggregate.get(k) ?? 0) + b.missedOpenEpisodeCount);
         }
       }
       if (daySamples.length > 0) {
@@ -841,7 +842,7 @@ export function runBacktestCarryOver(
     if (report.ruleBlockerCounts) {
       for (const b of report.ruleBlockerCounts) {
         const k = blockerRowKey(b);
-        blockerAggregate.set(k, (blockerAggregate.get(k) ?? 0) + b.soleBlockerCount);
+        blockerAggregate.set(k, (blockerAggregate.get(k) ?? 0) + b.missedOpenEpisodeCount);
       }
     }
     if (blockSamples.length > 0) {
@@ -961,7 +962,7 @@ export function runBacktestPerDayAsync(
         if (report.ruleBlockerCounts) {
           for (const b of report.ruleBlockerCounts) {
             const k = blockerRowKey(b);
-            blockerAggregate.set(k, (blockerAggregate.get(k) ?? 0) + b.soleBlockerCount);
+            blockerAggregate.set(k, (blockerAggregate.get(k) ?? 0) + b.missedOpenEpisodeCount);
           }
         }
         if (daySamples.length > 0) {
@@ -1137,7 +1138,8 @@ export function runBacktest(
   const legacyRules = config.rules || [];
   const legacyDirection = inferDirection(config);
   const enabledLegacyRules = legacyRules.filter((r) => r.enabled !== false);
-  const soleBlockerCounts = new Map<string, number>();
+  const missedOpenEpisodeCounts = new Map<string, number>();
+  let prevAlmostOpenKeys = new Set<string>();
 
   const totalSamples = samples.length;
   const progressEvery = progressSampleInterval(totalSamples);
@@ -1197,14 +1199,17 @@ export function runBacktest(
     const dealingOpen = canOpenLookup.isOpen(s.ts);
     const canOpenHere = pass && dealingOpen && !isScheduleBlockingOpens(s.ts, config) && !isEnginePaused(s.ts);
 
-    // Sole blockers: flat, no deal would open; exactly one rule fails (per legacy list or per BUY/SELL set).
-    if (!blocked && !pass) {
+    const openEnvReady =
+      !blocked && dealingOpen && !isScheduleBlockingOpens(s.ts, config) && !isEnginePaused(s.ts);
+
+    // Missed opens: flat, in-market, schedule OK, exactly one rule fails — count rising edges only (dedupes burst seconds).
+    const almostOpenKeysThisSample = new Set<string>();
+    if (openEnvReady && !pass) {
       if (!useRuleSets && enabledLegacyRules.length > 0) {
         const failing = getFailingRuleIndices(ctx, { ...config, rules: legacyRules });
         if (failing.length === 1) {
           const r = enabledLegacyRules[failing[0]];
-          const key = blockerRowKey({ left: r.left, op: r.op, right: r.right });
-          soleBlockerCounts.set(key, (soleBlockerCounts.get(key) ?? 0) + 1);
+          almostOpenKeysThisSample.add(blockerRowKey({ left: r.left, op: r.op, right: r.right }));
         }
       } else if (useRuleSets && activeRuleSets.length > 0) {
         for (const rs of activeRuleSets) {
@@ -1213,12 +1218,19 @@ export function runBacktest(
           const failing = getFailingRuleIndices(ctx, { ...config, rules: rs.rules });
           if (failing.length === 1) {
             const r = enabledRs[failing[0]];
-            const key = blockerRowKey({ left: r.left, op: r.op, right: r.right, direction: rs.direction });
-            soleBlockerCounts.set(key, (soleBlockerCounts.get(key) ?? 0) + 1);
+            almostOpenKeysThisSample.add(
+              blockerRowKey({ left: r.left, op: r.op, right: r.right, direction: rs.direction })
+            );
           }
         }
       }
     }
+    for (const key of almostOpenKeysThisSample) {
+      if (!prevAlmostOpenKeys.has(key)) {
+        missedOpenEpisodeCounts.set(key, (missedOpenEpisodeCounts.get(key) ?? 0) + 1);
+      }
+    }
+    prevAlmostOpenKeys = almostOpenKeysThisSample;
 
     // Check TP/SL whenever we have a position (before rules-fail close). Use bid/offer on every sample — not gated by
     // dealing hours: otherwise after-hours ticks (e.g. last stamp 23:59) never evaluate TP/SL and EOD shows uncapped P/L.
@@ -1451,13 +1463,13 @@ export function runBacktest(
   const avgTradePnlPounds = (denom > 0 && trades.length > 0) ? (totalGainLoss / trades.length) * denom : undefined;
 
   const ruleBlockerCounts: RuleBlockerCountRow[] = [];
-  for (const [key, count] of soleBlockerCounts.entries()) {
+  for (const [key, count] of missedOpenEpisodeCounts.entries()) {
     if (count <= 0) continue;
     const parsed = parseBlockerAggregateKey(key);
     if (!parsed) continue;
-    ruleBlockerCounts.push({ ...parsed, soleBlockerCount: count });
+    ruleBlockerCounts.push({ ...parsed, missedOpenEpisodeCount: count });
   }
-  ruleBlockerCounts.sort((a, b) => b.soleBlockerCount - a.soleBlockerCount);
+  ruleBlockerCounts.sort((a, b) => b.missedOpenEpisodeCount - a.missedOpenEpisodeCount);
   const dslMeta = buildDynamicSlReportMeta(config);
 
   const report: BacktestReport = {

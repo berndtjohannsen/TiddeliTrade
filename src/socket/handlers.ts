@@ -20,7 +20,6 @@ import {
   getIndicativeCostsOpen,
   getHistoricalPrices,
   getDayStartPrice,
-  getDayStartPricesInRange,
   getClientSentiment,
   type MarketDetails,
 } from '../services/ig';
@@ -73,6 +72,13 @@ import {
   unregisterDynamicStopLoss,
 } from '../services/dynamicStopLoss';
 import { analyzeSampleQuality, type SampleQualityReport } from '../services/sampleQuality';
+import {
+  buildDealingSnapshotFromMarketInfo,
+  getInstrumentSettings,
+  resolveDayStartsForBacktest,
+  resolveDealingForBacktest,
+  saveDealingSnapshot,
+} from '../services/backtestMarketSnapshot';
 
 let scheduledCloses: ScheduledCloseEntry[] = [];
 let recordingStatusTimer: ReturnType<typeof setInterval> | null = null;
@@ -118,33 +124,6 @@ function buildAnalyseProgressPayload(opts: {
     losingTrades,
     tradeCount,
   };
-}
-
-/** Fetch IG daily opens for backtest days (Europe/London keys). Returns {} when not logged in or on failure. */
-async function loadDayStartsForBacktest(
-  session: IgSession | null,
-  epic: string,
-  days: string[],
-  logFn: (msg: string) => void
-): Promise<Record<string, number>> {
-  if (!session || days.length === 0) return {};
-  const sorted = [...days].sort();
-  const fromMs = new Date(sorted[0] + 'T00:00:00').getTime() - 3 * 86400000;
-  const toMs = new Date(sorted[sorted.length - 1] + 'T23:59:59').getTime() + 3 * 86400000;
-  try {
-    const map = await getDayStartPricesInRange(session, epic, fromMs, toMs);
-    const n = Object.keys(map).length;
-    if (n > 0) {
-      logFn(`[Backtest] Day start: ${n} IG daily open(s) for ${sorted[0]}…${sorted[sorted.length - 1]}`);
-    } else {
-      logFn('[Backtest] Day start: no IG daily candles in range — using first sample mid per London day');
-    }
-    return map;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    logFn('[Backtest] Day start: IG fetch failed – ' + msg + ' (using first sample mid per London day)');
-    return {};
-  }
 }
 
 function runBacktestInWorker(
@@ -855,6 +834,7 @@ export function registerSocketHandlers(io: Server): void {
         io.emit('log', 'Sentiment: ' + clientSentiment.longPct + '% long / ' + clientSentiment.shortPct + '% short');
       }
       lastClientSentimentByEpic[epic] = clientSentiment ?? null;
+      saveDealingSnapshot(epic, buildDealingSnapshotFromMarketInfo(trading));
       let dealingWeekLondon: ReturnType<typeof dealingWeekFromMarketTimes> = null;
       let dealingScheduleSource: 'ig' | 'default' | null = null;
       if (trading.is24_7) {
@@ -1401,27 +1381,21 @@ export function registerSocketHandlers(io: Server): void {
       const backtestRuleSets = Array.isArray(params.backtestRuleSets) ? params.backtestRuleSets : undefined;
       const useRuleSets = ruleSets && ruleSets.length > 0 && backtestRuleSets && backtestRuleSets.length > 0;
 
-      let dealingWeekLondon: ReturnType<typeof dealingWeekFromMarketTimes> = null;
-      let apiIs24_7 = false;
-      let dealingScheduleSource: 'ig' | 'default' | 'off' = 'off';
-      if (currentSession) {
-        try {
-          const info = await getMarketTradingInfo(currentSession, epic);
-          apiIs24_7 = info.is24_7;
-          dealingWeekLondon = dealingWeekFromMarketTimes(info.marketTimes, info.is24_7);
-          if (dealingWeekLondon) dealingScheduleSource = 'ig';
-        } catch {
-          /* use fallback below when not 24/7 */
-        }
-      }
-      const effectiveIs24_7 = currentSession ? apiIs24_7 : !!params.is24_7;
-      if (effectiveIs24_7) {
-        dealingWeekLondon = null;
-        dealingScheduleSource = 'off';
-      } else if (!dealingWeekLondon) {
-        dealingWeekLondon = defaultDealingWeekLondonMonFri();
-        dealingScheduleSource = 'default';
-      }
+      const dealingResolved = await resolveDealingForBacktest(
+        epic,
+        inst,
+        currentSession,
+        !!params.is24_7
+      );
+      const effectiveIs24_7 = dealingResolved.is24_7;
+      const dealingWeekLondon = dealingResolved.dealingWeekLondon;
+      const instAfterDealing = getInstrumentSettings(epic);
+      const storedScheduleSource = instAfterDealing?.backtestDealingScheduleSource
+        ?? (dealingResolved.dealingScheduleSource === 'snapshot'
+          ? 'default'
+          : dealingResolved.dealingScheduleSource);
+      const dealingScheduleFromSnapshot = dealingResolved.usedSnapshot;
+      const dealingScheduleSnapshotAt = dealingResolved.snapshotSavedAt;
 
       const ui = cfg.ui;
       const resolvePauseOnLossSeconds = (
@@ -1536,7 +1510,7 @@ export function registerSocketHandlers(io: Server): void {
           : `legacy\u0001${row.left}\u0001${row.op}\u0001${row.right}`;
       }
 
-      function parseBlockerAggregateKey(key: string): Omit<RuleBlockerCountRow, 'soleBlockerCount'> | null {
+      function parseBlockerAggregateKey(key: string): Omit<RuleBlockerCountRow, 'missedOpenEpisodeCount'> | null {
         const parts = key.split('\u0001');
         if (parts.length !== 4) return null;
         const [tag, left, op, right] = parts;
@@ -1551,9 +1525,9 @@ export function registerSocketHandlers(io: Server): void {
           if (count <= 0) continue;
           const parsed = parseBlockerAggregateKey(key);
           if (!parsed) continue;
-          out.push({ ...parsed, soleBlockerCount: count });
+          out.push({ ...parsed, missedOpenEpisodeCount: count });
         }
-        out.sort((a, b) => b.soleBlockerCount - a.soleBlockerCount);
+        out.sort((a, b) => b.missedOpenEpisodeCount - a.missedOpenEpisodeCount);
         return out;
       }
 
@@ -1602,7 +1576,9 @@ export function registerSocketHandlers(io: Server): void {
           usedTpSl,
           usedDynamicSl,
           dealingScheduleGated: !effectiveIs24_7,
-          dealingScheduleSource,
+          dealingScheduleSource: storedScheduleSource,
+          dealingScheduleFromSnapshot,
+          dealingScheduleSnapshotAt,
         });
       }
 
@@ -1611,12 +1587,14 @@ export function registerSocketHandlers(io: Server): void {
         socket.emit('analyse_recording_report', { error: 'No recorded samples for ' + epic + noDataMsgSuffix });
         return;
       }
-      config.dayStartByLondonDate = await loadDayStartsForBacktest(
-        currentSession,
+      const dayStartResolved = await resolveDayStartsForBacktest(
         epic,
         daysToAnalyse,
+        instAfterDealing,
+        currentSession,
         (msg) => io.emit('log', msg)
       );
+      config.dayStartByLondonDate = dayStartResolved.dayStarts;
 
       if (usePerDay) {
         const days = daysToAnalyse;
@@ -1696,7 +1674,7 @@ export function registerSocketHandlers(io: Server): void {
             if (dayReport.ruleBlockerCounts) {
               for (const b of dayReport.ruleBlockerCounts) {
                 const k = blockerRowKey(b);
-                blockerAggregate.set(k, (blockerAggregate.get(k) ?? 0) + b.soleBlockerCount);
+                blockerAggregate.set(k, (blockerAggregate.get(k) ?? 0) + b.missedOpenEpisodeCount);
               }
             }
             if (dayReport.startTs && (startTs === 0 || dayReport.startTs < startTs)) startTs = dayReport.startTs;
@@ -1893,7 +1871,7 @@ export function registerSocketHandlers(io: Server): void {
         if (report.ruleBlockerCounts) {
           for (const b of report.ruleBlockerCounts) {
             const k = blockerRowKey(b);
-            blockerAggregate.set(k, (blockerAggregate.get(k) ?? 0) + b.soleBlockerCount);
+            blockerAggregate.set(k, (blockerAggregate.get(k) ?? 0) + b.missedOpenEpisodeCount);
           }
         }
         if (report.startTs && (startTs === 0 || report.startTs < startTs)) startTs = report.startTs;

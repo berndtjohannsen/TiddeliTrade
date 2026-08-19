@@ -917,7 +917,7 @@
             <ul id="testRulesQualityDays" class="text-slate-400 space-y-0.5 text-[11px] font-mono hidden"></ul>
           </div>
           <div id="testRulesBlockerSection" class="hidden mt-2 pt-2 border-t border-slate-700">
-            <h5 class="text-slate-500 font-medium mb-1" data-tooltip="Sample counts where you were flat and rules failed: for each row, that condition was the only failing rule (legacy list or BUY/SELL set). Market-closed blocks are not counted here.">Sole blockers (trim candidates)</h5>
+            <h5 class="text-slate-500 font-medium mb-1" data-tooltip="Times a rule alone blocked an open while flat, market open, and your schedule allowed trading. Each count is one episode (burst seconds collapsed) — roughly the max extra trades if you removed that rule alone.">Missed opens (trim candidates)</h5>
             <ul id="testRulesBlockerList" class="text-slate-400 space-y-0.5"></ul>
           </div>
         </div>

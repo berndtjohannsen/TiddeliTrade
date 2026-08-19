@@ -216,6 +216,16 @@ export interface InstrumentSettings {
   backtestProfiles?: BacktestProfile[];
   /** Id of the profile currently applied on the Trade tab for this instrument. */
   activeTradeProfileId?: string;
+  /** Snapshotted 24/7 flag for reproducible backtests. */
+  backtestIs24_7?: boolean;
+  /** Snapshotted dealing week (Europe/London minutes) for reproducible backtests. */
+  backtestDealingWeekLondon?: Array<{ openMin: number; closeMin: number } | null> | null;
+  /** How backtestDealingWeekLondon was resolved when saved. */
+  backtestDealingScheduleSource?: 'ig' | 'default' | 'off';
+  /** When the dealing snapshot was saved (ms). */
+  backtestDealingSnapshotAt?: number;
+  /** IG daily open mid by Europe/London YYYY-MM-DD for dayStart rules in backtests. */
+  backtestDayStartByLondonDate?: Record<string, number>;
 }
 
 /** Named snapshot of strategy + analyse options + last simulated result. */
@@ -357,7 +367,7 @@ export interface BacktestProfileReportSnapshot {
     left: string;
     op: string;
     right: string;
-    soleBlockerCount: number;
+    missedOpenEpisodeCount: number;
     direction?: 'BUY' | 'SELL';
   }>;
   dynamicStopLossApplied?: boolean;

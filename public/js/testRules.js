@@ -1966,7 +1966,7 @@ export function initTestRules(socket, state, log, profileOpts) {
         blockerList.innerHTML = r.ruleBlockerCounts.map(function (b) {
           var op = opSymbols[b.op] || b.op;
           var dir = b.direction ? '<span class="text-slate-500">' + b.direction + '</span> ' : '';
-          return '<li class="font-mono text-[11px]">' + dir + b.left + ' ' + op + ' ' + b.right + ': <span class="text-amber-400">' + b.soleBlockerCount + '</span></li>';
+          return '<li class="font-mono text-[11px]">' + dir + b.left + ' ' + op + ' ' + b.right + ': <span class="text-amber-400">' + (b.missedOpenEpisodeCount != null ? b.missedOpenEpisodeCount : 0) + '</span></li>';
         }).join('');
         blockerSection.classList.remove('hidden');
       } else {
@@ -2101,8 +2101,16 @@ export function initTestRules(socket, state, log, profileOpts) {
       var simNote = 'Test rules: those trades are simulated from recorded prices — no orders sent to IG.';
       appendLog(simNote);
       if (typeof log === 'function') log(simNote);
-      if (data.dealingScheduleSource === 'default' && !state.is24_7Market) {
-        appendLog('Note: IG did not return usable marketTimes — using default UK Mon–Fri 08:00–21:59 (Europe/London). Log in for exact IG hours per epic.');
+      if (data.dealingScheduleFromSnapshot && !state.is24_7Market) {
+        var scheduleLabel = data.dealingScheduleSource === 'ig'
+          ? 'IG market hours'
+          : 'default UK Mon–Fri 08:00–21:59 (Europe/London)';
+        var savedWhen = data.dealingScheduleSnapshotAt
+          ? new Date(data.dealingScheduleSnapshotAt).toLocaleString()
+          : 'earlier session';
+        appendLog('Note: Using saved dealing schedule (' + scheduleLabel + ') from ' + savedWhen + ' — backtests are reproducible.');
+      } else if (data.dealingScheduleSource === 'default' && !state.is24_7Market) {
+        appendLog('Note: IG did not return usable marketTimes — using default UK Mon–Fri 08:00–21:59 (Europe/London). Schedule saved for reproducible backtests.');
       }
       var epic = lastAnalyseEpic || (epicSelect && epicSelect.value) || state.savedEpic || '';
       profilesApi.promptSaveAfterAnalyseIfNeeded({
