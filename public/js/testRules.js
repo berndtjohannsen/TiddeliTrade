@@ -176,6 +176,11 @@ export function initTestRules(socket, state, log, profileOpts) {
   var analyseProgressBar = document.getElementById('analyseProgressBar');
   var analyseProgressStats = document.getElementById('analyseProgressStats');
   var analyseProgressStop = document.getElementById('analyseProgressStop');
+  var analyseResultModal = document.getElementById('analyseResultModal');
+  var analyseResultModalSummary = document.getElementById('analyseResultModalSummary');
+  var analyseResultModalComment = document.getElementById('analyseResultModalComment');
+  var analyseResultModalOk = document.getElementById('analyseResultModalOk');
+  var pendingAnalyseResultOutcome = null;
   var loadDaysProgressModal = document.getElementById('loadDaysProgressModal');
   var loadDaysProgressText = document.getElementById('loadDaysProgressText');
   var pruneProgressModal = document.getElementById('pruneProgressModal');
@@ -213,6 +218,12 @@ export function initTestRules(socket, state, log, profileOpts) {
     Object.assign({}, profileOpts || {}, {
       getEpic: function () {
         return lastAnalyseEpic || (epicSelect && epicSelect.value) || state.savedEpic || '';
+      },
+      isRulesEngineRunning: function () {
+        return !!state.rulesEngineRunning;
+      },
+      onProfileApplyBlocked: function (msg) {
+        appendLog(msg || 'Stop rules before loading a profile.');
       },
       onLoadProfile: function (profile) {
         appendLog('Active profile: ' + profile.name + ' (applied to Trade)');
@@ -2062,6 +2073,57 @@ export function initTestRules(socket, state, log, profileOpts) {
     if (analyseProgressBar) analyseProgressBar.style.width = '0%';
   }
 
+  function hideAnalyseResultModal() {
+    pendingAnalyseResultOutcome = null;
+    if (analyseResultModal) {
+      analyseResultModal.classList.add('hidden');
+      analyseResultModal.setAttribute('aria-hidden', 'true');
+    }
+  }
+
+  function showAnalyseResultModal(outcome) {
+    if (!outcome || outcome.kind === 'none' || !analyseResultModal) return;
+    pendingAnalyseResultOutcome = outcome;
+    if (analyseResultModalSummary) {
+      analyseResultModalSummary.textContent = outcome.detail || '—';
+    }
+    if (analyseResultModalComment) {
+      analyseResultModalComment.textContent = outcome.comment || '';
+      analyseResultModalComment.classList.toggle('hidden', !outcome.comment);
+    }
+    analyseResultModal.classList.remove('hidden');
+    analyseResultModal.setAttribute('aria-hidden', 'false');
+    if (analyseResultModalOk) {
+      setTimeout(function () {
+        analyseResultModalOk.focus();
+      }, 0);
+    }
+  }
+
+  function dismissAnalyseResultModal() {
+    var outcome = pendingAnalyseResultOutcome;
+    hideAnalyseResultModal();
+    if (outcome) profilesApi.followUpSaveAfterAnalyseOutcome(outcome);
+  }
+
+  if (analyseResultModalOk) {
+    analyseResultModalOk.addEventListener('click', dismissAnalyseResultModal);
+  }
+  if (analyseResultModal) {
+    analyseResultModal.addEventListener('click', function (e) {
+      if (e.target === analyseResultModal) dismissAnalyseResultModal();
+    });
+  }
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    if (analyseResultModal && !analyseResultModal.classList.contains('hidden')) {
+      dismissAnalyseResultModal();
+    }
+    if (pruneGapConfirmModal && !pruneGapConfirmModal.classList.contains('hidden')) {
+      hidePruneGapConfirmModal();
+    }
+  });
+
   socket.on('analyse_recording_progress', function (data) {
     updateAnalyseProgressUi(data);
   });
@@ -2113,13 +2175,14 @@ export function initTestRules(socket, state, log, profileOpts) {
         appendLog('Note: IG did not return usable marketTimes — using default UK Mon–Fri 08:00–21:59 (Europe/London). Schedule saved for reproducible backtests.');
       }
       var epic = lastAnalyseEpic || (epicSelect && epicSelect.value) || state.savedEpic || '';
-      profilesApi.promptSaveAfterAnalyseIfNeeded({
+      var analyseOutcome = profilesApi.promptSaveAfterAnalyseIfNeeded({
         report: report,
         sampleQuality: data.sampleQuality,
         usedTpSl: !!data.usedTpSl,
         usedDynamicSl: !!data.usedDynamicSl,
         analysedDayKeys: lastAnalyseDayKeys
       }, epic);
+      showAnalyseResultModal(analyseOutcome);
     }
   });
 
@@ -2135,6 +2198,16 @@ export function initTestRules(socket, state, log, profileOpts) {
   var deleteSelectedDaysBtn = document.getElementById('testRulesDeleteSelectedDays');
   var pruneBtn = document.getElementById('testRulesPruneBtn');
   var pruneMinCountEl = document.getElementById('testRulesPruneMinCount');
+  var pruneGapBtn = document.getElementById('testRulesPruneGapBtn');
+  var pruneMaxGapMinEl = document.getElementById('testRulesPruneMaxGapMin');
+  var pruneMinCoveragePctEl = document.getElementById('testRulesPruneMinCoveragePct');
+  var pruneGapConfirmModal = document.getElementById('pruneGapConfirmModal');
+  var pruneGapConfirmIntro = document.getElementById('pruneGapConfirmIntro');
+  var pruneGapConfirmList = document.getElementById('pruneGapConfirmList');
+  var pruneGapConfirmSummary = document.getElementById('pruneGapConfirmSummary');
+  var pruneGapConfirmOk = document.getElementById('pruneGapConfirmOk');
+  var pruneGapConfirmCancel = document.getElementById('pruneGapConfirmCancel');
+  var pendingGapPruneRequest = null;
   var daysListEl = document.getElementById('testRulesDaysList');
   var loadDaysPending = false;
 
@@ -2157,19 +2230,131 @@ export function initTestRules(socket, state, log, profileOpts) {
     if (loadDaysBtn) loadDaysBtn.disabled = false;
   }
 
+  function getGapPruneParams() {
+    var epic = (epicSelect && epicSelect.value) || state.savedEpic || '';
+    var maxGapMin = pruneMaxGapMinEl ? parseInt(pruneMaxGapMinEl.value, 10) : 10;
+    if (isNaN(maxGapMin) || maxGapMin < 1) maxGapMin = 10;
+    var lowCoveragePct = pruneMinCoveragePctEl ? parseInt(pruneMinCoveragePctEl.value, 10) : 90;
+    if (isNaN(lowCoveragePct) || lowCoveragePct < 1) lowCoveragePct = 90;
+    if (lowCoveragePct > 100) lowCoveragePct = 100;
+    return { epic: epic, maxGapMinutes: maxGapMin, lowCoveragePct: lowCoveragePct };
+  }
+
+  function hidePruneGapConfirmModal() {
+    pendingGapPruneRequest = null;
+    if (pruneGapConfirmModal) {
+      pruneGapConfirmModal.classList.add('hidden');
+      pruneGapConfirmModal.setAttribute('aria-hidden', 'true');
+    }
+  }
+
+  function showPruneGapConfirmModal(params, preview) {
+    pendingGapPruneRequest = params;
+    var dayDetails = (preview && preview.dayDetails) || [];
+    var dayCount = dayDetails.length;
+    var sampleCount = preview && typeof preview.samplesToDelete === 'number' ? preview.samplesToDelete : 0;
+    if (pruneGapConfirmIntro) {
+      pruneGapConfirmIntro.textContent =
+        'Remove whole days when any gap exceeds ' +
+        params.maxGapMinutes +
+        ' min or coverage is under ' +
+        params.lowCoveragePct +
+        '% over the active span (first to last sample).';
+    }
+    if (pruneGapConfirmList) {
+      if (dayCount === 0) {
+        pruneGapConfirmList.textContent = 'No days match these criteria.';
+      } else {
+        pruneGapConfirmList.innerHTML = '';
+        for (var di = 0; di < dayDetails.length; di++) {
+          var detail = dayDetails[di];
+          var line = document.createElement('div');
+          line.textContent = detail.day + ': ' + (detail.reasons || []).join('; ');
+          pruneGapConfirmList.appendChild(line);
+        }
+      }
+    }
+    if (pruneGapConfirmSummary) {
+      pruneGapConfirmSummary.textContent =
+        dayCount > 0
+          ? dayCount + ' day(s), ' + sampleCount.toLocaleString() + ' sample(s) will be deleted permanently.'
+          : 'Nothing to remove.';
+    }
+    if (pruneGapConfirmOk) {
+      pruneGapConfirmOk.textContent = dayCount > 0 ? 'Remove ' + dayCount + ' day(s)' : 'OK';
+      pruneGapConfirmOk.classList.toggle('bg-amber-600', dayCount > 0);
+      pruneGapConfirmOk.classList.toggle('hover:bg-amber-500', dayCount > 0);
+      pruneGapConfirmOk.classList.toggle('bg-violet-600', dayCount === 0);
+      pruneGapConfirmOk.classList.toggle('hover:bg-violet-500', dayCount === 0);
+    }
+    if (pruneGapConfirmModal) {
+      pruneGapConfirmModal.classList.remove('hidden');
+      pruneGapConfirmModal.setAttribute('aria-hidden', 'false');
+    }
+    if (pruneGapConfirmOk) {
+      setTimeout(function () {
+        pruneGapConfirmOk.focus();
+      }, 0);
+    }
+  }
+
+  function runConfirmedGapPrune() {
+    if (!pendingGapPruneRequest) return;
+    var params = pendingGapPruneRequest;
+    hidePruneGapConfirmModal();
+    showPruneProgress(
+      'Removing ' +
+        (params._dayCount != null ? params._dayCount : '') +
+        ' day(s) with gaps over ' +
+        params.maxGapMinutes +
+        ' min or coverage under ' +
+        params.lowCoveragePct +
+        '%…'
+    );
+    socket.emit('prune_gap_days', {
+      epic: params.epic,
+      maxGapMinutes: params.maxGapMinutes,
+      lowCoveragePct: params.lowCoveragePct
+    });
+  }
+
+  if (pruneGapConfirmCancel) {
+    pruneGapConfirmCancel.addEventListener('click', hidePruneGapConfirmModal);
+  }
+  if (pruneGapConfirmOk) {
+    pruneGapConfirmOk.addEventListener('click', function () {
+      if (!pendingGapPruneRequest) {
+        hidePruneGapConfirmModal();
+        return;
+      }
+      var dayCount = pendingGapPruneRequest._dayCount || 0;
+      if (dayCount === 0) {
+        hidePruneGapConfirmModal();
+        appendLog('Gap prune: no days match criteria');
+        return;
+      }
+      runConfirmedGapPrune();
+    });
+  }
+  if (pruneGapConfirmModal) {
+    pruneGapConfirmModal.addEventListener('click', function (e) {
+      if (e.target === pruneGapConfirmModal) hidePruneGapConfirmModal();
+    });
+  }
+
   var prunePending = false;
 
-  function showPruneProgress(minCount) {
+  function showPruneProgress(message) {
     prunePending = true;
     if (pruneProgressModal) {
       pruneProgressModal.classList.remove('hidden');
       pruneProgressModal.setAttribute('aria-hidden', 'false');
     }
     if (pruneProgressText) {
-      pruneProgressText.textContent =
-        'Removing days with fewer than ' + (minCount != null ? minCount.toLocaleString() : '—') + ' samples…';
+      pruneProgressText.textContent = message || 'Removing samples…';
     }
     if (pruneBtn) pruneBtn.disabled = true;
+    if (pruneGapBtn) pruneGapBtn.disabled = true;
   }
 
   function hidePruneProgress() {
@@ -2179,6 +2364,7 @@ export function initTestRules(socket, state, log, profileOpts) {
       pruneProgressModal.setAttribute('aria-hidden', 'true');
     }
     if (pruneBtn) pruneBtn.disabled = false;
+    if (pruneGapBtn) pruneGapBtn.disabled = false;
   }
 
   function getEpicDisplayName(epic) {
@@ -2187,6 +2373,13 @@ export function initTestRules(socket, state, log, profileOpts) {
       if (epicSelect.options[i].value === epic) return (epicSelect.options[i].textContent || '').trim() || epic;
     }
     return epic;
+  }
+
+  function coverageQualityClass(pct) {
+    if (pct == null || isNaN(pct)) return 'text-slate-500';
+    if (pct >= 90) return 'text-emerald-400/90';
+    if (pct >= 85) return 'text-amber-400/90';
+    return 'text-red-400/90';
   }
 
   function renderDaysList(dayStats) {
@@ -2217,6 +2410,7 @@ export function initTestRules(socket, state, log, profileOpts) {
         var s = items[j];
         var day = (s && s.day) || '';
         var count = s && typeof s.count === 'number' ? s.count : null;
+        var coveragePct = s && typeof s.coveragePct === 'number' ? s.coveragePct : null;
         var value = epic !== '__unknown__' ? day + '|' + epic : day;
         var label = document.createElement('label');
         label.className = 'flex items-center gap-1 cursor-pointer text-slate-400 hover:text-slate-300';
@@ -2226,11 +2420,25 @@ export function initTestRules(socket, state, log, profileOpts) {
         cb.className = 'rounded bg-slate-800 border-slate-600 text-emerald-500';
         label.appendChild(cb);
         var countStr = typeof count === 'number' && count >= 0 ? ' (' + count.toLocaleString() + ')' : '';
-        if (typeof count === 'number' && count >= 0 && count < 3600) {
+        var isSparse = typeof count === 'number' && count >= 0 && count < 3600;
+        if (isSparse) {
           label.className = 'flex items-center gap-1 cursor-pointer text-amber-400/90 hover:text-amber-300';
-          label.title = 'Sparse day (< 3,600 samples). Analyse will show recording quality warnings.';
+        } else if (coveragePct != null && coveragePct < 85) {
+          label.className = 'flex items-center gap-1 cursor-pointer text-red-400/80 hover:text-red-300';
         }
+        var titleParts = [];
+        if (isSparse) titleParts.push('Sparse day (< 3,600 samples)');
+        if (coveragePct != null) {
+          titleParts.push(Math.round(coveragePct) + '% coverage over active span (first to last sample)');
+        }
+        if (titleParts.length > 0) label.title = titleParts.join('. ');
         label.appendChild(document.createTextNode(day + countStr));
+        if (coveragePct != null) {
+          var covEl = document.createElement('span');
+          covEl.className = 'text-[10px] font-mono leading-none ' + coverageQualityClass(coveragePct);
+          covEl.textContent = Math.round(coveragePct) + '%';
+          label.appendChild(covEl);
+        }
         var chartBtn = document.createElement('button');
         chartBtn.type = 'button';
         chartBtn.className =
@@ -2328,10 +2536,41 @@ export function initTestRules(socket, state, log, profileOpts) {
       }
       var minCount = pruneMinCountEl ? parseInt(pruneMinCountEl.value, 10) : 3600;
       if (isNaN(minCount) || minCount < 0) minCount = 3600;
-      showPruneProgress(minCount);
+      showPruneProgress('Removing days with fewer than ' + minCount.toLocaleString() + ' samples…');
       socket.emit('prune_sparse_days', { epic: epic, minCount: minCount });
     });
   }
+
+  if (pruneGapBtn) {
+    pruneGapBtn.addEventListener('click', function () {
+      if (prunePending) return;
+      var params = getGapPruneParams();
+      if (!params.epic) {
+        appendLog('Select an instrument first');
+        return;
+      }
+      showPruneProgress(
+        'Scanning days — gaps over ' +
+          params.maxGapMinutes +
+          ' min or coverage under ' +
+          params.lowCoveragePct +
+          '%…'
+      );
+      socket.emit('preview_gap_days', params);
+    });
+  }
+
+  socket.on('preview_gap_days_result', function (data) {
+    hidePruneProgress();
+    if (data && data.error) {
+      appendLog('Gap prune preview failed: ' + data.error);
+      return;
+    }
+    var params = getGapPruneParams();
+    if (!params.epic) return;
+    params._dayCount = data && data.dayDetails ? data.dayDetails.length : 0;
+    showPruneGapConfirmModal(params, data || {});
+  });
 
   socket.on('delete_recorded_days_result', function (data) {
     if (data && data.error) {
@@ -2349,6 +2588,25 @@ export function initTestRules(socket, state, log, profileOpts) {
       appendLog('Prune failed: ' + data.error);
     } else if (data) {
       appendLog('Pruned ' + (data.deleted || 0).toLocaleString() + ' samples from ' + (data.daysRemoved || []).length + ' sparse day(s)');
+      if (data.recordedCount != null) updateRecordedCount(data.recordedCount);
+      socket.emit('get_recorded_days', '');
+    }
+  });
+
+  socket.on('prune_gap_days_result', function (data) {
+    hidePruneProgress();
+    if (data && data.error) {
+      appendLog('Gap prune failed: ' + data.error);
+    } else if (data) {
+      appendLog(
+        'Gap prune: removed ' + (data.deleted || 0).toLocaleString() + ' samples from ' + (data.daysRemoved || []).length + ' day(s)'
+      );
+      if (data.dayDetails && data.dayDetails.length > 0) {
+        for (var gi = 0; gi < data.dayDetails.length; gi++) {
+          var gd = data.dayDetails[gi];
+          appendLog('  ' + gd.day + ': ' + (gd.reasons || []).join('; '));
+        }
+      }
       if (data.recordedCount != null) updateRecordedCount(data.recordedCount);
       socket.emit('get_recorded_days', '');
     }

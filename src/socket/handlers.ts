@@ -42,6 +42,8 @@ import {
   getEpicsWithData,
   deleteSamplesByDays,
   deleteSparseDays,
+  deleteGapDays,
+  previewGapDays,
   type RecordedSample,
 } from '../services/priceRecorder';
 import path from 'path';
@@ -71,7 +73,7 @@ import {
   syncDynamicStopLossWithPositions,
   unregisterDynamicStopLoss,
 } from '../services/dynamicStopLoss';
-import { analyzeSampleQuality, type SampleQualityReport } from '../services/sampleQuality';
+import { analyzeSampleQuality, DEFAULT_GAP_PRUNE_LOW_COVERAGE_PCT, type SampleQualityReport } from '../services/sampleQuality';
 import {
   buildDealingSnapshotFromMarketInfo,
   getInstrumentSettings,
@@ -1317,6 +1319,55 @@ export function registerSocketHandlers(io: Server): void {
       }
       const { deleted, daysRemoved } = deleteSparseDays(epic, minCount);
       socket.emit('prune_sparse_days_result', { deleted, daysRemoved, recordedCount: getRecordedSampleCount(epic) });
+    });
+
+    socket.on('preview_gap_days', (params: { epic: string; maxGapMinutes?: number; lowCoveragePct?: number }) => {
+      const epic = (params?.epic || '').trim();
+      if (!epic) {
+        socket.emit('preview_gap_days_result', { error: 'Epic required' });
+        return;
+      }
+      const maxGapMinutes =
+        typeof params?.maxGapMinutes === 'number' && params.maxGapMinutes > 0 ? params.maxGapMinutes : 10;
+      const lowCoveragePct =
+        typeof params?.lowCoveragePct === 'number' && params.lowCoveragePct > 0 && params.lowCoveragePct <= 100
+          ? params.lowCoveragePct
+          : DEFAULT_GAP_PRUNE_LOW_COVERAGE_PCT;
+      const { daysRemoved, dayDetails, samplesToDelete } = previewGapDays(epic, {
+        maxGapMs: Math.round(maxGapMinutes * 60 * 1000),
+        lowCoveragePct,
+      });
+      socket.emit('preview_gap_days_result', {
+        daysRemoved,
+        dayDetails,
+        samplesToDelete,
+        maxGapMinutes,
+        lowCoveragePct,
+      });
+    });
+
+    socket.on('prune_gap_days', (params: { epic: string; maxGapMinutes?: number; lowCoveragePct?: number }) => {
+      const epic = (params?.epic || '').trim();
+      if (!epic) {
+        socket.emit('prune_gap_days_result', { error: 'Epic required' });
+        return;
+      }
+      const maxGapMinutes =
+        typeof params?.maxGapMinutes === 'number' && params.maxGapMinutes > 0 ? params.maxGapMinutes : 10;
+      const lowCoveragePct =
+        typeof params?.lowCoveragePct === 'number' && params.lowCoveragePct > 0 && params.lowCoveragePct <= 100
+          ? params.lowCoveragePct
+          : DEFAULT_GAP_PRUNE_LOW_COVERAGE_PCT;
+      const { deleted, daysRemoved, dayDetails } = deleteGapDays(epic, {
+        maxGapMs: Math.round(maxGapMinutes * 60 * 1000),
+        lowCoveragePct,
+      });
+      socket.emit('prune_gap_days_result', {
+        deleted,
+        daysRemoved,
+        dayDetails,
+        recordedCount: getRecordedSampleCount(epic),
+      });
     });
 
     socket.on('analyse_recording', async (params: {

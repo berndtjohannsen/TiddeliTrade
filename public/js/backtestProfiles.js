@@ -36,19 +36,40 @@ function formatPlSummary(result) {
   return '—';
 }
 
+function formatPlForProfileName(report) {
+  if (!report) return '';
+  if (report.totalGainLossPounds != null) {
+    var v = report.totalGainLossPounds;
+    return (v >= 0 ? '+' : '-') + '$' + Math.abs(v).toFixed(2);
+  }
+  if (report.totalGainLoss != null) {
+    var p = report.totalGainLoss;
+    return (p >= 0 ? '+' : '') + p.toFixed(2) + ' pts';
+  }
+  return '';
+}
+
+/** Default name for new profiles, e.g. d:95 w/l:555/119 82.3% +$697.60 */
 function defaultProfileName(strategy, analyseOptions, report) {
-  var sets = (analyseOptions && analyseOptions.backtestRuleSets) || ['BUY', 'SELL'];
+  if (!report) {
+    var sets = (analyseOptions && analyseOptions.backtestRuleSets) || ['BUY', 'SELL'];
+    return sets.join('+');
+  }
+  var parts = [];
   var days =
-    report && report.daysAnalysed != null && report.daysAnalysed > 0
+    report.daysAnalysed != null && report.daysAnalysed > 0
       ? report.daysAnalysed
       : analyseOptions && analyseOptions.selectedDays
         ? analyseOptions.selectedDays.length
         : 0;
-  var pl = report ? formatPlSummary(report) : '';
-  var parts = [sets.join('+')];
-  if (days > 0) parts.push(days + 'd');
-  if (pl && pl !== '—') parts.push(pl);
-  return parts.join(' ');
+  if (days > 0) parts.push('d:' + days);
+  if (report.winningTrades != null && report.losingTrades != null) {
+    parts.push('w/l:' + report.winningTrades + '/' + report.losingTrades);
+  }
+  if (report.winRate != null) parts.push(report.winRate.toFixed(1) + '%');
+  var pl = formatPlForProfileName(report);
+  if (pl) parts.push(pl);
+  return parts.length > 0 ? parts.join(' ') : 'Profile';
 }
 
 function formatReportSummary(report) {
@@ -59,6 +80,23 @@ function formatReportSummary(report) {
   var pl = formatPlSummary(report);
   if (pl && pl !== '—') parts.push('P/L ' + pl);
   return parts.join(' · ');
+}
+
+/** Multi-line summary for the post-analyse result modal. */
+function formatReportDetailForModal(report) {
+  if (!report) return '—';
+  var lines = [];
+  var pl = report.totalGainLossPounds != null
+    ? (report.totalGainLossPounds >= 0 ? '+' : '') + report.totalGainLossPounds.toFixed(2) + ' $'
+    : report.totalGainLoss != null
+      ? (report.totalGainLoss >= 0 ? '+' : '') + report.totalGainLoss.toFixed(2) + ' pts'
+      : '—';
+  lines.push('Total P/L: ' + pl);
+  if (report.tradeCount != null) lines.push('Trades: ' + report.tradeCount);
+  if (report.winRate != null) lines.push('Win rate: ' + report.winRate.toFixed(1) + '%');
+  if (report.daysAnalysed != null && report.daysAnalysed > 0) lines.push('Days analysed: ' + report.daysAnalysed);
+  if (report.sampleCount != null) lines.push('Samples: ' + report.sampleCount);
+  return lines.join('\n');
 }
 
 /** Report summary from profile (saved full report or legacy lastResult). */
@@ -206,10 +244,16 @@ function formatProfileDate(ts) {
   return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
+var PROFILE_APPLY_BLOCKED_MSG = 'Stop rules before loading a profile.';
+
 export function initBacktestProfiles(opts) {
   var applyTradeProfile = opts && opts.applyTradeProfile ? opts.applyTradeProfile : null;
   var onLoadProfile = opts && opts.onLoadProfile ? opts.onLoadProfile : null;
   var onRestoreSavedReport = opts && opts.onRestoreSavedReport ? opts.onRestoreSavedReport : null;
+  var onProfileApplyBlocked = opts && opts.onProfileApplyBlocked ? opts.onProfileApplyBlocked : null;
+  var isRulesEngineRunning = opts && opts.isRulesEngineRunning ? opts.isRulesEngineRunning : function () {
+    return false;
+  };
   var getEpic = opts && opts.getEpic ? opts.getEpic : function () {
     return '';
   };
@@ -254,6 +298,36 @@ export function initBacktestProfiles(opts) {
   var pendingRename = null;
   var pendingImport = null;
   var cachedAppVersion = null;
+
+  /** True when live rules apply must not be replaced (engine running). */
+  function rulesBlockProfileApply() {
+    return !!isRulesEngineRunning();
+  }
+
+  function notifyProfileApplyBlocked() {
+    if (onProfileApplyBlocked) onProfileApplyBlocked(PROFILE_APPLY_BLOCKED_MSG);
+    else if (activeLabel) {
+      activeLabel.textContent = PROFILE_APPLY_BLOCKED_MSG;
+      activeLabel.classList.remove('hidden');
+    }
+  }
+
+  /** Disable profile load controls while rules engine is running. */
+  function syncProfileApplyLock() {
+    var locked = rulesBlockProfileApply();
+    var epic = getEpic();
+    if (tradeSelectEl) {
+      tradeSelectEl.title = locked
+        ? PROFILE_APPLY_BLOCKED_MSG
+        : 'Load a saved strategy profile onto Trade (and Research backtests)';
+    }
+    if (importActivateCheck) {
+      importActivateCheck.disabled = locked;
+      importActivateCheck.title = locked ? PROFILE_APPLY_BLOCKED_MSG : '';
+      if (locked) importActivateCheck.checked = false;
+    }
+    if (epic) renderList(epic);
+  }
 
   function resolveAppVersion() {
     if (cachedAppVersion) return Promise.resolve(cachedAppVersion);
@@ -613,12 +687,19 @@ export function initBacktestProfiles(opts) {
     tradeSelectEl.innerHTML = html;
     tradeSelectEl.value = activeId && findProfile(epic, activeId) ? activeId : '';
     tradeSelectEl.disabled = !epic;
+    tradeSelectEl.title = rulesBlockProfileApply()
+      ? PROFILE_APPLY_BLOCKED_MSG
+      : 'Load a saved strategy profile onto Trade (and Research backtests)';
     syncTradeExportButton(epic);
   }
 
   function activateTradeProfile(profile, epic, options) {
-    if (!profile || !epic) return;
+    if (!profile || !epic) return false;
     var skipApply = options && options.skipApply;
+    if (!skipApply && rulesBlockProfileApply()) {
+      notifyProfileApplyBlocked();
+      return false;
+    }
     if (!skipApply && applyTradeProfile) applyTradeProfile(profile);
     clearBacktestOverrides();
     activeTradeProfileByEpic[epic] = profile.id;
@@ -633,6 +714,7 @@ export function initBacktestProfiles(opts) {
       var toRestore = profile.savedReport || savedReportFromProfile(profile);
       if (toRestore && toRestore.report) onRestoreSavedReport(toRestore);
     }
+    return true;
   }
 
   function clearTradeProfileSelection(epic) {
@@ -658,8 +740,8 @@ export function initBacktestProfiles(opts) {
     for (var i = 0; i < profiles.length; i++) names[profiles[i].name] = true;
     if (!names[trimmed]) return trimmed;
     var n = 2;
-    while (names[trimmed + ' ' + n]) n++;
-    return trimmed + ' ' + n;
+    while (names[trimmed + ' (' + n + ')']) n++;
+    return trimmed + ' (' + n + ')';
   }
 
   function fetchProfiles() {
@@ -763,6 +845,7 @@ export function initBacktestProfiles(opts) {
   function renderList(epic) {
     if (!listEl) return;
     var profiles = getProfilesForEpic(epic);
+    var profileApplyLocked = rulesBlockProfileApply();
     if (profiles.length === 0) {
       listEl.innerHTML = '<li class="text-slate-500 text-[11px] py-1">No saved profiles for this instrument.</li>';
       return;
@@ -785,14 +868,24 @@ export function initBacktestProfiles(opts) {
         var days = summary && summary.daysAnalysed != null ? summary.daysAnalysed : '—';
         var trades = summary && summary.tradeCount != null ? summary.tradeCount : '—';
         var savedDate = formatProfileDate(p.savedAt);
+        var loadTitle = profileApplyLocked
+          ? PROFILE_APPLY_BLOCKED_MSG
+          : 'Activate on Trade (same rules for backtest) — saved ' + savedDate;
+        var loadBtnClass =
+          'flex-1 min-w-0 text-left' +
+          (profileApplyLocked && !active ? ' opacity-50 cursor-not-allowed' : '');
         return (
           '<li class="group flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded px-1 py-1 ' +
           (active ? 'bg-violet-900/40 ring-1 ring-violet-600/50' : 'hover:bg-slate-800/60') +
           '">' +
-          '<button type="button" class="flex-1 min-w-0 text-left" data-profile-load="' +
+          '<button type="button" class="' +
+          loadBtnClass +
+          '" data-profile-load="' +
           p.id +
-          '" title="Activate on Trade (same rules for backtest) — saved ' +
-          savedDate +
+          '"' +
+          (profileApplyLocked && !active ? ' disabled' : '') +
+          ' title="' +
+          escapeHtml(loadTitle) +
           '">' +
           '<span class="text-slate-200 font-medium truncate block">' +
           escapeHtml(p.name) +
@@ -1021,6 +1114,9 @@ export function initBacktestProfiles(opts) {
     var profiles = getProfilesForEpic(epic).slice();
     profiles.push(profile);
     var activate = !!(importActivateCheck && importActivateCheck.checked);
+    if (activate && rulesBlockProfileApply()) {
+      return Promise.reject(new Error(PROFILE_APPLY_BLOCKED_MSG));
+    }
     return persistProfiles(epic, profiles).then(function () {
       if (activate) {
         activateTradeProfile(profile, epic, { skipApply: false, skipReport: false });
@@ -1080,37 +1176,97 @@ export function initBacktestProfiles(opts) {
     });
   }
 
-  function promptSaveAfterAnalyseIfNeeded(payload, epicOverride) {
+  /**
+   * Outcome after analyse for result modal + optional save prompt.
+   * @returns {{ kind: 'none'|'unchanged'|'save_new'|'save_copy', epic?: string, normalized?: object, profileName?: string, suggestedName?: string, detail?: string, comment?: string }}
+   */
+  function getAnalyseProfileOutcome(payload, epicOverride) {
     var normalized = normalizeSavePayload(payload);
-    if (!normalized || !normalized.report) return Promise.resolve();
+    if (!normalized || !normalized.report) return { kind: 'none' };
     var report = normalized.report;
     var epic = epicOverride || getEpic();
-    if (!epic) return Promise.resolve();
+    if (!epic) return { kind: 'none' };
+    var detail = formatReportDetailForModal(report);
     var activeId = getActiveTradeProfileId(epic);
     if (!activeId) {
-      promptSaveAfterAnalyse(normalized, epic);
-      return Promise.resolve();
+      return {
+        kind: 'save_new',
+        epic: epic,
+        normalized: normalized,
+        detail: detail,
+        comment: 'No active profile on Trade. You can save this run as a profile when you close this dialog.'
+      };
     }
     var profile = findProfile(epic, activeId);
     if (!profile) {
-      promptSaveAfterAnalyse(normalized, epic);
-      return Promise.resolve();
+      return {
+        kind: 'save_new',
+        epic: epic,
+        normalized: normalized,
+        detail: detail,
+        comment: 'No active profile on Trade. You can save this run as a profile when you close this dialog.'
+      };
     }
     if (!profileResultDiffers(profile, report)) {
-      return updateProfileResult(epic, activeId, normalized);
+      return {
+        kind: 'unchanged',
+        epic: epic,
+        normalized: normalized,
+        profileName: profile.name,
+        detail: detail,
+        comment:
+          'Results are the same as saved profile "' +
+          profile.name +
+          '" (trade count, days, and P/L match). The profile report was refreshed.'
+      };
     }
-    var suggested = suggestUniqueProfileName(profile.name + ' copy', epic);
-    showSaveModal({
+    return {
+      kind: 'save_copy',
       epic: epic,
-      payload: normalized,
-      suggestedName: suggested,
-      summary: formatReportSummary(report),
-      intro:
+      normalized: normalized,
+      profileName: profile.name,
+      suggestedName: suggestUniqueProfileName(profile.name + ' copy', epic),
+      detail: detail,
+      comment:
         'Results differ from profile "' +
         profile.name +
-        '". Save as a new profile? The original keeps its saved result.'
-    });
+        '". You can save this run as a new profile copy when you close this dialog.'
+    };
+  }
+
+  function applyAnalyseProfileOutcome(outcome) {
+    if (!outcome || outcome.kind === 'none') return Promise.resolve();
+    if (outcome.kind === 'unchanged' && outcome.epic && outcome.normalized) {
+      var activeId = getActiveTradeProfileId(outcome.epic);
+      if (activeId) return updateProfileResult(outcome.epic, activeId, outcome.normalized);
+    }
     return Promise.resolve();
+  }
+
+  function followUpSaveAfterAnalyseOutcome(outcome) {
+    if (!outcome || outcome.kind === 'none' || outcome.kind === 'unchanged') return;
+    if (outcome.kind === 'save_new') {
+      promptSaveAfterAnalyse(outcome.normalized, outcome.epic);
+      return;
+    }
+    if (outcome.kind === 'save_copy') {
+      showSaveModal({
+        epic: outcome.epic,
+        payload: outcome.normalized,
+        suggestedName: outcome.suggestedName,
+        summary: formatReportSummary(outcome.normalized.report),
+        intro:
+          'Results differ from profile "' +
+          outcome.profileName +
+          '". Save as a new profile? The original keeps its saved result.'
+      });
+    }
+  }
+
+  function promptSaveAfterAnalyseIfNeeded(payload, epicOverride) {
+    var outcome = getAnalyseProfileOutcome(payload, epicOverride);
+    applyAnalyseProfileOutcome(outcome);
+    return outcome;
   }
 
   if (saveBtn) {
@@ -1266,7 +1422,10 @@ export function initBacktestProfiles(opts) {
         return;
       }
       var profile = findProfile(epic, id);
-      if (profile) activateTradeProfile(profile, epic);
+      if (profile && !activateTradeProfile(profile, epic)) {
+        var activeId = getActiveTradeProfileId(epic);
+        tradeSelectEl.value = activeId && findProfile(epic, activeId) ? activeId : '';
+      }
     });
   }
 
@@ -1281,6 +1440,10 @@ export function initBacktestProfiles(opts) {
         if (btn) loadId = btn.getAttribute('data-profile-load');
       }
       if (loadId) {
+        if (rulesBlockProfileApply()) {
+          notifyProfileApplyBlocked();
+          return;
+        }
         var p = findProfile(epic, loadId);
         if (p) activateTradeProfile(p, epic);
         return;
@@ -1321,9 +1484,16 @@ export function initBacktestProfiles(opts) {
     });
   }
 
-  fetchProfiles();
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    window.addEventListener('tiddeli:rules-engine-running', syncProfileApplyLock);
+  }
+
+  fetchProfiles().then(function () {
+    syncProfileApplyLock();
+  });
 
   return {
+    syncProfileApplyLock: syncProfileApplyLock,
     refreshForEpic: function (epic) {
       var e = epic || getEpic();
       renderTradeSelect(e);
@@ -1333,6 +1503,9 @@ export function initBacktestProfiles(opts) {
     reload: fetchProfiles,
     promptSaveAfterAnalyse: promptSaveAfterAnalyse,
     promptSaveAfterAnalyseIfNeeded: promptSaveAfterAnalyseIfNeeded,
+    getAnalyseProfileOutcome: getAnalyseProfileOutcome,
+    applyAnalyseProfileOutcome: applyAnalyseProfileOutcome,
+    followUpSaveAfterAnalyseOutcome: followUpSaveAfterAnalyseOutcome,
     getLoadedProfileId: function () {
       return getActiveTradeProfileId(getEpic());
     },

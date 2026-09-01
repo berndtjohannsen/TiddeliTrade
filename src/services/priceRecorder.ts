@@ -5,6 +5,12 @@
 
 import path from 'path';
 import Database from 'better-sqlite3';
+import {
+  DEFAULT_MAX_GAP_PRUNE_MS,
+  coveragePctForSampleSpan,
+  evaluateDayForGapPrune,
+  type GapPruneEvaluateOptions,
+} from './sampleQuality';
 
 // Resolve DB path from this module's location (works for both ts-node and compiled dist)
 const _moduleDir = path.dirname(__dirname); // src/services -> src, or dist/services -> dist
@@ -231,30 +237,42 @@ export function getRecordedDays(epic: string): string[] {
 }
 
 /** Returns days with sample count for the epic, sorted ascending. */
-export function getDayStats(epic: string): { day: string; count: number; epic?: string }[] {
+export function getDayStats(epic: string): { day: string; count: number; epic?: string; coveragePct: number }[] {
   try {
     const database = getDb();
     const rows = database.prepare(
-      `SELECT strftime('%Y-%m-%d', ts / 1000, 'unixepoch', 'localtime') as day, COUNT(*) as count
+      `SELECT strftime('%Y-%m-%d', ts / 1000, 'unixepoch', 'localtime') as day,
+              COUNT(*) as count, MIN(ts) as firstTs, MAX(ts) as lastTs
        FROM price_samples WHERE epic = ?
        GROUP BY 1 ORDER BY 1 ASC`
-    ).all(epic) as Array<{ day: string; count: number }>;
-    return rows.filter((r) => r.day).map((r) => ({ day: r.day, count: Number(r.count), epic }));
+    ).all(epic) as Array<{ day: string; count: number; firstTs: number; lastTs: number }>;
+    return rows.filter((r) => r.day).map((r) => ({
+      day: r.day,
+      count: Number(r.count),
+      epic,
+      coveragePct: coveragePctForSampleSpan(Number(r.count), Number(r.firstTs), Number(r.lastTs)),
+    }));
   } catch {
     return [];
   }
 }
 
 /** Returns days with count and epic for ALL epics in the DB, sorted by day then epic. */
-export function getAllDayStats(): { day: string; count: number; epic: string }[] {
+export function getAllDayStats(): { day: string; count: number; epic: string; coveragePct: number }[] {
   try {
     const database = getDb();
     const rows = database.prepare(
-      `SELECT epic, strftime('%Y-%m-%d', ts / 1000, 'unixepoch', 'localtime') as day, COUNT(*) as count
+      `SELECT epic, strftime('%Y-%m-%d', ts / 1000, 'unixepoch', 'localtime') as day,
+              COUNT(*) as count, MIN(ts) as firstTs, MAX(ts) as lastTs
        FROM price_samples
        GROUP BY epic, day ORDER BY day ASC, epic ASC`
-    ).all() as Array<{ epic: string; day: string; count: number }>;
-    return rows.filter((r) => r.day && r.epic).map((r) => ({ day: r.day, count: Number(r.count), epic: r.epic }));
+    ).all() as Array<{ epic: string; day: string; count: number; firstTs: number; lastTs: number }>;
+    return rows.filter((r) => r.day && r.epic).map((r) => ({
+      day: r.day,
+      count: Number(r.count),
+      epic: r.epic,
+      coveragePct: coveragePctForSampleSpan(Number(r.count), Number(r.firstTs), Number(r.lastTs)),
+    }));
   } catch {
     return [];
   }
@@ -286,4 +304,50 @@ export function deleteSparseDays(epic: string, minCount: number): { deleted: num
   if (toRemove.length === 0) return { deleted: 0, daysRemoved: [] };
   const deleted = deleteSamplesByDays(epic, toRemove);
   return { deleted, daysRemoved: toRemove };
+}
+
+export interface GapPruneDayDetail {
+  day: string;
+  reasons: string[];
+}
+
+function resolveGapPruneEvalOpts(options?: GapPruneEvaluateOptions): GapPruneEvaluateOptions {
+  const maxGapMs =
+    typeof options?.maxGapMs === 'number' && options.maxGapMs > 0
+      ? options.maxGapMs
+      : DEFAULT_MAX_GAP_PRUNE_MS;
+  return { ...options, maxGapMs };
+}
+
+/** List days that would be removed by gap/coverage prune (no deletion). */
+export function previewGapDays(
+  epic: string,
+  options?: GapPruneEvaluateOptions
+): { daysRemoved: string[]; dayDetails: GapPruneDayDetail[]; samplesToDelete: number } {
+  const evalOpts = resolveGapPruneEvalOpts(options);
+  const days = getRecordedDays(epic);
+  const toRemove: string[] = [];
+  const dayDetails: GapPruneDayDetail[] = [];
+  let samplesToDelete = 0;
+  for (const day of days) {
+    const samples = getRecordedSamplesFiltered(epic, { days: [day] });
+    const verdict = evaluateDayForGapPrune(day, samples, evalOpts);
+    if (verdict.prune) {
+      toRemove.push(day);
+      dayDetails.push({ day, reasons: verdict.reasons });
+      samplesToDelete += samples.length;
+    }
+  }
+  return { daysRemoved: toRemove, dayDetails, samplesToDelete };
+}
+
+/** Delete days with max gap over threshold and/or low coverage over the day's active span. */
+export function deleteGapDays(
+  epic: string,
+  options?: GapPruneEvaluateOptions
+): { deleted: number; daysRemoved: string[]; dayDetails: GapPruneDayDetail[] } {
+  const { daysRemoved, dayDetails } = previewGapDays(epic, options);
+  if (daysRemoved.length === 0) return { deleted: 0, daysRemoved: [], dayDetails: [] };
+  const deleted = deleteSamplesByDays(epic, daysRemoved);
+  return { deleted, daysRemoved, dayDetails };
 }

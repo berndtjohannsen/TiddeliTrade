@@ -188,7 +188,7 @@
   <div id="pruneProgressModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
     <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-xl w-full max-w-sm mx-4 overflow-hidden">
       <div class="px-4 py-3 border-b border-slate-700">
-        <h2 class="text-lg font-semibold text-slate-200">Pruning sparse days</h2>
+        <h2 class="text-lg font-semibold text-slate-200">Pruning recordings</h2>
       </div>
       <div class="p-4 flex flex-col items-center gap-4">
         <div class="flex items-center gap-3">
@@ -199,6 +199,22 @@
           <p id="pruneProgressText" class="text-slate-400">Removing sparse samples…</p>
         </div>
         <p class="text-xs text-slate-500 text-center">This may take a while if you have many recorded samples for this instrument.</p>
+      </div>
+    </div>
+  </div>
+  <div id="pruneGapConfirmModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
+    <div class="bg-slate-900 border border-amber-500/40 rounded-xl shadow-xl w-full max-w-md mx-4 overflow-hidden">
+      <div class="px-4 py-3 border-b border-slate-700">
+        <h2 class="text-lg font-semibold text-slate-200">Confirm gap prune</h2>
+      </div>
+      <div class="p-4 text-sm text-slate-300 space-y-3">
+        <p id="pruneGapConfirmIntro" class="text-slate-400 text-xs leading-relaxed">—</p>
+        <div id="pruneGapConfirmList" class="max-h-40 overflow-y-auto font-mono text-xs text-slate-300 space-y-1 bg-slate-800/50 rounded-lg p-2 border border-slate-700/80">—</div>
+        <p id="pruneGapConfirmSummary" class="text-amber-400/90 text-xs">—</p>
+      </div>
+      <div class="px-4 py-3 border-t border-slate-700 flex gap-2 justify-end">
+        <button type="button" id="pruneGapConfirmCancel" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium transition-colors">Cancel</button>
+        <button type="button" id="pruneGapConfirmOk" class="px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-sm font-medium transition-colors">Remove days</button>
       </div>
     </div>
   </div>
@@ -276,6 +292,20 @@
       <div class="px-4 py-3 border-t border-slate-700 flex gap-2 justify-end">
         <button type="button" id="backtestProfileRenameCancel" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm font-medium transition-colors">Cancel</button>
         <button type="button" id="backtestProfileRenameOk" class="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium transition-colors">Rename</button>
+      </div>
+    </div>
+  </div>
+  <div id="analyseResultModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden" aria-hidden="true">
+    <div class="bg-slate-900 border border-slate-700 rounded-xl shadow-xl w-full max-w-md mx-4 overflow-hidden">
+      <div class="px-4 py-3 border-b border-slate-700">
+        <h2 class="text-lg font-semibold text-slate-200">Backtest complete</h2>
+      </div>
+      <div class="p-4 text-sm text-slate-300 space-y-3">
+        <p id="analyseResultModalSummary" class="font-mono text-xs text-slate-200 whitespace-pre-wrap">—</p>
+        <p id="analyseResultModalComment" class="text-slate-400 text-xs leading-relaxed">—</p>
+      </div>
+      <div class="px-4 py-3 border-t border-slate-700 flex gap-2 justify-end">
+        <button type="button" id="analyseResultModalOk" class="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium transition-colors">OK</button>
       </div>
     </div>
   </div>
@@ -846,6 +876,13 @@
             <span class="text-slate-500">Prune:</span>
             <input type="number" id="testRulesPruneMinCount" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono w-20 text-xs" min="0" placeholder="3600" data-tooltip="Remove days with fewer than this many samples (e.g. 3600 ≈ 1 hour)">
             <button type="button" id="testRulesPruneBtn" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300" data-tooltip="Remove days with fewer than the threshold samples">Prune sparse</button>
+            <span class="text-slate-500">Gap:</span>
+            <input type="number" id="testRulesPruneMaxGapMin" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono w-14 text-xs" min="1" value="10" data-tooltip="Remove whole days when any gap exceeds this many minutes (default 10), or coverage under the threshold over the active span">
+            <span class="text-slate-500 text-xs">min</span>
+            <span class="text-slate-500">Cov:</span>
+            <input type="number" id="testRulesPruneMinCoveragePct" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono w-14 text-xs" min="1" max="100" value="90" data-tooltip="Remove whole days when sample coverage over the active span is under this percent (default 90)">
+            <span class="text-slate-500 text-xs">%</span>
+            <button type="button" id="testRulesPruneGapBtn" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300" data-tooltip="Scan for days with a gap longer than the limit and/or under the coverage threshold, then confirm before removing">Prune gaps</button>
           </div>
           <div id="testRulesDaysList" class="flex flex-col gap-0.5 max-h-36 overflow-y-auto" data-tooltip="Grouped by instrument. Select days for current instrument to analyse."></div>
           <div class="flex flex-wrap items-center gap-2 text-slate-500">

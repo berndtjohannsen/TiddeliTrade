@@ -47,9 +47,27 @@ export interface SampleQualityOptions {
 const DEFAULT_INTERVAL_MS = 1000;
 const DEFAULT_SPARSE_THRESHOLD = 3600;
 const DEFAULT_LOW_COVERAGE_PCT = 85;
+/** Default coverage floor for gap-based day prune (separate from backtest quality warnings). */
+export const DEFAULT_GAP_PRUNE_LOW_COVERAGE_PCT = 90;
+/** Default max gap before a whole day is pruned (10 minutes). */
+export const DEFAULT_MAX_GAP_PRUNE_MS = 10 * 60 * 1000;
+const MIN_SPAN_MS_FOR_COVERAGE_PRUNE = 60000;
 const GAP_5S = 5000;
 const GAP_30S = 30000;
 const GAP_60S = 60000;
+
+/** Coverage % over active span (first→last sample), same formula as analyseDaySamples. */
+export function coveragePctForSampleSpan(
+  count: number,
+  firstTs: number,
+  lastTs: number,
+  expectedIntervalMs = DEFAULT_INTERVAL_MS
+): number {
+  if (count <= 0) return 0;
+  const spanMs = Math.max(0, lastTs - firstTs);
+  const expectedInSpan = spanMs > 0 ? Math.floor(spanMs / expectedIntervalMs) + 1 : 1;
+  return expectedInSpan > 0 ? Math.min(100, (count / expectedInSpan) * 100) : 100;
+}
 
 function dayKeyLocal(ts: number): string {
   const d = new Date(ts);
@@ -178,6 +196,37 @@ function analyzeDaySamples(
     largeMidJumpCount,
     warnings,
   };
+}
+
+export interface GapPruneEvaluateOptions {
+  maxGapMs?: number;
+  lowCoveragePct?: number;
+  expectedIntervalMs?: number;
+  sparseDayThreshold?: number;
+}
+
+/** Whether a day should be removed by gap/coverage prune (whole day). */
+export function evaluateDayForGapPrune(
+  day: string,
+  samples: RecordedSample[],
+  options?: GapPruneEvaluateOptions
+): { prune: boolean; reasons: string[]; row: SampleQualityDayRow } {
+  const maxGapMs = options?.maxGapMs ?? DEFAULT_MAX_GAP_PRUNE_MS;
+  const lowCoveragePct = options?.lowCoveragePct ?? DEFAULT_GAP_PRUNE_LOW_COVERAGE_PCT;
+  const opts: Required<SampleQualityOptions> = {
+    expectedIntervalMs: options?.expectedIntervalMs ?? DEFAULT_INTERVAL_MS,
+    sparseDayThreshold: options?.sparseDayThreshold ?? DEFAULT_SPARSE_THRESHOLD,
+    lowCoveragePct,
+  };
+  const row = analyzeDaySamples(day, samples, opts);
+  const reasons: string[] = [];
+  if (row.maxGapMs > maxGapMs) {
+    reasons.push(`longest gap ${formatGapMs(row.maxGapMs)} (over ${formatGapMs(maxGapMs)})`);
+  }
+  if (row.spanMs > MIN_SPAN_MS_FOR_COVERAGE_PRUNE && row.coveragePct < lowCoveragePct) {
+    reasons.push(`${row.coveragePct.toFixed(0)}% coverage (under ${lowCoveragePct}%)`);
+  }
+  return { prune: reasons.length > 0, reasons, row };
 }
 
 /** Analyse recorded samples grouped by local calendar day. */

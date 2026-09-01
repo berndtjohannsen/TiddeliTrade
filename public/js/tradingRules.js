@@ -1862,6 +1862,9 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     setRulesEditable();
     if (state) state.rulesEngineRunning = rulesEngineRunning;
     if (socket && typeof socket.emit === 'function') socket.emit('rules_engine_running', rulesEngineRunning);
+    if (typeof window !== 'undefined' && window.dispatchEvent) {
+      window.dispatchEvent(new CustomEvent('tiddeli:rules-engine-running', { detail: { running: rulesEngineRunning } }));
+    }
     updateTradeSessionUi();
   }
 
