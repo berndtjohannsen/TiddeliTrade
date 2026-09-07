@@ -30,6 +30,8 @@ export function initProbes(socket, state, log) {
   var shortRange = document.getElementById('probeShortRange');
   var shortStdDev = document.getElementById('probeShortStdDev');
   var shortSpread = document.getElementById('probeShortSpread');
+  var shortPeriodStartBuy = document.getElementById('probeShortPeriodStartBuy');
+  var shortPeriodStartSell = document.getElementById('probeShortPeriodStartSell');
   var shortSamples = document.getElementById('probeShortSamples');
   var mediumTrend = document.getElementById('probeMediumTrend');
   var mediumMin = document.getElementById('probeMediumMin');
@@ -38,6 +40,8 @@ export function initProbes(socket, state, log) {
   var mediumRange = document.getElementById('probeMediumRange');
   var mediumStdDev = document.getElementById('probeMediumStdDev');
   var mediumSpread = document.getElementById('probeMediumSpread');
+  var mediumPeriodStartBuy = document.getElementById('probeMediumPeriodStartBuy');
+  var mediumPeriodStartSell = document.getElementById('probeMediumPeriodStartSell');
   var mediumSamples = document.getElementById('probeMediumSamples');
   var longTrend = document.getElementById('probeLongTrend');
   var longMin = document.getElementById('probeLongMin');
@@ -46,6 +50,8 @@ export function initProbes(socket, state, log) {
   var longRange = document.getElementById('probeLongRange');
   var longStdDev = document.getElementById('probeLongStdDev');
   var longSpread = document.getElementById('probeLongSpread');
+  var longPeriodStartBuy = document.getElementById('probeLongPeriodStartBuy');
+  var longPeriodStartSell = document.getElementById('probeLongPeriodStartSell');
   var longSamples = document.getElementById('probeLongSamples');
 
   function getPeriods() {
@@ -89,6 +95,19 @@ export function initProbes(socket, state, log) {
       stdDev: stdDev,
       avgSpread: spreadSum / samples.length,
       count: samples.length
+    };
+  }
+
+  /** Bid/offer at the oldest eligible sample in the probe window. */
+  function computePeriodStart(samples) {
+    if (!samples || samples.length === 0) {
+      return { periodStartBuy: null, periodStartSell: null };
+    }
+    var first = samples[0];
+    var spread = first.spread || 0;
+    return {
+      periodStartBuy: first.mid + spread / 2,
+      periodStartSell: first.mid - spread / 2
     };
   }
 
@@ -158,6 +177,9 @@ export function initProbes(socket, state, log) {
     var shortStats = computeStats(shortSamp);
     var mediumStats = computeStats(mediumSamp);
     var longStats = computeStats(longSamp);
+    var shortPeriodStart = computePeriodStart(shortSamp);
+    var mediumPeriodStart = computePeriodStart(mediumSamp);
+    var longPeriodStart = computePeriodStart(longSamp);
     var coverage = analyzeProbeCoverage(history, now, p.short, p.medium, p.long, filterOpts);
     var coverageByProbe = {};
     for (var ci = 0; ci < coverage.rows.length; ci++) {
@@ -173,6 +195,8 @@ export function initProbes(socket, state, log) {
     setTrend(shortTrend, shortTrendVal, lastShortTrend);
     setTrend(mediumTrend, mediumTrendVal, lastMediumTrend);
     setTrend(longTrend, longTrendVal, lastLongTrend);
+    if (shortPeriodStartBuy) shortPeriodStartBuy.textContent = formatVal(shortPeriodStart.periodStartBuy);
+    if (shortPeriodStartSell) shortPeriodStartSell.textContent = formatVal(shortPeriodStart.periodStartSell);
     if (shortMin) shortMin.textContent = formatVal(shortStats.min);
     if (shortMax) shortMax.textContent = formatVal(shortStats.max);
     if (shortAvg) shortAvg.textContent = formatVal(shortStats.avg);
@@ -180,6 +204,8 @@ export function initProbes(socket, state, log) {
     if (shortStdDev) shortStdDev.textContent = formatVal(shortStats.stdDev);
     if (shortSpread) shortSpread.textContent = formatVal(shortStats.avgSpread);
     setSampleCountEl(shortSamples, coverageByProbe.short);
+    if (mediumPeriodStartBuy) mediumPeriodStartBuy.textContent = formatVal(mediumPeriodStart.periodStartBuy);
+    if (mediumPeriodStartSell) mediumPeriodStartSell.textContent = formatVal(mediumPeriodStart.periodStartSell);
     if (mediumMin) mediumMin.textContent = formatVal(mediumStats.min);
     if (mediumMax) mediumMax.textContent = formatVal(mediumStats.max);
     if (mediumAvg) mediumAvg.textContent = formatVal(mediumStats.avg);
@@ -187,6 +213,8 @@ export function initProbes(socket, state, log) {
     if (mediumStdDev) mediumStdDev.textContent = formatVal(mediumStats.stdDev);
     if (mediumSpread) mediumSpread.textContent = formatVal(mediumStats.avgSpread);
     setSampleCountEl(mediumSamples, coverageByProbe.medium);
+    if (longPeriodStartBuy) longPeriodStartBuy.textContent = formatVal(longPeriodStart.periodStartBuy);
+    if (longPeriodStartSell) longPeriodStartSell.textContent = formatVal(longPeriodStart.periodStartSell);
     if (longMin) longMin.textContent = formatVal(longStats.min);
     if (longMax) longMax.textContent = formatVal(longStats.max);
     if (longAvg) longAvg.textContent = formatVal(longStats.avg);
@@ -207,9 +235,9 @@ export function initProbes(socket, state, log) {
     var mediumT = mediumTrendVal || lastMediumTrend;
     var longT = longTrendVal || lastLongTrend;
     lastProbeValues = {
-      short: { min: shortStats.min, max: shortStats.max, avg: shortStats.avg, range: shortStats.range, stdDev: shortStats.stdDev, avgSpread: shortStats.avgSpread, count: shortStats.count, trendDir: shortT.dir, trendPct: shortT.pct },
-      medium: { min: mediumStats.min, max: mediumStats.max, avg: mediumStats.avg, range: mediumStats.range, stdDev: mediumStats.stdDev, avgSpread: mediumStats.avgSpread, count: mediumStats.count, trendDir: mediumT.dir, trendPct: mediumT.pct },
-      long: { min: longStats.min, max: longStats.max, avg: longStats.avg, range: longStats.range, stdDev: longStats.stdDev, avgSpread: longStats.avgSpread, count: longStats.count, trendDir: longT.dir, trendPct: longT.pct }
+      short: { min: shortStats.min, max: shortStats.max, avg: shortStats.avg, range: shortStats.range, stdDev: shortStats.stdDev, avgSpread: shortStats.avgSpread, count: shortStats.count, trendDir: shortT.dir, trendPct: shortT.pct, periodStartBuy: shortPeriodStart.periodStartBuy, periodStartSell: shortPeriodStart.periodStartSell },
+      medium: { min: mediumStats.min, max: mediumStats.max, avg: mediumStats.avg, range: mediumStats.range, stdDev: mediumStats.stdDev, avgSpread: mediumStats.avgSpread, count: mediumStats.count, trendDir: mediumT.dir, trendPct: mediumT.pct, periodStartBuy: mediumPeriodStart.periodStartBuy, periodStartSell: mediumPeriodStart.periodStartSell },
+      long: { min: longStats.min, max: longStats.max, avg: longStats.avg, range: longStats.range, stdDev: longStats.stdDev, avgSpread: longStats.avgSpread, count: longStats.count, trendDir: longT.dir, trendPct: longT.pct, periodStartBuy: longPeriodStart.periodStartBuy, periodStartSell: longPeriodStart.periodStartSell }
     };
     if (onProbeUpdateCallback) onProbeUpdateCallback();
   }

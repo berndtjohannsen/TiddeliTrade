@@ -50,18 +50,21 @@ var RIGHT_REFERENCES_PRICE = [
   { value: 'short.range', label: 'short.range' },
   { value: 'short.trendPct', label: 'short.trendPct' },
   { value: 'short.volume', label: 'short.volume' },
+  { value: 'short.period_start', label: 'short period start' },
   { value: 'medium.min', label: 'medium.min' },
   { value: 'medium.avg', label: 'medium.avg' },
   { value: 'medium.max', label: 'medium.max' },
   { value: 'medium.range', label: 'medium.range' },
   { value: 'medium.trendPct', label: 'medium.trendPct' },
   { value: 'medium.volume', label: 'medium.volume' },
+  { value: 'medium.period_start', label: 'medium period start' },
   { value: 'long.min', label: 'long.min' },
   { value: 'long.avg', label: 'long.avg' },
   { value: 'long.max', label: 'long.max' },
   { value: 'long.range', label: 'long.range' },
   { value: 'long.trendPct', label: 'long.trendPct' },
   { value: 'long.volume', label: 'long.volume' },
+  { value: 'long.period_start', label: 'long period start' },
   { value: 'dayStart', label: 'day start' },
   { value: '__fixed__', label: 'Fixed...' }
 ];
@@ -1505,6 +1508,11 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       var stat = parts[1];
       var p = ctx.probes[probe];
       if (!p) return null;
+      if (stat === 'period_start') {
+        if (rule.left === 'Buy') return p.periodStartBuy != null ? p.periodStartBuy : null;
+        if (rule.left === 'Sell') return p.periodStartSell != null ? p.periodStartSell : null;
+        return null;
+      }
       var key = stat === 'avg' ? 'avg' : stat === 'min' ? 'min' : stat === 'max' ? 'max' : stat === 'volume' ? 'count' : stat === 'range' ? 'range' : stat === 'trendPct' ? 'trendPct' : null;
       return key != null ? p[key] : null;
     }

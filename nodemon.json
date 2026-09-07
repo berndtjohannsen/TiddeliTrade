@@ -2,7 +2,7 @@
   "watch": ["src"],
   "ext": "ts,json",
   "ignore": ["node_modules", "dist"],
-  "exec": "ts-node src/index.ts",
+  "exec": "node --use-system-ca ./node_modules/ts-node/dist/bin.js src/index.ts",
   "delay": "500",
   "verbose": true
 }

@@ -23,6 +23,8 @@ let recording = false;
 let lastSampleTsByEpic: Record<string, number> = {};
 let sessionSampleCount = 0;
 let sessionStartTs = 0;
+let lastDbErrorLogTs = 0;
+const DB_ERROR_LOG_INTERVAL_MS = 60000;
 
 function getDb(): Database.Database {
   if (!db) {
@@ -128,8 +130,14 @@ export function recordPrice(epic: string, data: PriceData, sentiment?: ClientSen
     stmt.run(epic, now, bid, offer, isNaN(spread) ? 0 : spread, longPct, shortPct);
     sessionSampleCount++;
     return true;
-  } catch {
-    // Silently ignore DB errors to avoid disrupting the stream
+  } catch (err) {
+    // Do not disrupt the stream; log at most once per minute so gaps are visible in container logs
+    const now = Date.now();
+    if (now - lastDbErrorLogTs >= DB_ERROR_LOG_INTERVAL_MS) {
+      lastDbErrorLogTs = now;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[priceRecorder] DB write failed:', msg);
+    }
     return false;
   }
 }

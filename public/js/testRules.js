@@ -115,7 +115,8 @@ export function initTestRules(socket, state, log, profileOpts) {
       recordingPollTimer = null;
     }
     if (recordingActive) {
-      recordingPollTimer = setInterval(function () { socket.emit('recording_status_request'); }, 1000);
+      // Poll lightly — server refreshes DB total count at most every 10s; session sampleCount updates on each status emit
+      recordingPollTimer = setInterval(function () { socket.emit('recording_status_request'); }, 5000);
     }
     updateRecordButton();
     var count = msg && msg.recordedCount != null ? msg.recordedCount : (msg && msg.recording && msg.sampleCount != null ? msg.sampleCount : null);
@@ -213,6 +214,8 @@ export function initTestRules(socket, state, log, profileOpts) {
   var lastAnalyseEpic = '';
   var lastAnalyseSelectedDays = [];
   var lastAnalyseDayKeys = [];
+  /** Probe windows used for the most recent backtest (for trade chart markers). */
+  var lastAnalyseProbeMs = null;
   var lastBacktestReport = null;
   var profilesApi = initBacktestProfiles(
     Object.assign({}, profileOpts || {}, {
@@ -587,6 +590,7 @@ export function initTestRules(socket, state, log, profileOpts) {
     { key: 'shortCurve', label: 'Short avg', color: '#22d3ee', modes: ['day', 'trade'] },
     { key: 'mediumCurve', label: 'Medium avg', color: '#a78bfa', modes: ['day', 'trade'] },
     { key: 'longCurve', label: 'Long avg', color: '#f472b6', modes: ['day', 'trade'] },
+    { key: 'probeLimits', label: 'Probe windows', color: '#22d3ee', modes: ['trade'] },
     { key: 'gaps', label: 'Rec. gaps', color: '#fb923c', modes: ['day', 'trade'] },
     { key: 'noData', label: 'No data', color: '#64748b', modes: ['day'] },
     { key: 'jumps', label: 'Price jumps', color: '#facc15', modes: ['day', 'trade'] },
@@ -602,6 +606,7 @@ export function initTestRules(socket, state, log, profileOpts) {
     shortCurve: false,
     mediumCurve: false,
     longCurve: false,
+    probeLimits: true,
     gaps: true,
     noData: true,
     jumps: true,
@@ -629,6 +634,25 @@ export function initTestRules(socket, state, log, profileOpts) {
       mediumMin: mediumMin,
       longMin: longMin
     };
+  }
+
+  /** Probe window lengths from backtest cfg (minutes in cfg; long is already minutes). */
+  function probeMsFromCfg(cfg) {
+    if (!cfg || cfg.probeShortMinutes == null) return readProbeMsFromDom();
+    return {
+      short: cfg.probeShortMinutes * 60 * 1000,
+      medium: cfg.probeMediumMinutes * 60 * 1000,
+      long: cfg.probeLongMinutes * 60 * 1000,
+      shortMin: cfg.probeShortMinutes,
+      mediumMin: cfg.probeMediumMinutes,
+      longMin: cfg.probeLongMinutes
+    };
+  }
+
+  function formatProbeWindowLabel(prefix, minutes) {
+    if (minutes >= 1440 && minutes % 1440 === 0) return prefix + (minutes / 1440) + 'd';
+    if (minutes >= 60 && minutes % 60 === 0) return prefix + (minutes / 60) + 'h';
+    return prefix + minutes + 'm';
   }
 
   function computeProbeSeries(samples, probeMs) {
@@ -1048,6 +1072,50 @@ export function initTestRules(socket, state, log, profileOpts) {
       ctx.font = '10px system-ui,sans-serif';
       ctx.fillText(label, Math.min(x + 3, w - padR - 48), padT + 12);
     }
+    /** Shaded probe lookback bands and start/stop verticals at a reference time (usually entry). */
+    function drawProbeWindowOverlays(refTs, probeWindowMs, phase) {
+      if (refTs == null || !probeWindowMs) return;
+      // Long → short so shorter windows paint on top
+      var windows = [
+        { startTs: refTs - probeWindowMs.long, stopTs: refTs, color: '#f472b6', fill: 'rgba(244, 114, 182, 0.07)', prefix: 'L', min: probeWindowMs.longMin },
+        { startTs: refTs - probeWindowMs.medium, stopTs: refTs, color: '#a78bfa', fill: 'rgba(167, 139, 250, 0.09)', prefix: 'M', min: probeWindowMs.mediumMin },
+        { startTs: refTs - probeWindowMs.short, stopTs: refTs, color: '#22d3ee', fill: 'rgba(34, 211, 238, 0.11)', prefix: 'S', min: probeWindowMs.shortMin }
+      ];
+      function drawProbeVertical(ts, color, label, labelY, alignRight, dash) {
+        if (ts < t0 || ts > t1) return;
+        var lx = xAt(ts);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        ctx.setLineDash(dash || [3, 5]);
+        ctx.beginPath();
+        ctx.moveTo(lx, padT);
+        ctx.lineTo(lx, padT + plotH);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        if (!label) return;
+        ctx.fillStyle = color;
+        ctx.font = '10px system-ui,sans-serif';
+        ctx.textAlign = alignRight ? 'right' : 'left';
+        var labelX = alignRight ? Math.max(lx - 3, padL + 2) : Math.min(lx + 3, w - padR - 52);
+        ctx.fillText(label, labelX, labelY);
+        ctx.textAlign = 'left';
+      }
+      if (phase === 'bands') {
+        for (var bi = 0; bi < windows.length; bi++) {
+          var band = windows[bi];
+          var bandStart = Math.max(t0, band.startTs);
+          var bandEnd = Math.min(t1, band.stopTs);
+          if (bandEnd > bandStart) drawTimeBand(bandStart, bandEnd, band.fill, null);
+        }
+        return;
+      }
+      for (var pi = 0; pi < windows.length; pi++) {
+        var win = windows[pi];
+        var periodLabel = formatProbeWindowLabel(win.prefix, win.min);
+        drawProbeVertical(win.startTs, win.color, periodLabel + ' start', padT + 12 + pi * 11, false, [3, 5]);
+        drawProbeVertical(win.stopTs, win.color, periodLabel + ' end', padT + plotH - 6 - pi * 11, true, [2, 4]);
+      }
+    }
     function drawHLine(price, color, label, dash) {
       if (price == null || isNaN(price)) return;
       var y = yAt(price);
@@ -1197,6 +1265,9 @@ export function initTestRules(socket, state, log, profileOpts) {
     }
     ctx.textAlign = 'left';
     drawQualityOverlays();
+    if (chartCtx.mode === 'trade' && chartCtx.trade && overlays.probeLimits) {
+      drawProbeWindowOverlays(chartCtx.trade.entryTs, chartCtx.probeMs || probeMs, 'bands');
+    }
     if (overlays.shortCurve && probeSeries) drawCurve(probeSeries.short, '#22d3ee');
     if (overlays.mediumCurve && probeSeries) drawCurve(probeSeries.medium, '#a78bfa');
     if (overlays.longCurve && probeSeries) drawCurve(probeSeries.long, '#f472b6');
@@ -1229,6 +1300,9 @@ export function initTestRules(socket, state, log, profileOpts) {
     if (overlays.max) drawHLine(rangeMax, '#f87171', 'MAX');
     if (chartCtx.mode === 'trade' && chartCtx.trade) {
       var tr = chartCtx.trade;
+      if (overlays.probeLimits) {
+        drawProbeWindowOverlays(tr.entryTs, chartCtx.probeMs || probeMs, 'lines');
+      }
       if (overlays.entry && tr.entryPrice != null) drawHLine(Number(tr.entryPrice), '#34d399', 'Entry', [6, 3]);
       if (overlays.exit && tr.exitPrice != null) drawHLine(Number(tr.exitPrice), '#fbbf24', 'Exit', [6, 3]);
       if (overlays.tradeMid && tr.entryPrice != null && tr.exitPrice != null) {
@@ -1376,7 +1450,7 @@ export function initTestRules(socket, state, log, profileOpts) {
       appendLog('Select an instrument (epic) before opening trade chart');
       return;
     }
-    var chartCtx = { mode: 'trade', trade: trade };
+    var chartCtx = { mode: 'trade', trade: trade, probeMs: lastAnalyseProbeMs || readProbeMsFromDom() };
     openChartModalShell(chartCtx);
     if (tradeChartModalTitle) tradeChartModalTitle.textContent = 'Trade #' + (index + 1) + ' — ' + trade.direction;
     var dur = formatDurationMs(trade.exitTs - trade.entryTs);
@@ -1409,7 +1483,7 @@ export function initTestRules(socket, state, log, profileOpts) {
     }
     if (tradeChartModalHint) {
       tradeChartModalHint.textContent =
-        'Hover for bid/ask and short/medium/long averages at that moment. Toggle lines above the chart.';
+        'Probe windows at entry: shaded band + dashed start/end lines (S/M/L). All probes end at Open. Toggle overlays above the chart.';
     }
     var b = tradeBoundsLocalDays(trade.entryTs, trade.exitTs);
     requestChartSamples(epic, b.start, b.end, chartCtx);
@@ -2670,6 +2744,7 @@ export function initTestRules(socket, state, log, profileOpts) {
       showAnalyseProgress(daysCount);
       lastAnalyseEpic = epic;
       lastAnalyseSelectedDays = selectedDays.slice().sort();
+      lastAnalyseProbeMs = probeMsFromCfg(cfg);
       socket.emit('analyse_recording', {
         epic: epic,
         intradayOnly: intradayOnly,

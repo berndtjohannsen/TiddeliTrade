@@ -5,8 +5,8 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts",
+    "start": "node --use-system-ca dist/index.js",
+    "dev": "node --use-system-ca ./node_modules/ts-node/dist/bin.js src/index.ts",
     "watch": "tsc --watch",
     "dev:watch": "nodemon --config nodemon.json",
     "kill-port": "node scripts/kill-port.js",

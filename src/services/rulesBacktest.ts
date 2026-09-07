@@ -37,9 +37,9 @@ import {
 } from './dynamicStopLoss';
 
 const RIGHT_REF_KEYS = [
-  'short.min', 'short.avg', 'short.max', 'short.range', 'short.trendPct', 'short.volume',
-  'medium.min', 'medium.avg', 'medium.max', 'medium.range', 'medium.trendPct', 'medium.volume',
-  'long.min', 'long.avg', 'long.max', 'long.range', 'long.trendPct', 'long.volume',
+  'short.min', 'short.avg', 'short.max', 'short.range', 'short.trendPct', 'short.volume', 'short.period_start',
+  'medium.min', 'medium.avg', 'medium.max', 'medium.range', 'medium.trendPct', 'medium.volume', 'medium.period_start',
+  'long.min', 'long.avg', 'long.max', 'long.range', 'long.trendPct', 'long.volume', 'long.period_start',
   'dayStart',
 ];
 
@@ -184,6 +184,8 @@ interface ProbeStats {
   count: number;
   trendDir: string | null;
   trendPct: number | null;
+  periodStartBuy: number | null;
+  periodStartSell: number | null;
 }
 
 interface Context {
@@ -196,7 +198,7 @@ interface Context {
   probes: { short: ProbeStats; medium: ProbeStats; long: ProbeStats };
 }
 
-function computeStats(samples: { mid: number; spread: number }[]): Omit<ProbeStats, 'trendDir' | 'trendPct'> {
+function computeStats(samples: { mid: number; spread: number }[]): Omit<ProbeStats, 'trendDir' | 'trendPct' | 'periodStartBuy' | 'periodStartSell'> {
   if (!samples || samples.length === 0) {
     return { min: null, max: null, range: null, avg: null, stdDev: null, avgSpread: null, count: 0 };
   }
@@ -221,6 +223,19 @@ function computeStats(samples: { mid: number; spread: number }[]): Omit<ProbeSta
     min, max, range: max - min, avg, stdDev,
     avgSpread: spreadSum / samples.length,
     count: samples.length,
+  };
+}
+
+/** Bid/offer at the oldest eligible sample in the probe window. */
+function computePeriodStart(samples: { mid: number; spread: number }[]): Pick<ProbeStats, 'periodStartBuy' | 'periodStartSell'> {
+  if (!samples || samples.length === 0) {
+    return { periodStartBuy: null, periodStartSell: null };
+  }
+  const first = samples[0];
+  const spread = first.spread || 0;
+  return {
+    periodStartBuy: first.mid + spread / 2,
+    periodStartSell: first.mid - spread / 2,
   };
 }
 
@@ -284,13 +299,16 @@ class ProbeWindowTracker {
     const shortStats = computeStats(this.short);
     const mediumStats = computeStats(this.medium);
     const longStats = computeStats(this.long);
+    const shortPeriodStart = computePeriodStart(this.short);
+    const mediumPeriodStart = computePeriodStart(this.medium);
+    const longPeriodStart = computePeriodStart(this.long);
     const shortTrend = computeTrend(this.short);
     const mediumTrend = computeTrend(this.medium);
     const longTrend = computeTrend(this.long);
     return {
-      short: { ...shortStats, trendDir: shortTrend?.dir ?? null, trendPct: shortTrend?.pct ?? null },
-      medium: { ...mediumStats, trendDir: mediumTrend?.dir ?? null, trendPct: mediumTrend?.pct ?? null },
-      long: { ...longStats, trendDir: longTrend?.dir ?? null, trendPct: longTrend?.pct ?? null },
+      short: { ...shortStats, ...shortPeriodStart, trendDir: shortTrend?.dir ?? null, trendPct: shortTrend?.pct ?? null },
+      medium: { ...mediumStats, ...mediumPeriodStart, trendDir: mediumTrend?.dir ?? null, trendPct: mediumTrend?.pct ?? null },
+      long: { ...longStats, ...longPeriodStart, trendDir: longTrend?.dir ?? null, trendPct: longTrend?.pct ?? null },
     };
   }
 }
@@ -343,6 +361,11 @@ function getRightValue(rule: Rule, ctx: Context): number | string | null {
     const [probe, stat] = r.split('.');
     const p = ctx.probes[probe as keyof typeof ctx.probes];
     if (!p) return null;
+    if (stat === 'period_start') {
+      if (rule.left === 'Buy') return p.periodStartBuy;
+      if (rule.left === 'Sell') return p.periodStartSell;
+      return null;
+    }
     const key = stat === 'avg' ? 'avg' : stat === 'min' ? 'min' : stat === 'max' ? 'max' : stat === 'volume' ? 'count' : stat === 'range' ? 'range' : stat === 'trendPct' ? 'trendPct' : null;
     return key != null ? (p as unknown as Record<string, number>)[key] ?? null : null;
   }

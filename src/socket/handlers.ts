@@ -237,10 +237,37 @@ function updateSleepPrevention(io: Server, appRunning: boolean): void {
   }
 }
 
-function emitRecordingStatus(io: Server): void {
+/** Active stream epic — avoids loadConfig() on every Lightstreamer tick during recording. */
+let streamEpicCache: string | null = null;
+let cachedRecordedCount: number | null = null;
+let cachedRecordedCountEpic: string | null = null;
+let cachedRecordedCountAt = 0;
+const RECORDED_COUNT_DB_INTERVAL_MS = 10000;
+
+function invalidateRecordedCountCache(): void {
+  cachedRecordedCount = null;
+  cachedRecordedCountEpic = null;
+  cachedRecordedCountAt = 0;
+}
+
+function emitRecordingStatus(io: Server, forceDbCount = false): void {
   const status = getRecordingStatus();
-  const epic = loadConfig().epic || null;
-  const recordedCount = epic ? getRecordedSampleCount(epic) : null;
+  const epic = streamEpicCache || loadConfig().epic || null;
+  let recordedCount: number | null = null;
+  if (epic) {
+    const stale =
+      epic !== cachedRecordedCountEpic
+      || cachedRecordedCount == null
+      || Date.now() - cachedRecordedCountAt >= RECORDED_COUNT_DB_INTERVAL_MS;
+    if (forceDbCount || stale) {
+      cachedRecordedCount = getRecordedSampleCount(epic);
+      cachedRecordedCountEpic = epic;
+      cachedRecordedCountAt = Date.now();
+    }
+    recordedCount = cachedRecordedCount;
+  } else {
+    invalidateRecordedCountCache();
+  }
   io.emit('recording_status', {
     recording: status.recording,
     epic,
@@ -898,6 +925,8 @@ export function registerSocketHandlers(io: Server): void {
   function doStop(logMsg?: string): void {
     lastPriceSocketEmitTs = 0;
     loggedClosedDealIds.clear();
+    streamEpicCache = null;
+    invalidateRecordedCountCache();
     stopStream();
     currentSession = null;
     scheduledCloses = [];
@@ -1049,24 +1078,24 @@ export function registerSocketHandlers(io: Server): void {
         io.emit('log', 'Scheduled closes loaded: ' + scheduledCloses.length);
       }
       const epic = cfg.epic || 'CS.D.CFDGOLD.CFD.IP';
+      streamEpicCache = epic;
       try {
         await fetchAndEmitMarketDetails(session, epic);
         startStream(
           session,
           epic,
           (data) => {
-            const cfgNow = loadConfig();
-            if (cfgNow.epic && isRecording()) {
-              if (recordPrice(cfgNow.epic, data, lastClientSentimentByEpic[cfgNow.epic] ?? null)) {
-                io.emit('recorded_sample', { epic: cfgNow.epic, ts: Date.now(), bid: data.bid, offer: data.offer, spread: data.spread });
+            const epicNow = streamEpicCache;
+            if (epicNow && isRecording()) {
+              if (recordPrice(epicNow, data, lastClientSentimentByEpic[epicNow] ?? null)) {
+                io.emit('recorded_sample', { epic: epicNow, ts: Date.now(), bid: data.bid, offer: data.offer, spread: data.spread });
               }
             }
             const now = Date.now();
             if (now - lastPriceSocketEmitTs < PRICE_SOCKET_EMIT_MIN_MS) return;
             lastPriceSocketEmitTs = now;
             io.emit('price_update', data);
-            if (currentSession && data && typeof data.bid === 'number' && typeof data.offer === 'number') {
-              const epicNow = loadConfig().epic || epic;
+            if (currentSession && epicNow && data && typeof data.bid === 'number' && typeof data.offer === 'number') {
               onDynamicStopLossPriceTick(
                 currentSession,
                 epicNow,
@@ -1156,6 +1185,8 @@ export function registerSocketHandlers(io: Server): void {
 
     socket.on('setEpic', async (epic: string) => {
       updateConfig({ epic: epic || undefined });
+      streamEpicCache = epic || null;
+      invalidateRecordedCountCache();
       io.emit('epic', epic);
       io.emit('log', 'Epic set: ' + (epic || '—'));
       if (currentSession && epic) {
@@ -1168,7 +1199,7 @@ export function registerSocketHandlers(io: Server): void {
           io.emit('log', 'Stream switch failed: ' + (err instanceof Error ? err.message : ''));
         }
       }
-      emitRecordingStatus(io);
+      emitRecordingStatus(io, true);
     });
 
     socket.on('setWatchlist', (watchlistId: string) => {
@@ -1200,7 +1231,7 @@ export function registerSocketHandlers(io: Server): void {
       startRecording();
       if (recordingStatusTimer) clearInterval(recordingStatusTimer);
       recordingStatusTimer = setInterval(() => emitRecordingStatus(io), 10000);
-      emitRecordingStatus(io);
+      emitRecordingStatus(io, true);
       io.emit('log', 'Recording started: ' + epic);
     });
 
@@ -1210,7 +1241,7 @@ export function registerSocketHandlers(io: Server): void {
         clearInterval(recordingStatusTimer);
         recordingStatusTimer = null;
       }
-      emitRecordingStatus(io);
+      emitRecordingStatus(io, true);
       io.emit('log', 'Recording stopped');
     });
 
@@ -1307,6 +1338,7 @@ export function registerSocketHandlers(io: Server): void {
         totalDeleted += deleteSamplesByDays(epic, days);
         daysRemoved.push(...days.map((d) => d + '|' + epic));
       }
+      invalidateRecordedCountCache();
       socket.emit('delete_recorded_days_result', { deleted: totalDeleted, daysRemoved, recordedCount: null });
     });
 
@@ -1318,6 +1350,7 @@ export function registerSocketHandlers(io: Server): void {
         return;
       }
       const { deleted, daysRemoved } = deleteSparseDays(epic, minCount);
+      invalidateRecordedCountCache();
       socket.emit('prune_sparse_days_result', { deleted, daysRemoved, recordedCount: getRecordedSampleCount(epic) });
     });
 
@@ -1362,6 +1395,7 @@ export function registerSocketHandlers(io: Server): void {
         maxGapMs: Math.round(maxGapMinutes * 60 * 1000),
         lowCoveragePct,
       });
+      invalidateRecordedCountCache();
       socket.emit('prune_gap_days_result', {
         deleted,
         daysRemoved,
