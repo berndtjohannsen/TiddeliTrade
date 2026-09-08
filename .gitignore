@@ -4,6 +4,8 @@ dist/
 config.json
 scheduled-closes.json
 transactions.json
+price_records.*
+oldrecords/
 *.log
 .DS_Store
 ignore.txt
