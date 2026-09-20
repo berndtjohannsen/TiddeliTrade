@@ -23,6 +23,14 @@ function newProfileId() {
   return 'bp-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
 }
 
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 function formatPlSummary(result) {
   if (!result) return '—';
   if (result.totalGainLossPounds != null) {
@@ -72,14 +80,63 @@ function defaultProfileName(strategy, analyseOptions, report) {
   return parts.length > 0 ? parts.join(' ') : 'Profile';
 }
 
-function formatReportSummary(report) {
-  if (!report) return '';
+function formatWinRate(summary) {
+  if (!summary || summary.winRate == null || isNaN(summary.winRate)) return '—';
+  return summary.winRate.toFixed(1) + '%';
+}
+
+/** When the backtest was run (saved report, legacy lastResult, or profile save time). */
+function profileRunAt(profile) {
+  if (!profile) return null;
+  if (profile.savedReport && profile.savedReport.runAt) return profile.savedReport.runAt;
+  if (profile.lastResult && profile.lastResult.runAt) return profile.lastResult.runAt;
+  return profile.savedAt || null;
+}
+
+/** One-line stats: run date, P/L, days, trades, win rate. */
+function formatProfileInlineStats(summary, runAt) {
+  if (!summary) return '';
   var parts = [];
-  if (report.daysAnalysed != null) parts.push(report.daysAnalysed + ' days');
-  if (report.tradeCount != null) parts.push(report.tradeCount + ' trades');
-  var pl = formatPlSummary(report);
+  var runDate = formatProfileDate(runAt);
+  if (runDate && runDate !== '—') parts.push(runDate);
+  var pl = formatPlSummary(summary);
   if (pl && pl !== '—') parts.push('P/L ' + pl);
+  if (summary.daysAnalysed != null) parts.push(summary.daysAnalysed + ' days');
+  if (summary.tradeCount != null) parts.push(summary.tradeCount + ' trades');
+  var winRate = formatWinRate(summary);
+  if (winRate !== '—') parts.push(winRate + ' win');
   return parts.join(' · ');
+}
+
+function formatReportSummary(report, runAt) {
+  if (!report) return '';
+  return formatProfileInlineStats(report, runAt != null ? runAt : Date.now());
+}
+
+/** HTML second line for profile list rows (P/L coloured). */
+function formatProfileInlineStatsHtml(summary, runAt, plClass) {
+  if (!summary) return '';
+  var bits = [];
+  var sep = '<span class="text-slate-500"> · </span>';
+  var runDate = formatProfileDate(runAt);
+  if (runDate && runDate !== '—') {
+    bits.push('<span class="text-slate-500">' + escapeHtml(runDate) + '</span>');
+  }
+  var pl = formatPlSummary(summary);
+  if (pl && pl !== '—') {
+    bits.push('<span class="' + plClass + '">P/L ' + escapeHtml(pl) + '</span>');
+  }
+  if (summary.daysAnalysed != null) {
+    bits.push('<span class="text-slate-500">' + summary.daysAnalysed + ' days</span>');
+  }
+  if (summary.tradeCount != null) {
+    bits.push('<span class="text-slate-500">' + summary.tradeCount + ' trades</span>');
+  }
+  var winRate = formatWinRate(summary);
+  if (winRate !== '—') {
+    bits.push('<span class="text-slate-500">' + escapeHtml(winRate) + ' win</span>');
+  }
+  return bits.join(sep);
 }
 
 /** Multi-line summary for the post-analyse result modal. */
@@ -858,19 +915,21 @@ export function initBacktestProfiles(opts) {
       .map(function (p) {
         var active = p.id === getActiveTradeProfileId(epic);
         var summary = profileReportSummary(p);
-        var pl = summary ? formatPlSummary(summary) : '—';
-        var plClass =
+        var runAt = profileRunAt(p);
+        var inlineStats = formatProfileInlineStats(summary, runAt);
+        var inlineStatsHtml = formatProfileInlineStatsHtml(
+          summary,
+          runAt,
           summary && (summary.totalGainLossPounds != null ? summary.totalGainLossPounds : summary.totalGainLoss) < 0
             ? 'text-red-400'
-            : summary
-              ? 'text-emerald-400'
-              : 'text-slate-500';
-        var days = summary && summary.daysAnalysed != null ? summary.daysAnalysed : '—';
-        var trades = summary && summary.tradeCount != null ? summary.tradeCount : '—';
-        var savedDate = formatProfileDate(p.savedAt);
+            : 'text-emerald-400'
+        );
+        var runDate = formatProfileDate(runAt);
         var loadTitle = profileApplyLocked
           ? PROFILE_APPLY_BLOCKED_MSG
-          : 'Activate on Trade (same rules for backtest) — saved ' + savedDate;
+          : 'Activate on Trade (same rules for backtest)' +
+            (runDate && runDate !== '—' ? ' — run ' + runDate : '') +
+            (inlineStats ? ' — ' + inlineStats : '');
         var loadBtnClass =
           'flex-1 min-w-0 text-left' +
           (profileApplyLocked && !active ? ' opacity-50 cursor-not-allowed' : '');
@@ -890,22 +949,13 @@ export function initBacktestProfiles(opts) {
           '<span class="text-slate-200 font-medium truncate block">' +
           escapeHtml(p.name) +
           '</span>' +
-          '<span class="font-mono text-[10px]">' +
-          '<span class="text-slate-500">' +
-          savedDate +
-          '</span>' +
-          '<span class="text-slate-500"> · </span>' +
-          '<span class="' +
-          plClass +
-          '">' +
-          pl +
-          '</span>' +
-          '<span class="text-slate-500"> · ' +
-          days +
-          ' days · ' +
-          trades +
-          ' trades</span>' +
-          '</span>' +
+          (inlineStatsHtml
+            ? '<span class="font-mono text-[10px] block truncate" title="' +
+              escapeHtml(inlineStats) +
+              '">' +
+              inlineStatsHtml +
+              '</span>'
+            : '<span class="font-mono text-[10px] text-slate-500 block">No backtest result saved</span>') +
           '</button>' +
           '<button type="button" class="shrink-0 px-1.5 py-0.5 rounded text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200" data-profile-export="' +
           p.id +
@@ -920,14 +970,6 @@ export function initBacktestProfiles(opts) {
         );
       })
       .join('');
-  }
-
-  function escapeHtml(s) {
-    return String(s)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
   }
 
   function findProfile(epic, id) {

@@ -186,6 +186,8 @@ export function initTestRules(socket, state, log, profileOpts) {
   var loadDaysProgressText = document.getElementById('loadDaysProgressText');
   var pruneProgressModal = document.getElementById('pruneProgressModal');
   var pruneProgressText = document.getElementById('pruneProgressText');
+  var deleteDaysProgressModal = document.getElementById('deleteDaysProgressModal');
+  var deleteDaysProgressText = document.getElementById('deleteDaysProgressText');
   var tradeChartModal = document.getElementById('tradeChartModal');
   var tradeChartModalBackdrop = document.getElementById('tradeChartModalBackdrop');
   var tradeChartModalClose = document.getElementById('tradeChartModalClose');
@@ -2441,6 +2443,29 @@ export function initTestRules(socket, state, log, profileOpts) {
     if (pruneGapBtn) pruneGapBtn.disabled = false;
   }
 
+  var deleteDaysPending = false;
+
+  function showDeleteDaysProgress(message) {
+    deleteDaysPending = true;
+    if (deleteDaysProgressModal) {
+      deleteDaysProgressModal.classList.remove('hidden');
+      deleteDaysProgressModal.setAttribute('aria-hidden', 'false');
+    }
+    if (deleteDaysProgressText) {
+      deleteDaysProgressText.textContent = message || 'Removing selected days…';
+    }
+    if (deleteSelectedDaysBtn) deleteSelectedDaysBtn.disabled = true;
+  }
+
+  function hideDeleteDaysProgress() {
+    deleteDaysPending = false;
+    if (deleteDaysProgressModal) {
+      deleteDaysProgressModal.classList.add('hidden');
+      deleteDaysProgressModal.setAttribute('aria-hidden', 'true');
+    }
+    if (deleteSelectedDaysBtn) deleteSelectedDaysBtn.disabled = false;
+  }
+
   function getEpicDisplayName(epic) {
     if (!epicSelect || !epic) return epic || '';
     for (var i = 0; i < epicSelect.options.length; i++) {
@@ -2585,6 +2610,7 @@ export function initTestRules(socket, state, log, profileOpts) {
 
   if (deleteSelectedDaysBtn) {
     deleteSelectedDaysBtn.addEventListener('click', function () {
+      if (deleteDaysPending) return;
       var selected = [];
       var cbs = daysListEl ? daysListEl.querySelectorAll('input[type="checkbox"]:checked') : [];
       for (var i = 0; i < cbs.length; i++) {
@@ -2596,6 +2622,7 @@ export function initTestRules(socket, state, log, profileOpts) {
         return;
       }
       appendLog('Deleting ' + selected.length + ' day(s)…');
+      showDeleteDaysProgress('Deleting ' + selected.length + ' day(s)…');
       socket.emit('delete_recorded_days', { items: selected });
     });
   }
@@ -2647,6 +2674,7 @@ export function initTestRules(socket, state, log, profileOpts) {
   });
 
   socket.on('delete_recorded_days_result', function (data) {
+    hideDeleteDaysProgress();
     if (data && data.error) {
       appendLog('Delete failed: ' + data.error);
     } else if (data) {
@@ -2783,6 +2811,7 @@ export function initTestRules(socket, state, log, profileOpts) {
     hideAnalyseProgress();
     hideLoadDaysProgress();
     hidePruneProgress();
+    hideDeleteDaysProgress();
   });
 
   if (logBody) logBody.innerHTML = '';

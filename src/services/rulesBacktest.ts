@@ -1104,6 +1104,12 @@ export function runBacktest(
     return true;
   }
 
+  /** True when consecutive-loss halt is active, flat, and the rest of the day cannot produce trades. */
+  function isHaltedFlatForLossDay(): boolean {
+    const streakLimit = config.stopAfterConsecutiveLosses ?? 0;
+    return streakLimit > 0 && buyStoppedAfterLoss && sellStoppedAfterLoss && openPosition === null;
+  }
+
   function onTradeClosed(trade: BacktestTrade): void {
     const closeDayKey = getDayKey(trade.exitTs);
     if (trade.profitLoss >= 0) {
@@ -1164,21 +1170,49 @@ export function runBacktest(
   const missedOpenEpisodeCounts = new Map<string, number>();
   let prevAlmostOpenKeys = new Set<string>();
 
+  function resetEdgeDetectionState(): void {
+    prevAlmostOpenKeys = new Set();
+    prevRulesPass = false;
+    prevBlocked = false;
+    prevCanOpen = false;
+    prevMid = null;
+  }
+
+  function reportSampleProgress(done: number): void {
+    if (!onProgress) return;
+    const clamped = Math.min(done, totalSamples);
+    if (clamped % progressEvery === 0 || clamped === totalSamples) {
+      onProgress(clamped, totalSamples, snapshotTradeStats(trades));
+    }
+  }
+
   const totalSamples = samples.length;
   const progressEvery = progressSampleInterval(totalSamples);
   if (onProgress) onProgress(0, totalSamples, snapshotTradeStats(trades));
 
   for (let i = 0; i < samples.length; i++) {
-    const done = i + 1;
-    if (onProgress && (done % progressEvery === 0 || done === totalSamples)) {
-      onProgress(done, totalSamples, snapshotTradeStats(trades));
-    }
     const s = samples[i];
     const loopDayKey = getDayKey(s.ts);
     if (prevLoopDayKey !== null && loopDayKey !== prevLoopDayKey) {
       resetLossHandlingForNewDay();
     }
     prevLoopDayKey = loopDayKey;
+
+    // After consecutive-loss halt with no open position, skip remaining samples for this day.
+    if (isHaltedFlatForLossDay()) {
+      let nextDayIndex = i + 1;
+      while (nextDayIndex < samples.length && getDayKey(samples[nextDayIndex].ts) === loopDayKey) {
+        nextDayIndex++;
+      }
+      if (nextDayIndex > i + 1) {
+        reportSampleProgress(nextDayIndex);
+        if (nextDayIndex < samples.length) resetEdgeDetectionState();
+        i = nextDayIndex - 1;
+        continue;
+      }
+    }
+
+    reportSampleProgress(i + 1);
     const mid = (s.bid + s.offer) / 2;
     const sample: BacktestPriceSample = { ts: s.ts, mid, spread: s.spread, probeEligible: probeEligibleFlags[i] };
 
