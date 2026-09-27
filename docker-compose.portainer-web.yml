@@ -4,7 +4,8 @@
 #   1. Portainer → Stacks → Add stack → Web editor → name: tiddelitrade
 #   2. Paste this file → Deploy the stack
 #
-# Do NOT use "Git repository" for this stack — Git stacks hide the Editor even without build:.
+# Do NOT use "Git repository" for this stack — Git stacks hide the Editor.
+# Git stacks also omit `build:` (Portainer 2.29+ often 500s on in-stack builds); build on the host instead.
 #
 # Rebuild image after pulling code on the server:
 #   cd /path/to/TiddeliTrade && git pull && docker build -t tiddelitrade:latest .

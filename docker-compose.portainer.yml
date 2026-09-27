@@ -1,23 +1,25 @@
-# Portainer stack — deploy from Git (no UI Editor; build runs on redeploy).
+# Portainer stack — deploy from Git (Pull and redeploy).
 #
 # Portainer → Stacks → Add stack → Git repository:
 #   URL:    https://github.com/berndtjohannsen/TiddeliTrade.git
 #   Ref:    main
 #   Path:   docker-compose.portainer.yml
 #
-# For an editable stack in Portainer, use docker-compose.portainer-web.yml instead
-# (Web editor deploy — see that file for migration steps).
+# IMPORTANT — no `build:` here. Portainer 2.29+ often returns HTTP 500 when a Git
+# stack tries to build on the server. Build the image on the host first, then redeploy:
+#
+#   cd /path/to/TiddeliTrade && git pull
+#   docker build -t tiddelitrade:latest .
+#   Portainer → Stacks → tiddelitrade → Pull and redeploy
+#
+# For an editable stack in Portainer, use docker-compose.portainer-web.yml instead.
 #
 # App URL: http://<server-host>:3002
 # First run: open Settings in the UI and enter IG credentials (stored in the volume).
 
 services:
   tiddelitrade:
-    build:
-      context: .
-      dockerfile: Dockerfile
     image: tiddelitrade:latest
-    pull_policy: build
     container_name: tiddelitrade
     ports:
       - "3002:3000"
