@@ -24,6 +24,9 @@ services:
       NODE_ENV: production
     volumes:
       - tiddelitrade-data:/app/data
+    # Cap RAM so a Node/SQLite spike OOMs this container instead of the whole host (32 GB box).
+    mem_limit: 2048m
+    memswap_limit: 2048m
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]

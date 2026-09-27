@@ -22,4 +22,7 @@ services:
       # IG_PASSWORD: ""
     volumes:
       - ./docker-data:/app/data
+    # Cap RAM so a Node/SQLite spike OOMs this container instead of the whole host.
+    mem_limit: 2048m
+    memswap_limit: 2048m
     restart: unless-stopped
