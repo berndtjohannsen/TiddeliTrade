@@ -1,27 +1,11 @@
-# Portainer stack — Git repository + Editor tab (same pattern as your other projects).
-#
-# Create (one time):
-#   Portainer → Stacks → Add stack → Git repository
-#   URL:    https://github.com/berndtjohannsen/TiddeliTrade.git
-#   Ref:    main
-#   Path:   docker-compose.portainer.yml
-#
-# You still get the Editor tab to view/edit the compose in the UI.
-# Do NOT use "Web editor" (paste-only) — that stack is not linked to GitHub and
-# cannot build from source (Update → pull from Docker Hub → HTTP 500).
-#
-# Update after pushing code:
-#   Pull and redeploy  (leave "Re-pull image" unchecked)
-#
-# App URL: http://<server-host>:3002
+# Same as docker-compose.portainer-web.yml — for Git stack path or Web editor paste.
+# GitHub Actions builds and pushes to ghcr.io (see .github/workflows/container.yml).
+# Portainer pulls the image; do not build on the server.
 
 services:
   tiddelitrade:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: tiddelitrade:latest
-    pull_policy: build
+    image: ghcr.io/berndtjohannsen/tiddelitrade:${TIDDELI_TAG:-latest}
+    pull_policy: always
     container_name: tiddelitrade
     ports:
       - "3002:3000"
@@ -31,7 +15,6 @@ services:
       NODE_ENV: production
     volumes:
       - tiddelitrade-data:/app/data
-    # Cap RAM so a Node/SQLite spike OOMs this container instead of the whole host (32 GB box).
     mem_limit: 2048m
     memswap_limit: 2048m
     restart: unless-stopped

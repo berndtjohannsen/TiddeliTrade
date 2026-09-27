@@ -1,15 +1,13 @@
-# Same stack as docker-compose.portainer.yml — kept as an alternate compose path only.
-# Prefer docker-compose.portainer.yml for new Git stacks.
+# Portainer stack: pull the image GitHub builds. Do not build on the server.
+# Paste this in Portainer (Stacks → Add stack → Web editor). Set env vars in the UI if needed.
+# Same pattern as TiddeliQuiz — GitHub Actions publishes to ghcr.io; Portainer pulls on Update.
 #
-# See docker-compose.portainer.yml for setup (Git repository, not Web editor paste-only).
+# After pushing code: wait for GitHub Actions to finish, then Update the stack (Re-pull OK).
 
 services:
   tiddelitrade:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: tiddelitrade:latest
-    pull_policy: build
+    image: ghcr.io/berndtjohannsen/tiddelitrade:${TIDDELI_TAG:-latest}
+    pull_policy: always
     container_name: tiddelitrade
     ports:
       - "3002:3000"
