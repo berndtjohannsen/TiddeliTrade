@@ -1,21 +1,15 @@
-# Portainer — Web editor stack (editable in the UI).
+# Same stack as docker-compose.portainer.yml — kept as an alternate compose path only.
+# Prefer docker-compose.portainer.yml for new Git stacks.
 #
-# Setup (one time):
-#   1. Portainer → Stacks → Add stack → Web editor → name: tiddelitrade
-#   2. Paste this file → Deploy the stack
-#
-# Do NOT use "Git repository" for this stack — Git stacks hide the Editor.
-# Rebuild image after pulling code on the server, then Update the stack:
-#   cd /path/to/TiddeliTrade && git pull && docker build -t tiddelitrade:latest .
-#   Portainer → Stacks → tiddelitrade → Update the stack
-# pull_policy: never — use the locally built image; do not pull from Docker Hub.
-#
-# App URL: http://<server-host>:3002
+# See docker-compose.portainer.yml for setup (Git repository, not Web editor paste-only).
 
 services:
   tiddelitrade:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: tiddelitrade:latest
-    pull_policy: never
+    pull_policy: build
     container_name: tiddelitrade
     ports:
       - "3002:3000"
@@ -25,7 +19,6 @@ services:
       NODE_ENV: production
     volumes:
       - tiddelitrade-data:/app/data
-    # Cap RAM so a Node/SQLite spike OOMs this container instead of the whole host.
     mem_limit: 2048m
     memswap_limit: 2048m
     restart: unless-stopped

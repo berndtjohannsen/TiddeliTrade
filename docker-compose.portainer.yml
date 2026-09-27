@@ -1,18 +1,19 @@
-# Portainer stack — deploy from Git (Pull and redeploy).
+# Portainer stack — Git repository + Editor tab (same pattern as your other projects).
 #
-# Portainer → Stacks → Add stack → Git repository:
+# Create (one time):
+#   Portainer → Stacks → Add stack → Git repository
 #   URL:    https://github.com/berndtjohannsen/TiddeliTrade.git
 #   Ref:    main
 #   Path:   docker-compose.portainer.yml
 #
-# Pull and redeploy rebuilds from this repo (pull_policy: build).
-# Do NOT use image-only without pull_policy: never — Docker will try to pull
-# tiddelitrade:latest from Docker Hub and fail with "pull access denied" (HTTP 500).
+# You still get the Editor tab to view/edit the compose in the UI.
+# Do NOT use "Web editor" (paste-only) — that stack is not linked to GitHub and
+# cannot build from source (Update → pull from Docker Hub → HTTP 500).
 #
-# For an editable stack in Portainer, use docker-compose.portainer-web.yml instead.
+# Update after pushing code:
+#   Pull and redeploy  (leave "Re-pull image" unchecked)
 #
 # App URL: http://<server-host>:3002
-# First run: open Settings in the UI and enter IG credentials (stored in the volume).
 
 services:
   tiddelitrade:
