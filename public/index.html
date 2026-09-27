@@ -888,6 +888,42 @@
           <button type="button" id="testRulesButton2" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Run backtest on recorded samples using current rules and probe periods">Analyse recording</button>
           <span id="testRulesRecordedCount" class="text-xs text-slate-500" data-tooltip="Total recorded samples for current instrument in database">—</span>
         </div>
+        <div class="flex flex-col gap-1.5 mb-2 pt-1 border-t border-slate-800 text-xs">
+          <div class="flex flex-wrap items-center gap-2">
+            <label class="flex items-center gap-1.5 shrink-0 cursor-pointer">
+              <input type="checkbox" id="recordingScheduleEnabled" class="rounded bg-slate-800 border-slate-600 text-violet-500 focus:ring-violet-500">
+              <span class="text-slate-400" data-tooltip="Server starts and stops recording on schedule — works without a browser open.">Auto schedule</span>
+            </label>
+            <span class="text-slate-500 shrink-0">Mode</span>
+            <label class="flex items-center gap-1 shrink-0 cursor-pointer">
+              <input type="radio" name="recordingScheduleMode" id="recordingScheduleModeFixed" value="fixed" checked class="rounded bg-slate-800 border-slate-600 text-violet-500">
+              <span class="text-slate-400" data-tooltip="Record between fixed local start/stop times each day.">Fixed times</span>
+            </label>
+            <label class="flex items-center gap-1 shrink-0 cursor-pointer">
+              <input type="radio" name="recordingScheduleMode" id="recordingScheduleModeTradeHours" value="tradeHours" class="rounded bg-slate-800 border-slate-600 text-violet-500">
+              <span class="text-slate-400" data-tooltip="Record while IG dealing is open for the current instrument (Europe/London hours, refreshed from IG).">Trade hours</span>
+            </label>
+            <span id="recordingScheduleStatus" class="text-xs font-mono text-slate-400 ml-auto" data-tooltip="Whether the server should record right now">—</span>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="text-slate-500 shrink-0" data-tooltip="Local time window when the server records prices (fixed mode only).">Record from</span>
+            <input type="time" id="recordingScheduleStart" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Start time (local). Server connects to IG and begins recording.">
+            <span class="text-slate-500 shrink-0">to</span>
+            <input type="time" id="recordingScheduleStop" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-xs disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Stop time (local). Recording stops; stream may disconnect to save memory.">
+            <label class="flex items-center gap-1.5 shrink-0 cursor-pointer">
+              <input type="checkbox" id="recordingScheduleRepeatDaily" checked class="rounded bg-slate-800 border-slate-600 text-violet-500 focus:ring-violet-500">
+              <span class="text-slate-500" data-tooltip="When checked, the time window applies every day. When unchecked, only on the day you save these settings.">Repeat daily</span>
+            </label>
+            <label class="flex items-center gap-1.5 shrink-0 cursor-pointer">
+              <input type="checkbox" id="recordingScheduleWeekdaysOnly" class="rounded bg-slate-800 border-slate-600 text-violet-500 focus:ring-violet-500">
+              <span class="text-slate-500" data-tooltip="Skip Saturday and Sunday. Trade hours: London calendar; fixed times: your local timezone.">Weekdays only</span>
+            </label>
+            <label class="flex items-center gap-1.5 shrink-0 cursor-pointer">
+              <input type="checkbox" id="recordingScheduleStopStream" checked class="rounded bg-slate-800 border-slate-600 text-violet-500 focus:ring-violet-500">
+              <span class="text-slate-500" data-tooltip="Disconnect IG stream when the window ends (saves RAM). Skipped if rules trading is active.">Stop stream after</span>
+            </label>
+          </div>
+        </div>
         <div class="flex flex-col gap-1 mb-2 text-xs">
           <div class="flex flex-wrap items-center gap-2">
             <span class="text-slate-500" data-tooltip="Grouped by instrument; each line shows instrument, then its days below">Days (all instruments)</span>

@@ -2816,6 +2816,133 @@ export function initTestRules(socket, state, log, profileOpts) {
 
   if (logBody) logBody.innerHTML = '';
 
+  var scheduleEnabledEl = document.getElementById('recordingScheduleEnabled');
+  var scheduleModeFixedEl = document.getElementById('recordingScheduleModeFixed');
+  var scheduleModeTradeHoursEl = document.getElementById('recordingScheduleModeTradeHours');
+  var scheduleStartEl = document.getElementById('recordingScheduleStart');
+  var scheduleStopEl = document.getElementById('recordingScheduleStop');
+  var scheduleRepeatEl = document.getElementById('recordingScheduleRepeatDaily');
+  var scheduleWeekdaysEl = document.getElementById('recordingScheduleWeekdaysOnly');
+  var scheduleStopStreamEl = document.getElementById('recordingScheduleStopStream');
+  var scheduleStatusEl = document.getElementById('recordingScheduleStatus');
+  var scheduleSaveTimer = null;
+
+  function localDateKey(d) {
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
+
+  function scheduleInputsEnabled() {
+    return !!(scheduleEnabledEl && scheduleEnabledEl.checked);
+  }
+
+  function isTradeHoursMode() {
+    return !!(scheduleModeTradeHoursEl && scheduleModeTradeHoursEl.checked);
+  }
+
+  function syncScheduleInputsDisabled() {
+    var on = scheduleInputsEnabled();
+    var tradeHours = isTradeHoursMode();
+    if (scheduleModeFixedEl) scheduleModeFixedEl.disabled = !on;
+    if (scheduleModeTradeHoursEl) scheduleModeTradeHoursEl.disabled = !on;
+    if (scheduleStartEl) scheduleStartEl.disabled = !on || tradeHours;
+    if (scheduleStopEl) scheduleStopEl.disabled = !on || tradeHours;
+    if (scheduleRepeatEl) scheduleRepeatEl.disabled = !on || tradeHours;
+    if (scheduleWeekdaysEl) scheduleWeekdaysEl.disabled = !on;
+    if (scheduleStopStreamEl) scheduleStopStreamEl.disabled = !on;
+  }
+
+  function readRecordingScheduleFromDom() {
+    var start = scheduleStartEl && scheduleStartEl.value ? scheduleStartEl.value : '';
+    var stop = scheduleStopEl && scheduleStopEl.value ? scheduleStopEl.value : '';
+    var repeat = scheduleRepeatEl ? scheduleRepeatEl.checked !== false : true;
+    var activeDate = '';
+    if (!repeat && (start || stop)) activeDate = localDateKey(new Date());
+    return {
+      recordingScheduleEnabled: scheduleInputsEnabled(),
+      recordingScheduleMode: isTradeHoursMode() ? 'tradeHours' : 'fixed',
+      recordingScheduleStartTime: start,
+      recordingScheduleStopTime: stop,
+      recordingScheduleRepeatDaily: repeat,
+      recordingScheduleWeekdaysOnly: scheduleWeekdaysEl ? !!scheduleWeekdaysEl.checked : false,
+      recordingScheduleStopStreamWhenDone: scheduleStopStreamEl ? scheduleStopStreamEl.checked !== false : true,
+      recordingScheduleTimezone: typeof Intl !== 'undefined' && Intl.DateTimeFormat
+        ? Intl.DateTimeFormat().resolvedOptions().timeZone
+        : undefined,
+      recordingScheduleActiveDate: activeDate || undefined
+    };
+  }
+
+  function applyRecordingScheduleFromConfig(ui) {
+    ui = ui || {};
+    if (scheduleEnabledEl) scheduleEnabledEl.checked = !!ui.recordingScheduleEnabled;
+    var tradeHours = ui.recordingScheduleMode === 'tradeHours';
+    if (scheduleModeFixedEl) scheduleModeFixedEl.checked = !tradeHours;
+    if (scheduleModeTradeHoursEl) scheduleModeTradeHoursEl.checked = tradeHours;
+    if (scheduleStartEl) scheduleStartEl.value = ui.recordingScheduleStartTime || '';
+    if (scheduleStopEl) scheduleStopEl.value = ui.recordingScheduleStopTime || '';
+    if (scheduleRepeatEl) scheduleRepeatEl.checked = ui.recordingScheduleRepeatDaily !== false;
+    if (scheduleWeekdaysEl) scheduleWeekdaysEl.checked = !!ui.recordingScheduleWeekdaysOnly;
+    if (scheduleStopStreamEl) scheduleStopStreamEl.checked = ui.recordingScheduleStopStreamWhenDone !== false;
+    syncScheduleInputsDisabled();
+  }
+
+  function updateRecordingScheduleStatus(msg) {
+    if (!scheduleStatusEl) return;
+    if (!msg || !msg.enabled) {
+      scheduleStatusEl.textContent = 'Off';
+      scheduleStatusEl.className = 'text-xs font-mono text-slate-500 ml-auto';
+      return;
+    }
+    if (msg.note) {
+      scheduleStatusEl.textContent = msg.note;
+      scheduleStatusEl.className = 'text-xs font-mono ' + (msg.inWindow ? 'text-emerald-400' : 'text-amber-400/90') + ' ml-auto';
+      return;
+    }
+    if (msg.inWindow) {
+      scheduleStatusEl.textContent = msg.mode === 'tradeHours' ? 'Market open' : 'Recording window open';
+      scheduleStatusEl.className = 'text-xs font-mono text-emerald-400 ml-auto';
+    } else {
+      scheduleStatusEl.textContent = msg.mode === 'tradeHours' ? 'Market closed' : 'Outside window';
+      scheduleStatusEl.className = 'text-xs font-mono text-slate-400 ml-auto';
+    }
+  }
+
+  function saveRecordingSchedule() {
+    if (scheduleSaveTimer) clearTimeout(scheduleSaveTimer);
+    scheduleSaveTimer = setTimeout(function () {
+      scheduleSaveTimer = null;
+      var patch = readRecordingScheduleFromDom();
+      fetch('/api/config')
+        .then(function (r) { return r.json(); })
+        .then(function (cfg) {
+          var ui = Object.assign({}, cfg.ui || {}, patch);
+          return fetch('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ui: ui })
+          });
+        })
+        .catch(function () { /* ignore */ });
+    }, 400);
+  }
+
+  fetch('/api/config')
+    .then(function (r) { return r.json(); })
+    .then(function (cfg) {
+      applyRecordingScheduleFromConfig(cfg.ui || {});
+    })
+    .catch(function () { /* ignore */ });
+
+  socket.on('recording_schedule_status', updateRecordingScheduleStatus);
+
+  [scheduleEnabledEl, scheduleModeFixedEl, scheduleModeTradeHoursEl, scheduleStartEl, scheduleStopEl, scheduleRepeatEl, scheduleWeekdaysEl, scheduleStopStreamEl].forEach(function (el) {
+    if (!el) return;
+    el.addEventListener('change', function () {
+      syncScheduleInputsDisabled();
+      saveRecordingSchedule();
+    });
+  });
+
   return {
     setTestRulesPanelEnabled: function (enabled) {
       var panel = document.getElementById('testRulesPanel');

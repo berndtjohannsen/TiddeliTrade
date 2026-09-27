@@ -130,23 +130,47 @@ function dateKeyInTimezone(ts: number, timeZone: string): string {
   return fmt.format(new Date(ts));
 }
 
-/** True when schedule window blocks new entries at ts. Blank start/stop = never blocks. */
-export function isScheduleBlockingOpens(ts: number, config: BacktestConfig): boolean {
+const WEEKDAY_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+function weekdayIndexInTimezone(ts: number, timeZone: string): number {
+  const fmt = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short' });
+  const part = fmt.formatToParts(new Date(ts)).find((p) => p.type === 'weekday')?.value;
+  return WEEKDAY_INDEX[part ?? ''] ?? 0;
+}
+
+/** True for Monday–Friday in the given IANA timezone. */
+export function isWeekdayInTimezone(ts: number, timeZone: string): boolean {
+  const wd = weekdayIndexInTimezone(ts, timeZone);
+  return wd >= 1 && wd <= 5;
+}
+
+/** Schedule window fields shared by rules backtest and server-side recording scheduler. */
+export type ScheduleWindowConfig = Pick<
+  BacktestConfig,
+  'scheduleStartTime' | 'scheduleStopTime' | 'scheduleRepeatDaily' | 'scheduleActiveDate' | 'scheduleTimezone'
+>;
+
+/** True when ts is inside the configured schedule window. Blank start/stop = always inside. */
+export function isWithinScheduleWindow(ts: number, config: ScheduleWindowConfig): boolean {
   const startMin = parseScheduleTimeHHMM(config.scheduleStartTime);
   const stopMin = parseScheduleTimeHHMM(config.scheduleStopTime);
-  if (startMin == null && stopMin == null) return false;
+  if (startMin == null && stopMin == null) return true;
   const tz = config.scheduleTimezone || 'Europe/London';
   if (config.scheduleRepeatDaily === false && config.scheduleActiveDate) {
     if (dateKeyInTimezone(ts, tz) !== config.scheduleActiveDate) return false;
   }
   const nowMin = minutesInTimezone(ts, tz);
-  let active: boolean;
   if (startMin != null && stopMin != null) {
-    if (startMin <= stopMin) active = nowMin >= startMin && nowMin < stopMin;
-    else active = nowMin >= startMin || nowMin < stopMin;
-  } else if (startMin != null) active = nowMin >= startMin;
-  else active = nowMin < stopMin!;
-  return !active;
+    if (startMin <= stopMin) return nowMin >= startMin && nowMin < stopMin;
+    return nowMin >= startMin || nowMin < stopMin;
+  }
+  if (startMin != null) return nowMin >= startMin;
+  return nowMin < stopMin!;
+}
+
+/** True when schedule window blocks new entries at ts. Blank start/stop = never blocks. */
+export function isScheduleBlockingOpens(ts: number, config: BacktestConfig): boolean {
+  return !isWithinScheduleWindow(ts, config);
 }
 
 /** Close minute (London) for the dealing session containing ts, or null if flat/unknown. */

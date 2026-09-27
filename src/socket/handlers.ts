@@ -59,7 +59,11 @@ import {
   type RuleSetConfig,
   buildDynamicSlReportMeta,
   dayKeyFromTimestamp,
+  isWithinScheduleWindow,
+  isWeekdayInTimezone,
+  type ScheduleWindowConfig,
 } from '../services/rulesBacktest';
+import { isDealingOpenLondon, isWeekdayLondon } from '../services/dealingSchedule';
 import {
   clearDynamicStopLossTracking,
   getDynamicStopLossStatuses,
@@ -277,6 +281,7 @@ function emitRecordingStatus(io: Server, forceDbCount = false): void {
   });
 }
 let closeSchedulerTimer: ReturnType<typeof setInterval> | null = null;
+let recordingScheduleTimer: ReturnType<typeof setInterval> | null = null;
 let positionsPollTimer: ReturnType<typeof setInterval> | null = null;
 let ordersPollTimer: ReturnType<typeof setInterval> | null = null;
 const recentlyDeletedOrderIds: Record<string, number> = {};
@@ -965,6 +970,299 @@ export function registerSocketHandlers(io: Server): void {
     io.emit('log', logMsg || 'Stopped');
   }
 
+  async function beginStreamingSession(session: IgSession, io: Server): Promise<void> {
+    const cfg = loadConfig();
+    scheduledCloses = loadScheduledCloses();
+    await runOverdueCloses(session, io);
+    let positions: Awaited<ReturnType<typeof getPositions>> = [];
+    try {
+      positions = await pollAndEmitPositions(session, io);
+    } catch {
+      io.emit('positions', []);
+    }
+    const openDealIds = new Set(positions.map((p) => p.dealId));
+    const before = scheduledCloses.length;
+    scheduledCloses = scheduledCloses.filter((s) => openDealIds.has(s.dealId));
+    if (scheduledCloses.length !== before) {
+      saveScheduledCloses(scheduledCloses);
+      if (before > 0 && scheduledCloses.length === 0) {
+        io.emit('log', 'Cleared stale scheduled closes (no open positions)');
+      }
+    }
+    io.emit('scheduled_closes', scheduledCloses);
+    if (positionsPollTimer) clearInterval(positionsPollTimer);
+    positionsPollTimer = setInterval(() => {
+      if (currentSession) pollAndEmitPositions(currentSession, io);
+    }, 15000);
+    try {
+      await pollAndEmitWorkingOrders(session, io);
+    } catch {
+      io.emit('working_orders', []);
+    }
+    if (ordersPollTimer) clearInterval(ordersPollTimer);
+    ordersPollTimer = setInterval(() => {
+      if (currentSession) pollAndEmitWorkingOrders(currentSession, io);
+    }, 15000);
+    if (scheduledCloses.length > 0) {
+      persistAndRunScheduler(session, io);
+      io.emit('log', 'Scheduled closes loaded: ' + scheduledCloses.length);
+    }
+    const epic = cfg.epic || 'CS.D.CFDGOLD.CFD.IP';
+    streamEpicCache = epic;
+    try {
+      await fetchAndEmitMarketDetails(session, epic);
+      startStream(
+        session,
+        epic,
+        (data) => {
+          const epicNow = streamEpicCache;
+          if (epicNow && isRecording()) {
+            if (recordPrice(epicNow, data, lastClientSentimentByEpic[epicNow] ?? null)) {
+              io.emit('recorded_sample', { epic: epicNow, ts: Date.now(), bid: data.bid, offer: data.offer, spread: data.spread });
+            }
+          }
+          const now = Date.now();
+          if (now - lastPriceSocketEmitTs < PRICE_SOCKET_EMIT_MIN_MS) return;
+          lastPriceSocketEmitTs = now;
+          io.emit('price_update', data);
+          if (currentSession && epicNow && data && typeof data.bid === 'number' && typeof data.offer === 'number') {
+            onDynamicStopLossPriceTick(
+              currentSession,
+              epicNow,
+              data.bid,
+              data.offer,
+              (msg) => io.emit('log', msg)
+            );
+            io.emit('dynamic_stop_loss_status', getDynamicStopLossStatuses());
+          }
+        },
+        (msg) => io.emit('log', msg)
+      );
+      io.emit('log', 'Streaming: ' + epic);
+    } catch (streamErr) {
+      const msg = streamErr instanceof Error ? streamErr.message : 'Stream failed';
+      io.emit('log', 'Stream: ' + msg);
+    }
+    updateSleepPrevention(io, true);
+  }
+
+  let recordingScheduleWasInWindow = false;
+  let recordingScheduleStreamInProgress = false;
+
+  function anyRulesEngineActive(): boolean {
+    for (const running of rulesEngineRunningBySocket.values()) {
+      if (running) return true;
+    }
+    return !!(loadConfig().ui?.tradingRulesRunning);
+  }
+
+  type RecordingScheduleRuntime = ScheduleWindowConfig & {
+    stopStreamWhenDone: boolean;
+    mode: 'fixed' | 'tradeHours';
+    weekdaysOnly: boolean;
+  };
+
+  function getRecordingScheduleConfig(): RecordingScheduleRuntime | null {
+    const ui = loadConfig().ui || {};
+    if (!ui.recordingScheduleEnabled) return null;
+    const mode = ui.recordingScheduleMode === 'tradeHours' ? 'tradeHours' : 'fixed';
+    const start = (ui.recordingScheduleStartTime || '').trim();
+    const stop = (ui.recordingScheduleStopTime || '').trim();
+    if (mode === 'fixed' && !start && !stop) return null;
+    return {
+      scheduleStartTime: start,
+      scheduleStopTime: stop,
+      scheduleRepeatDaily: ui.recordingScheduleRepeatDaily !== false,
+      scheduleActiveDate: ui.recordingScheduleActiveDate,
+      scheduleTimezone: ui.recordingScheduleTimezone || 'Europe/London',
+      stopStreamWhenDone: ui.recordingScheduleStopStreamWhenDone !== false,
+      mode,
+      weekdaysOnly: !!ui.recordingScheduleWeekdaysOnly,
+    };
+  }
+
+  async function evaluateRecordingScheduleWindow(
+    now: number,
+    epic: string,
+    sched: RecordingScheduleRuntime
+  ): Promise<{ inWindow: boolean; note?: string }> {
+    if (sched.mode === 'tradeHours') {
+      const resolved = await resolveDealingForBacktest(
+        epic,
+        getInstrumentSettings(epic),
+        currentSession,
+        false
+      );
+      let inWindow: boolean;
+      if (resolved.is24_7) {
+        inWindow = true;
+      } else {
+        inWindow = isDealingOpenLondon(now, resolved.dealingWeekLondon);
+      }
+      if (sched.weekdaysOnly) {
+        if (!isWeekdayLondon(now)) inWindow = false;
+      }
+      if (!inWindow && sched.weekdaysOnly && !isWeekdayLondon(now)) {
+        return { inWindow: false, note: 'Weekend' };
+      }
+      if (resolved.is24_7 && !sched.weekdaysOnly) {
+        return { inWindow, note: inWindow ? '24/7 market' : undefined };
+      }
+      if (!inWindow) {
+        return { inWindow: false, note: 'Market closed' };
+      }
+      return { inWindow: true, note: 'Market open' };
+    }
+    let inWindow = isWithinScheduleWindow(now, sched);
+    if (sched.weekdaysOnly) {
+      const tz = sched.scheduleTimezone || 'Europe/London';
+      if (!isWeekdayInTimezone(now, tz)) inWindow = false;
+    }
+    if (!inWindow && sched.weekdaysOnly) {
+      const tz = sched.scheduleTimezone || 'Europe/London';
+      if (!isWeekdayInTimezone(now, tz)) {
+        return { inWindow: false, note: 'Weekend' };
+      }
+    }
+    return { inWindow };
+  }
+
+  function emitRecordingScheduleStatus(
+    io: Server,
+    enabled: boolean,
+    inWindow: boolean,
+    note?: string,
+    mode?: 'fixed' | 'tradeHours'
+  ): void {
+    io.emit('recording_schedule_status', {
+      enabled,
+      inWindow,
+      note: note || null,
+      mode: mode || null,
+    });
+  }
+
+  function startRecordingInternal(io: Server): void {
+    const epic = loadConfig().epic;
+    if (!isStreaming() || !epic) {
+      io.emit('log', 'Recording: need streaming and an instrument selected');
+      emitRecordingStatus(io);
+      return;
+    }
+    startRecording();
+    if (recordingStatusTimer) clearInterval(recordingStatusTimer);
+    recordingStatusTimer = setInterval(() => emitRecordingStatus(io), 10000);
+    emitRecordingStatus(io, true);
+    io.emit('log', 'Recording started: ' + epic);
+  }
+
+  function stopRecordingInternal(io: Server, logMsg?: string): void {
+    stopRecording();
+    if (recordingStatusTimer) {
+      clearInterval(recordingStatusTimer);
+      recordingStatusTimer = null;
+    }
+    emitRecordingStatus(io, true);
+    if (logMsg) io.emit('log', logMsg);
+  }
+
+  function disconnectStreamAfterRecording(io: Server, logMsg: string): void {
+    stopRecordingInternal(io);
+    if (anyRulesEngineActive()) {
+      io.emit('log', logMsg + ' (stream kept — rules trading active)');
+      return;
+    }
+    stopStream();
+    streamEpicCache = null;
+    invalidateRecordedCountCache();
+    if (positionsPollTimer) {
+      clearInterval(positionsPollTimer);
+      positionsPollTimer = null;
+    }
+    if (ordersPollTimer) {
+      clearInterval(ordersPollTimer);
+      ordersPollTimer = null;
+    }
+    engineStatus = currentSession ? 'connected' : 'ready';
+    io.emit('status', engineStatus);
+    io.emit('price_update', null);
+    updateSleepPrevention(io, currentSession !== null);
+    io.emit('log', logMsg);
+  }
+
+  async function ensureStreamForScheduler(io: Server): Promise<boolean> {
+    if (isStreaming()) return true;
+    if (recordingScheduleStreamInProgress) return false;
+    if (engineStatus === 'running') return isStreaming();
+    recordingScheduleStreamInProgress = true;
+    try {
+      io.emit('log', 'Recording schedule: connecting to IG…');
+      let session = currentSession;
+      if (!session) {
+        session = await createSession();
+        currentSession = session;
+        io.emit('account', accountToClient(session));
+        const cfg = loadConfig();
+        io.emit('epic', cfg.epic || '');
+        io.emit('watchlistId', cfg.watchlistId || '');
+        io.emit('log', 'Recording schedule: logged in as ' + session.accountId);
+      }
+      await beginStreamingSession(session, io);
+      engineStatus = 'running';
+      io.emit('status', engineStatus);
+      return isStreaming();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Connection failed';
+      io.emit('log', 'Recording schedule: ' + msg);
+      return false;
+    } finally {
+      recordingScheduleStreamInProgress = false;
+    }
+  }
+
+  async function tickRecordingSchedule(io: Server): Promise<void> {
+    const sched = getRecordingScheduleConfig();
+    if (!sched) {
+      recordingScheduleWasInWindow = false;
+      emitRecordingScheduleStatus(io, false, false);
+      return;
+    }
+    const epic = (loadConfig().epic || '').trim();
+    if (!epic) {
+      emitRecordingScheduleStatus(io, true, false, 'No instrument selected', sched.mode);
+      return;
+    }
+    const now = Date.now();
+    const { inWindow, note } = await evaluateRecordingScheduleWindow(now, epic, sched);
+    emitRecordingScheduleStatus(io, true, inWindow, note, sched.mode);
+
+    if (inWindow) {
+      if (!isStreaming() && !recordingScheduleStreamInProgress) {
+        const ok = await ensureStreamForScheduler(io);
+        if (ok && isStreaming() && !isRecording()) startRecordingInternal(io);
+      } else if (isStreaming() && !isRecording()) {
+        startRecordingInternal(io);
+      }
+      if (!recordingScheduleWasInWindow) {
+        io.emit('log', sched.mode === 'tradeHours' ? 'Recording schedule: market open' : 'Recording schedule: window open');
+      }
+    } else {
+      if (recordingScheduleWasInWindow) {
+        io.emit('log', sched.mode === 'tradeHours' ? 'Recording schedule: market closed' : 'Recording schedule: window closed');
+      }
+      if (isRecording()) {
+        if (sched.stopStreamWhenDone) {
+          disconnectStreamAfterRecording(io, 'Recording schedule: stopped (stream disconnected)');
+        } else {
+          stopRecordingInternal(io, 'Recording schedule: recording stopped');
+        }
+      } else if (recordingScheduleWasInWindow && sched.stopStreamWhenDone && isStreaming() && !anyRulesEngineActive()) {
+        disconnectStreamAfterRecording(io, 'Recording schedule: stream disconnected');
+      }
+    }
+    recordingScheduleWasInWindow = inWindow;
+  }
+
   setOnProfileChangeListener(() => doStop('Account switched – use Connect to log in with new credentials'));
 
   io.on('connection', async (socket: Socket) => {
@@ -993,6 +1291,29 @@ export function registerSocketHandlers(io: Server): void {
     socket.emit('epic', cfg.epic || '');
     socket.emit('watchlistId', cfg.watchlistId || '');
     emitRecordingStatus(io);
+    const schedCfg = getRecordingScheduleConfig();
+    if (schedCfg) {
+      const epicNow = (cfg.epic || '').trim();
+      if (!epicNow) {
+        socket.emit('recording_schedule_status', {
+          enabled: true,
+          inWindow: false,
+          note: 'No instrument selected',
+          mode: schedCfg.mode,
+        });
+      } else {
+        void evaluateRecordingScheduleWindow(Date.now(), epicNow, schedCfg).then(({ inWindow, note }) => {
+          socket.emit('recording_schedule_status', {
+            enabled: true,
+            inWindow,
+            note: note || null,
+            mode: schedCfg.mode,
+          });
+        });
+      }
+    } else {
+      socket.emit('recording_schedule_status', { enabled: false, inWindow: false, note: null, mode: null });
+    }
     updateSleepPrevention(io, currentSession !== null);
 
     socket.on('rules_engine_running', (running: boolean) => {
@@ -1039,82 +1360,6 @@ export function registerSocketHandlers(io: Server): void {
         socket.emit('status', engineStatus);
       }
     });
-
-    async function beginStreamingSession(session: IgSession, io: Server): Promise<void> {
-      const cfg = loadConfig();
-      scheduledCloses = loadScheduledCloses();
-      await runOverdueCloses(session, io);
-      let positions: Awaited<ReturnType<typeof getPositions>> = [];
-      try {
-        positions = await pollAndEmitPositions(session, io);
-      } catch {
-        io.emit('positions', []);
-      }
-      const openDealIds = new Set(positions.map((p) => p.dealId));
-      const before = scheduledCloses.length;
-      scheduledCloses = scheduledCloses.filter((s) => openDealIds.has(s.dealId));
-      if (scheduledCloses.length !== before) {
-        saveScheduledCloses(scheduledCloses);
-        if (before > 0 && scheduledCloses.length === 0) {
-          io.emit('log', 'Cleared stale scheduled closes (no open positions)');
-        }
-      }
-      io.emit('scheduled_closes', scheduledCloses);
-      if (positionsPollTimer) clearInterval(positionsPollTimer);
-      positionsPollTimer = setInterval(() => {
-        if (currentSession) pollAndEmitPositions(currentSession, io);
-      }, 15000);
-      try {
-        await pollAndEmitWorkingOrders(session, io);
-      } catch {
-        io.emit('working_orders', []);
-      }
-      if (ordersPollTimer) clearInterval(ordersPollTimer);
-      ordersPollTimer = setInterval(() => {
-        if (currentSession) pollAndEmitWorkingOrders(currentSession, io);
-      }, 15000);
-      if (scheduledCloses.length > 0) {
-        persistAndRunScheduler(session, io);
-        io.emit('log', 'Scheduled closes loaded: ' + scheduledCloses.length);
-      }
-      const epic = cfg.epic || 'CS.D.CFDGOLD.CFD.IP';
-      streamEpicCache = epic;
-      try {
-        await fetchAndEmitMarketDetails(session, epic);
-        startStream(
-          session,
-          epic,
-          (data) => {
-            const epicNow = streamEpicCache;
-            if (epicNow && isRecording()) {
-              if (recordPrice(epicNow, data, lastClientSentimentByEpic[epicNow] ?? null)) {
-                io.emit('recorded_sample', { epic: epicNow, ts: Date.now(), bid: data.bid, offer: data.offer, spread: data.spread });
-              }
-            }
-            const now = Date.now();
-            if (now - lastPriceSocketEmitTs < PRICE_SOCKET_EMIT_MIN_MS) return;
-            lastPriceSocketEmitTs = now;
-            io.emit('price_update', data);
-            if (currentSession && epicNow && data && typeof data.bid === 'number' && typeof data.offer === 'number') {
-              onDynamicStopLossPriceTick(
-                currentSession,
-                epicNow,
-                data.bid,
-                data.offer,
-                (msg) => io.emit('log', msg)
-              );
-              io.emit('dynamic_stop_loss_status', getDynamicStopLossStatuses());
-            }
-          },
-          (msg) => io.emit('log', msg)
-        );
-        io.emit('log', 'Streaming: ' + epic);
-      } catch (streamErr) {
-        const msg = streamErr instanceof Error ? streamErr.message : 'Stream failed';
-        io.emit('log', 'Stream: ' + msg);
-      }
-      updateSleepPrevention(io, true);
-    }
 
     socket.on('start', async () => {
       if (engineStatus === 'running') return;
@@ -1221,29 +1466,9 @@ export function registerSocketHandlers(io: Server): void {
       }
     });
 
-    socket.on('recording_start', () => {
-      const epic = loadConfig().epic;
-      if (!isStreaming() || !epic) {
-        io.emit('log', 'Recording: need streaming and an instrument selected');
-        emitRecordingStatus(io);
-        return;
-      }
-      startRecording();
-      if (recordingStatusTimer) clearInterval(recordingStatusTimer);
-      recordingStatusTimer = setInterval(() => emitRecordingStatus(io), 10000);
-      emitRecordingStatus(io, true);
-      io.emit('log', 'Recording started: ' + epic);
-    });
+    socket.on('recording_start', () => startRecordingInternal(io));
 
-    socket.on('recording_stop', () => {
-      stopRecording();
-      if (recordingStatusTimer) {
-        clearInterval(recordingStatusTimer);
-        recordingStatusTimer = null;
-      }
-      emitRecordingStatus(io, true);
-      io.emit('log', 'Recording stopped');
-    });
+    socket.on('recording_stop', () => stopRecordingInternal(io, 'Recording stopped'));
 
     socket.on('recording_status_request', () => {
       emitRecordingStatus(io);
@@ -2525,4 +2750,11 @@ export function registerSocketHandlers(io: Server): void {
       }
     });
   });
+
+  if (!recordingScheduleTimer) {
+    recordingScheduleTimer = setInterval(() => {
+      void tickRecordingSchedule(io);
+    }, 30000);
+    void tickRecordingSchedule(io);
+  }
 }

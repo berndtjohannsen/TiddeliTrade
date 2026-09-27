@@ -38,6 +38,12 @@ function londonMinutesSinceMidnight(ts: number): number {
 
 export { londonWeekdayIndexSun0, londonMinutesSinceMidnight };
 
+/** True for Monday–Friday in Europe/London. */
+export function isWeekdayLondon(ts: number): boolean {
+  const wd = londonWeekdayIndexSun0(ts);
+  return wd >= 1 && wd <= 5;
+}
+
 /** Parse IG openTime/closeTime (e.g. "22:02", "1970-01-01T21:59:00") to minutes since midnight. */
 export function parseIgTimeToMinutes(raw: string | undefined | null): number | null {
   if (raw == null) return null;

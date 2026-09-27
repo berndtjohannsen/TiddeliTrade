@@ -61,6 +61,20 @@ export interface UserConfig {
     tradingRulesScheduleStopTime?: string;
     tradingRulesScheduleRepeatDaily?: boolean;
     tradingRulesScheduleActiveDate?: string;
+    /** Server-side auto start/stop for Research price recording (no browser required). */
+    recordingScheduleEnabled?: boolean;
+    recordingScheduleStartTime?: string;
+    recordingScheduleStopTime?: string;
+    recordingScheduleRepeatDaily?: boolean;
+    recordingScheduleTimezone?: string;
+    /** When repeat-daily is off, schedule applies only on this calendar day (local). */
+    recordingScheduleActiveDate?: string;
+    /** Disconnect IG stream when the recording window ends (default true). Skipped if rules trading is active. */
+    recordingScheduleStopStreamWhenDone?: boolean;
+    /** fixed = use start/stop times; tradeHours = follow IG dealing hours for the instrument. */
+    recordingScheduleMode?: 'fixed' | 'tradeHours';
+    /** When true, skip Saturday and Sunday (London for trade hours, local tz for fixed times). */
+    recordingScheduleWeekdaysOnly?: boolean;
     /** HH:MM (local) — flatten rules positions at this time; blank = no forced close. */
     tradingRulesForcedCloseTime?: string;
     /** Max calendar days to run after Start rules (day 1 = start day). Blank/0 = unlimited. */
