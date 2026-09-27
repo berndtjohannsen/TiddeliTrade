@@ -5,12 +5,9 @@
 #   Ref:    main
 #   Path:   docker-compose.portainer.yml
 #
-# IMPORTANT — no `build:` here. Portainer 2.29+ often returns HTTP 500 when a Git
-# stack tries to build on the server. Build the image on the host first, then redeploy:
-#
-#   cd /path/to/TiddeliTrade && git pull
-#   docker build -t tiddelitrade:latest .
-#   Portainer → Stacks → tiddelitrade → Pull and redeploy
+# Pull and redeploy rebuilds from this repo (pull_policy: build).
+# Do NOT use image-only without pull_policy: never — Docker will try to pull
+# tiddelitrade:latest from Docker Hub and fail with "pull access denied" (HTTP 500).
 #
 # For an editable stack in Portainer, use docker-compose.portainer-web.yml instead.
 #
@@ -19,7 +16,11 @@
 
 services:
   tiddelitrade:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: tiddelitrade:latest
+    pull_policy: build
     container_name: tiddelitrade
     ports:
       - "3002:3000"
