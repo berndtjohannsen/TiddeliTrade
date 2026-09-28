@@ -23,7 +23,7 @@ import {
   getClientSentiment,
   type MarketDetails,
 } from '../services/ig';
-import { isStreaming, startStream, stopStream, switchEpic } from '../services/stream';
+import { getLastStreamMarketState, isStreaming, startStream, stopStream, switchEpic } from '../services/stream';
 import { appendTransaction, appendTransactionOpen } from '../transactionLog';
 import { setOnProfileChangeListener } from '../onProfileChange';
 import { preventSleep, allowSleep } from '../preventSleep';
@@ -83,6 +83,7 @@ import {
   getInstrumentSettings,
   resolveDayStartsForBacktest,
   resolveDealingForBacktest,
+  resolveDealingForLiveSchedule,
   saveDealingSnapshot,
 } from '../services/backtestMarketSnapshot';
 
@@ -1048,6 +1049,7 @@ export function registerSocketHandlers(io: Server): void {
 
   let recordingScheduleWasInWindow = false;
   let recordingScheduleStreamInProgress = false;
+  let recordingScheduleTickInProgress = false;
 
   function anyRulesEngineActive(): boolean {
     for (const running of rulesEngineRunningBySocket.values()) {
@@ -1085,13 +1087,25 @@ export function registerSocketHandlers(io: Server): void {
     now: number,
     epic: string,
     sched: RecordingScheduleRuntime
-  ): Promise<{ inWindow: boolean; note?: string }> {
+  ): Promise<{ inWindow: boolean; note?: string; deferStop?: boolean }> {
     if (sched.mode === 'tradeHours') {
-      const resolved = await resolveDealingForBacktest(
+      if (sched.weekdaysOnly && !isWeekdayLondon(now)) {
+        return { inWindow: false, note: 'Weekend' };
+      }
+      // Prefer live TRADEABLE from the stream (same rule as probe eligibility).
+      const liveState = getLastStreamMarketState().trim();
+      if (liveState) {
+        const tradeable = liveState.toUpperCase() === 'TRADEABLE';
+        return { inWindow: tradeable, note: tradeable ? 'Market open' : 'Market closed' };
+      }
+      if (isStreaming()) {
+        // Stream connected but DLG_FLAG not received yet — avoid stopping on stale/default hours.
+        return { inWindow: true, note: 'Checking market…', deferStop: true };
+      }
+      const resolved = await resolveDealingForLiveSchedule(
         epic,
         getInstrumentSettings(epic),
-        currentSession,
-        false
+        currentSession
       );
       let inWindow: boolean;
       if (resolved.is24_7) {
@@ -1099,13 +1113,7 @@ export function registerSocketHandlers(io: Server): void {
       } else {
         inWindow = isDealingOpenLondon(now, resolved.dealingWeekLondon);
       }
-      if (sched.weekdaysOnly) {
-        if (!isWeekdayLondon(now)) inWindow = false;
-      }
-      if (!inWindow && sched.weekdaysOnly && !isWeekdayLondon(now)) {
-        return { inWindow: false, note: 'Weekend' };
-      }
-      if (resolved.is24_7 && !sched.weekdaysOnly) {
+      if (resolved.is24_7) {
         return { inWindow, note: inWindow ? '24/7 market' : undefined };
       }
       if (!inWindow) {
@@ -1221,46 +1229,60 @@ export function registerSocketHandlers(io: Server): void {
   }
 
   async function tickRecordingSchedule(io: Server): Promise<void> {
-    const sched = getRecordingScheduleConfig();
-    if (!sched) {
-      recordingScheduleWasInWindow = false;
-      emitRecordingScheduleStatus(io, false, false);
-      return;
-    }
-    const epic = (loadConfig().epic || '').trim();
-    if (!epic) {
-      emitRecordingScheduleStatus(io, true, false, 'No instrument selected', sched.mode);
-      return;
-    }
-    const now = Date.now();
-    const { inWindow, note } = await evaluateRecordingScheduleWindow(now, epic, sched);
-    emitRecordingScheduleStatus(io, true, inWindow, note, sched.mode);
+    if (recordingScheduleTickInProgress) return;
+    recordingScheduleTickInProgress = true;
+    try {
+      const sched = getRecordingScheduleConfig();
+      if (!sched) {
+        recordingScheduleWasInWindow = false;
+        emitRecordingScheduleStatus(io, false, false);
+        return;
+      }
+      const epic = (loadConfig().epic || '').trim();
+      if (!epic) {
+        emitRecordingScheduleStatus(io, true, false, 'No instrument selected', sched.mode);
+        return;
+      }
+      const now = Date.now();
+      let { inWindow, note, deferStop } = await evaluateRecordingScheduleWindow(now, epic, sched);
 
-    if (inWindow) {
-      if (!isStreaming() && !recordingScheduleStreamInProgress) {
+      if (inWindow && !isStreaming() && !recordingScheduleStreamInProgress) {
         const ok = await ensureStreamForScheduler(io);
-        if (ok && isStreaming() && !isRecording()) startRecordingInternal(io);
-      } else if (isStreaming() && !isRecording()) {
-        startRecordingInternal(io);
-      }
-      if (!recordingScheduleWasInWindow) {
-        io.emit('log', sched.mode === 'tradeHours' ? 'Recording schedule: market open' : 'Recording schedule: window open');
-      }
-    } else {
-      if (recordingScheduleWasInWindow) {
-        io.emit('log', sched.mode === 'tradeHours' ? 'Recording schedule: market closed' : 'Recording schedule: window closed');
-      }
-      if (isRecording()) {
-        if (sched.stopStreamWhenDone) {
-          disconnectStreamAfterRecording(io, 'Recording schedule: stopped (stream disconnected)');
-        } else {
-          stopRecordingInternal(io, 'Recording schedule: recording stopped');
+        if (ok && isStreaming()) {
+          const fresh = await evaluateRecordingScheduleWindow(Date.now(), epic, sched);
+          inWindow = fresh.inWindow;
+          note = fresh.note;
+          deferStop = fresh.deferStop;
         }
-      } else if (recordingScheduleWasInWindow && sched.stopStreamWhenDone && isStreaming() && !anyRulesEngineActive()) {
-        disconnectStreamAfterRecording(io, 'Recording schedule: stream disconnected');
       }
+
+      emitRecordingScheduleStatus(io, true, inWindow, note, sched.mode);
+
+      if (inWindow) {
+        if (isStreaming() && !isRecording()) {
+          startRecordingInternal(io);
+        }
+        if (!recordingScheduleWasInWindow) {
+          io.emit('log', sched.mode === 'tradeHours' ? 'Recording schedule: market open' : 'Recording schedule: window open');
+        }
+      } else {
+        if (recordingScheduleWasInWindow) {
+          io.emit('log', sched.mode === 'tradeHours' ? 'Recording schedule: market closed' : 'Recording schedule: window closed');
+        }
+        if (isRecording()) {
+          if (sched.stopStreamWhenDone) {
+            disconnectStreamAfterRecording(io, 'Recording schedule: stopped (stream disconnected)');
+          } else {
+            stopRecordingInternal(io, 'Recording schedule: recording stopped');
+          }
+        } else if (recordingScheduleWasInWindow && sched.stopStreamWhenDone && isStreaming() && !anyRulesEngineActive()) {
+          disconnectStreamAfterRecording(io, 'Recording schedule: stream disconnected');
+        }
+      }
+      recordingScheduleWasInWindow = inWindow;
+    } finally {
+      recordingScheduleTickInProgress = false;
     }
-    recordingScheduleWasInWindow = inWindow;
   }
 
   setOnProfileChangeListener(() => doStop('Account switched – use Connect to log in with new credentials'));

@@ -30,6 +30,13 @@ let onPriceUpdate: PriceUpdateCallback | null = null;
 let logFn: LogCallback | null = null;
 /** Session used for PRICE:{accountId}:{epic}; needed when switching epic without reconnecting. */
 let priceStreamSession: IgSession | null = null;
+/** Latest DLG_FLAG mapped to TRADEABLE / SUSPENDED etc.; empty until first tick. */
+let lastStreamMarketState = '';
+
+/** Live market state from the price stream (empty until the first update). */
+export function getLastStreamMarketState(): string {
+  return lastStreamMarketState;
+}
 
 function log(msg: string): void {
   if (logFn) logFn(msg);
@@ -95,7 +102,10 @@ function applyPriceFields(
   if (bidVal != null && bidVal !== '') acc.lastBid = bidVal;
   if (offerVal != null && offerVal !== '') acc.lastOffer = offerVal;
   if (timeVal != null && timeVal !== '') acc.lastUpdateTime = formatPriceTimestamp(timeVal);
-  if (stateVal != null && stateVal !== '') acc.lastMarketState = dlgFlagToMarketStateLabel(stateVal);
+  if (stateVal != null && stateVal !== '') {
+    acc.lastMarketState = dlgFlagToMarketStateLabel(stateVal);
+    lastStreamMarketState = acc.lastMarketState;
+  }
   if (delayVal != null && delayVal !== '') acc.lastMarketDelay = delayVal.trim();
 }
 
@@ -133,6 +143,7 @@ export function startStream(session: IgSession, epic: string, callback: PriceUpd
     throw new Error('Session missing accountId; required for IG PRICE streaming');
   }
   stopStream();
+  lastStreamMarketState = '';
   onPriceUpdate = callback;
   logFn = onLog || null;
   priceStreamSession = session;
@@ -202,6 +213,7 @@ export function switchEpic(epic: string): void {
 
   const item = priceItemName(accountId, epic);
   log('Switching to ' + item);
+  lastStreamMarketState = '';
   const acc = {
     lastBid: '',
     lastOffer: '',
@@ -237,6 +249,7 @@ export function stopStream(): void {
   onPriceUpdate = null;
   logFn = null;
   priceStreamSession = null;
+  lastStreamMarketState = '';
   if (lsClient) {
     if (lsSubscription) {
       lsClient.unsubscribe(lsSubscription);

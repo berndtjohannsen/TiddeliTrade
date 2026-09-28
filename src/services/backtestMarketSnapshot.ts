@@ -150,6 +150,25 @@ export async function resolveDealingForBacktest(
   return resolvedFromFresh(fresh);
 }
 
+/**
+ * Live scheduler: prefer a fresh IG dealing schedule when logged in (not stale backtest snapshot).
+ */
+export async function resolveDealingForLiveSchedule(
+  epic: string,
+  inst: InstrumentSettings | null | undefined,
+  session: IgSession | null
+): Promise<ResolvedBacktestDealing> {
+  if (session) {
+    const fresh = await fetchDealingSnapshotFromIg(session, epic, false);
+    saveDealingSnapshot(epic, fresh);
+    return resolvedFromFresh(fresh);
+  }
+  const stored = readStoredDealingSnapshot(inst);
+  if (stored) return resolvedFromSnapshot(stored);
+  const fresh = await fetchDealingSnapshotFromIg(null, epic, false);
+  return resolvedFromFresh(fresh);
+}
+
 function mergeDayStartCache(
   inst: InstrumentSettings | null | undefined
 ): Record<string, number> {
