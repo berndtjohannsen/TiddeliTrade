@@ -154,7 +154,8 @@ export function initTestRules(socket, state, log, profileOpts) {
     recordBtn.addEventListener('click', function () {
       if (recordBtn.disabled) return;
       if (recordingActive) {
-        socket.emit('stop');
+        socket.emit('recording_stop');
+        socket.emit('stop_stream');
         appendLog('Stopping recording…');
       } else if (engineStatus === 'running') {
         beginRecording();

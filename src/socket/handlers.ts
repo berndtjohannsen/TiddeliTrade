@@ -1120,6 +1120,7 @@ export function registerSocketHandlers(io: Server): void {
       clearInterval(recordingStatusTimer);
       recordingStatusTimer = null;
     }
+    recordingStartedBySchedule = false;
     stopRecording();
     emitRecordingStatus(io);
     engineStatus = currentSession ? 'connected' : 'ready';
@@ -1239,6 +1240,8 @@ export function registerSocketHandlers(io: Server): void {
   let recordingScheduleWasInWindow = false;
   let recordingScheduleStreamInProgress = false;
   let recordingScheduleTickInProgress = false;
+  /** True when the 30s scheduler turned recording on; false when the user clicked Start recording in Research. */
+  let recordingStartedBySchedule = false;
 
   function anyRulesEngineActive(): boolean {
     for (const running of rulesEngineRunningBySocket.values()) {
@@ -1339,13 +1342,14 @@ export function registerSocketHandlers(io: Server): void {
     });
   }
 
-  function startRecordingInternal(io: Server): void {
+  function startRecordingInternal(io: Server, fromSchedule = false): void {
     const epic = loadConfig().epic;
     if (!isStreaming() || !epic) {
       io.emit('log', 'Recording: need streaming and an instrument selected');
       emitRecordingStatus(io);
       return;
     }
+    recordingStartedBySchedule = fromSchedule;
     startRecording();
     if (recordingStatusTimer) clearInterval(recordingStatusTimer);
     recordingStatusTimer = setInterval(() => emitRecordingStatus(io), 10000);
@@ -1354,6 +1358,7 @@ export function registerSocketHandlers(io: Server): void {
   }
 
   function stopRecordingInternal(io: Server, logMsg?: string): void {
+    recordingStartedBySchedule = false;
     stopRecording();
     if (recordingStatusTimer) {
       clearInterval(recordingStatusTimer);
@@ -1449,7 +1454,7 @@ export function registerSocketHandlers(io: Server): void {
 
       if (inWindow) {
         if (isStreaming() && !isRecording()) {
-          startRecordingInternal(io);
+          startRecordingInternal(io, true);
         }
         if (!recordingScheduleWasInWindow) {
           io.emit('log', sched.mode === 'tradeHours' ? 'Recording schedule: market open' : 'Recording schedule: window open');
@@ -1458,13 +1463,20 @@ export function registerSocketHandlers(io: Server): void {
         if (recordingScheduleWasInWindow) {
           io.emit('log', sched.mode === 'tradeHours' ? 'Recording schedule: market closed' : 'Recording schedule: window closed');
         }
-        if (isRecording()) {
+        const mayStopForSchedule = !deferStop && (isRecording() ? recordingStartedBySchedule : true);
+        if (isRecording() && mayStopForSchedule) {
           if (sched.stopStreamWhenDone) {
             disconnectStreamAfterRecording(io, 'Recording schedule: stopped (stream disconnected)');
           } else {
             stopRecordingInternal(io, 'Recording schedule: recording stopped');
           }
-        } else if (recordingScheduleWasInWindow && sched.stopStreamWhenDone && isStreaming() && !anyRulesEngineActive()) {
+        } else if (
+          recordingStartedBySchedule &&
+          recordingScheduleWasInWindow &&
+          sched.stopStreamWhenDone &&
+          isStreaming() &&
+          !anyRulesEngineActive()
+        ) {
           disconnectStreamAfterRecording(io, 'Recording schedule: stream disconnected');
         }
       }
