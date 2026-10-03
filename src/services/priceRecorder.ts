@@ -342,19 +342,11 @@ export function getAllDayStatsWithBacktestReadiness(): RecordedDayStat[] {
     else byEpic.set(row.epic, [row]);
   }
 
+  // One local calendar day per query — avoid loading an entire epic history (OOM in Docker).
   for (const [epic, rows] of byEpic) {
     const dealingOpts = getDealingFilterOptsForEpic(epic);
-    const days = rows.map((r) => r.day);
-    const samples = getRecordedSamplesFiltered(epic, { days });
-    const byDay = new Map<string, typeof samples>();
-    for (const s of samples) {
-      const dayKey = dayKeyLocalFromTs(s.ts);
-      const arr = byDay.get(dayKey);
-      if (arr) arr.push(s);
-      else byDay.set(dayKey, [s]);
-    }
     for (const row of rows) {
-      const daySamples = byDay.get(row.day) ?? [];
+      const daySamples = getRecordedSamplesFiltered(epic, { days: [row.day] });
       const readiness = evaluateDayBacktestReadiness(row.day, daySamples, dealingOpts);
       row.backtestReady = readiness.backtestReady;
       row.dealingCoveragePct = readiness.dealingCoveragePct;
@@ -364,14 +356,6 @@ export function getAllDayStatsWithBacktestReadiness(): RecordedDayStat[] {
   }
 
   return base;
-}
-
-function dayKeyLocalFromTs(ts: number): string {
-  const d = new Date(ts);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
 }
 
 const YYYY_MM_DD = /^\d{4}-\d{2}-\d{2}$/;
