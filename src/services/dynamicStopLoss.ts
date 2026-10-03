@@ -45,6 +45,74 @@ interface Tracked {
   lastAmendAttemptMs: number;
   lastRejectLogMs: number;
   lastMessage: string;
+  /** True once unrealized profit has reached trigger (resets if profit drops below). */
+  triggerReached: boolean;
+  /** Throttle repeated diagnostic log lines per deal. */
+  lastDiagLogMs: number;
+  lastDiagLogKey: string;
+}
+
+const DIAG_LOG_INTERVAL_MS = 20000;
+const REJECT_LOG_INTERVAL_MS = 15000;
+
+function fmtMoney(n: number): string {
+  return n.toFixed(2);
+}
+
+function fmtPrice(n: number): string {
+  return n.toFixed(5);
+}
+
+function exitPrice(direction: 'BUY' | 'SELL', bid: number, offer: number): number {
+  return direction === 'BUY' ? bid : offer;
+}
+
+function dealLogPrefix(t: Tracked): string {
+  return 'Dynamic stop loss [' + t.dealId + '] ' + t.direction;
+}
+
+function logDiagThrottled(
+  t: Tracked,
+  key: string,
+  message: string,
+  log: DynamicStopLossLog,
+  intervalMs: number = DIAG_LOG_INTERVAL_MS
+): void {
+  const now = Date.now();
+  if (t.lastDiagLogKey === key && now - t.lastDiagLogMs < intervalMs) return;
+  t.lastDiagLogKey = key;
+  t.lastDiagLogMs = now;
+  log(message);
+}
+
+function newTrackedBase(params: {
+  dealId: string;
+  epic: string;
+  direction: 'BUY' | 'SELL';
+  entryPrice: number;
+  size: number;
+  contractSize: number;
+  settings: DynamicStopLossSettings;
+  lastStopLevel: number | null;
+  highestLockApplied: number;
+}): Tracked {
+  return {
+    dealId: params.dealId,
+    epic: params.epic,
+    direction: params.direction,
+    entryPrice: params.entryPrice,
+    size: params.size,
+    contractSize: params.contractSize,
+    settings: params.settings,
+    lastStopLevel: params.lastStopLevel,
+    highestLockApplied: params.highestLockApplied,
+    lastAmendAttemptMs: 0,
+    lastRejectLogMs: 0,
+    lastMessage: 'Watching (dynamic SL)',
+    triggerReached: false,
+    lastDiagLogMs: 0,
+    lastDiagLogKey: '',
+  };
 }
 
 type PositionPriceSnapshot = {
@@ -229,10 +297,12 @@ export function registerDynamicStopLoss(params: {
   contractSize: number;
   settings: DynamicStopLossSettings;
   initialStopLevel?: number | null;
+  log?: DynamicStopLossLog;
 }): void {
   if (!params.dealId || !params.settings.enabled) return;
   let highestLockApplied = 0;
   const initialStop = params.initialStopLevel ?? null;
+  const contractSize = params.contractSize > 0 ? params.contractSize : 1;
   if (initialStop != null && !isNaN(initialStop)) {
     highestLockApplied = Math.max(
       0,
@@ -241,31 +311,51 @@ export function registerDynamicStopLoss(params: {
         params.entryPrice,
         initialStop,
         params.size,
-        params.contractSize > 0 ? params.contractSize : 1
+        contractSize
       )
     );
   }
-  trackedByDealId.set(params.dealId, {
+  const track = newTrackedBase({
     dealId: params.dealId,
     epic: params.epic,
     direction: params.direction,
     entryPrice: params.entryPrice,
     size: params.size,
-    contractSize: params.contractSize > 0 ? params.contractSize : 1,
+    contractSize,
     settings: params.settings,
     lastStopLevel: initialStop,
     highestLockApplied,
-    lastAmendAttemptMs: 0,
-    lastRejectLogMs: 0,
-    lastMessage: 'Watching (dynamic SL)',
   });
+  trackedByDealId.set(params.dealId, track);
+  if (params.log) {
+    const s = params.settings;
+    const stopNote =
+      initialStop != null && !isNaN(initialStop)
+        ? ' initial IG stop ' + fmtPrice(initialStop) + ' (~lock ' + fmtMoney(highestLockApplied) + ')'
+        : ' no initial IG stop';
+    params.log(
+      dealLogPrefix(track) +
+        ': watching – trigger +' +
+        fmtMoney(s.triggerProfit) +
+        ' lock +' +
+        fmtMoney(s.lockProfit) +
+        ', entry ' +
+        fmtPrice(params.entryPrice) +
+        ', size ' +
+        params.size +
+        '×' +
+        contractSize +
+        stopNote
+    );
+  }
 }
 
 /** Sync tracker with open positions (register missing, drop closed, refresh fields). */
 export function syncDynamicStopLossWithPositions(
   positions: Position[],
   _streamEpic: string,
-  cfg: UserConfig
+  cfg: UserConfig,
+  log?: DynamicStopLossLog
 ): void {
   const openIds = new Set(positions.map((p) => p.dealId));
   for (const id of [...trackedByDealId.keys()]) {
@@ -300,6 +390,7 @@ export function syncDynamicStopLossWithPositions(
       contractSize: p.contractSize ?? 1,
       settings,
       initialStopLevel: p.stopLevel ?? null,
+      log,
     });
   }
 }
@@ -455,15 +546,49 @@ function processDynamicStopLossTracker(
 ): void {
   const now = Date.now();
   const unrealized = unrealizedProfit(t.direction, t.entryPrice, t.size, t.contractSize, bid, offer);
+  const market = exitPrice(t.direction, bid, offer);
   const desiredLock = desiredLockProfit(unrealized, t.settings);
+  const prefix = dealLogPrefix(t);
+
   if (desiredLock == null) {
-    t.lastMessage = 'Waiting for trigger (' + t.settings.triggerProfit.toFixed(2) + '+)';
+    t.triggerReached = false;
+    t.lastMessage = 'Waiting for trigger (' + fmtMoney(t.settings.triggerProfit) + '+)';
     return;
   }
+
+  if (!t.triggerReached) {
+    t.triggerReached = true;
+    log(
+      prefix +
+        ': trigger reached – profit ' +
+        fmtMoney(unrealized) +
+        ' (trigger +' +
+        fmtMoney(t.settings.triggerProfit) +
+        '), target lock +' +
+        fmtMoney(desiredLock)
+    );
+  }
+
   if (desiredLock <= t.highestLockApplied + t.settings.minStepProfit - 1e-9) {
-    t.lastMessage = 'Lock ' + t.highestLockApplied.toFixed(2) + ' (peak)';
+    t.lastMessage = 'Lock ' + fmtMoney(t.highestLockApplied) + ' (peak)';
+    logDiagThrottled(
+      t,
+      'peak',
+      prefix +
+        ': no amend – profit ' +
+        fmtMoney(unrealized) +
+        ', desired lock +' +
+        fmtMoney(desiredLock) +
+        ' already applied (~+' +
+        fmtMoney(t.highestLockApplied) +
+        ', min step ' +
+        fmtMoney(t.settings.minStepProfit) +
+        ')',
+      log
+    );
     return;
   }
+
   const targetStop = lockProfitToStopLevel(
     t.direction,
     t.entryPrice,
@@ -471,22 +596,59 @@ function processDynamicStopLossTracker(
     t.size,
     t.contractSize
   );
+
   if (!isStopImprovement(t.direction, targetStop, t.lastStopLevel)) {
+    const curStop =
+      t.lastStopLevel != null && !isNaN(t.lastStopLevel) ? fmtPrice(t.lastStopLevel) : '—';
     t.lastMessage =
-      'Trailing (profit ' +
-      unrealized.toFixed(2) +
-      ', stop ' +
-      (t.lastStopLevel != null ? t.lastStopLevel.toFixed(2) : '—') +
-      ')';
+      'Trailing (profit ' + fmtMoney(unrealized) + ', stop ' + curStop + ')';
+    logDiagThrottled(
+      t,
+      'no-improve',
+      prefix +
+        ': skip amend – target stop ' +
+        fmtPrice(targetStop) +
+        ' not better than current ' +
+        curStop +
+        ' (profit ' +
+        fmtMoney(unrealized) +
+        ', desired lock +' +
+        fmtMoney(desiredLock) +
+        ', market ' +
+        fmtPrice(market) +
+        ')',
+      log
+    );
     return;
   }
+
   if (now - t.lastAmendAttemptMs < t.settings.updateIntervalMs) {
+    const waitSec = Math.ceil((t.settings.updateIntervalMs - (now - t.lastAmendAttemptMs)) / 1000);
     t.lastMessage =
       'Trailing → lock ~' +
-      desiredLock.toFixed(2) +
+      fmtMoney(desiredLock) +
       ' @ ' +
-      targetStop.toFixed(2) +
+      fmtPrice(targetStop) +
       ' (updating…)';
+    logDiagThrottled(
+      t,
+      'throttle',
+      prefix +
+        ': amend queued – wait ~' +
+        waitSec +
+        's (interval ' +
+        Math.round(t.settings.updateIntervalMs / 1000) +
+        's), lock +' +
+        fmtMoney(desiredLock) +
+        ' → stop ' +
+        fmtPrice(targetStop) +
+        ' (profit ' +
+        fmtMoney(unrealized) +
+        ', market ' +
+        fmtPrice(market) +
+        ')',
+      log
+    );
     return;
   }
 
@@ -496,10 +658,30 @@ function processDynamicStopLossTracker(
   const entry = t.entryPrice;
   const size = t.size;
   const contractSize = t.contractSize;
+  const amendUnrealized = unrealized;
+  const amendDesiredLock = desiredLock;
+  const amendMarket = market;
+
+  log(
+    prefix +
+      ': sending stop amend – lock +' +
+      fmtMoney(desiredLock) +
+      ' → stop ' +
+      fmtPrice(targetStop) +
+      ' (profit ' +
+      fmtMoney(unrealized) +
+      ', market ' +
+      fmtPrice(market) +
+      (t.lastStopLevel != null && !isNaN(t.lastStopLevel)
+        ? ', prev stop ' + fmtPrice(t.lastStopLevel)
+        : '') +
+      ')'
+  );
 
   queueAmend(async () => {
     const track = trackedByDealId.get(dealId);
     if (!track) return;
+    const logNow = Date.now();
     try {
       const result = await updatePositionStop(session, dealId, { stopLevel: targetStop });
       try {
@@ -509,34 +691,64 @@ function processDynamicStopLossTracker(
         });
         if (conf.dealStatus === 'REJECTED') {
           const reason = conf.reason || 'rejected';
-          if (now - track.lastRejectLogMs > 15000) {
-            log('Dynamic stop loss: amend rejected for ' + dealId + ' – ' + reason + ' (stop unchanged on IG)');
-            track.lastRejectLogMs = now;
+          if (logNow - track.lastRejectLogMs > REJECT_LOG_INTERVAL_MS) {
+            log(
+              dealLogPrefix(track) +
+                ': amend REJECTED – ' +
+                reason +
+                ' | profit ' +
+                fmtMoney(amendUnrealized) +
+                ' desired lock +' +
+                fmtMoney(amendDesiredLock) +
+                ' stop ' +
+                fmtPrice(targetStop) +
+                ' market ' +
+                fmtPrice(amendMarket) +
+                ' (IG stop unchanged)'
+            );
+            track.lastRejectLogMs = logNow;
           }
           track.lastMessage = 'Amend rejected: ' + reason;
           return;
         }
       } catch {
-        /* confirmation timeout – position poll will show new stop if applied */
+        log(
+          dealLogPrefix(track) +
+            ': amend confirmation timeout – stop ' +
+            fmtPrice(targetStop) +
+            ' may still apply (check position poll)'
+        );
       }
       track.lastStopLevel = targetStop;
-      track.highestLockApplied = desiredLock;
-      track.lastMessage = 'Locked ~' + desiredLock.toFixed(2) + ' @ ' + targetStop.toFixed(2);
+      track.highestLockApplied = amendDesiredLock;
+      track.lastMessage = 'Locked ~' + fmtMoney(amendDesiredLock) + ' @ ' + fmtPrice(targetStop);
       log(
-        'Dynamic stop loss: ' +
-          dealId +
-          ' ' +
-          direction +
-          ' lock ~' +
-          desiredLock.toFixed(2) +
+        dealLogPrefix(track) +
+          ': amend OK – lock +' +
+          fmtMoney(amendDesiredLock) +
           ' → stop ' +
-          targetStop.toFixed(2)
+          fmtPrice(targetStop) +
+          ' (profit ' +
+          fmtMoney(amendUnrealized) +
+          ')'
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (now - track.lastRejectLogMs > 15000) {
-        log('Dynamic stop loss: amend failed for ' + dealId + ' – ' + msg);
-        track.lastRejectLogMs = now;
+      if (logNow - track.lastRejectLogMs > REJECT_LOG_INTERVAL_MS) {
+        log(
+          dealLogPrefix(track) +
+            ': amend FAILED – ' +
+            msg +
+            ' | profit ' +
+            fmtMoney(amendUnrealized) +
+            ' desired lock +' +
+            fmtMoney(amendDesiredLock) +
+            ' stop ' +
+            fmtPrice(targetStop) +
+            ' market ' +
+            fmtPrice(amendMarket)
+        );
+        track.lastRejectLogMs = logNow;
       }
       track.lastMessage = 'Amend failed: ' + msg;
       const current = track.lastStopLevel;

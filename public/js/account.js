@@ -1,7 +1,7 @@
 /**
  * Account display and workspace connection state.
  */
-import { updateHeaderInstrument } from './onboarding.js';
+import { syncHeaderInstrument } from './onboarding.js';
 
 export function initAccount(socket, state, setBaseEnabled, clearDealMessage, onWorkspaceConnectionChange) {
   var accountInfo = document.getElementById('accountInfo');
@@ -11,14 +11,48 @@ export function initAccount(socket, state, setBaseEnabled, clearDealMessage, onW
   setBaseEnabled(false);
   if (onWorkspaceConnectionChange) onWorkspaceConnectionChange(false);
 
+  function isIgLoggedIn() {
+    return state.engineStatus === 'connected' || state.engineStatus === 'running';
+  }
+
+  function updateOverviewProfileBadge() {
+    var overviewBadge = document.getElementById('tradeOverviewProfileBadge');
+    if (!overviewBadge) return;
+    var profile = state.activeProfile || 'demo';
+    var isLive = profile === 'live';
+    overviewBadge.textContent = isLive ? 'LIVE' : 'Demo';
+    overviewBadge.className = 'profile-indicator ' + (isLive ? 'profile-indicator--live' : 'profile-indicator--demo');
+    overviewBadge.setAttribute('aria-label', isLive ? 'Live account' : 'Demo account');
+    if (isLive) {
+      overviewBadge.setAttribute(
+        'data-tooltip',
+        'Real money — trades execute on your live IG account'
+      );
+    } else {
+      overviewBadge.setAttribute('data-tooltip', 'Demo account — no real money');
+    }
+  }
+
   function updateProfileBadge() {
+    updateOverviewProfileBadge();
     var badge = document.getElementById('profileBadge');
     if (badge) {
-      var profile = state.activeProfile || 'demo';
-      badge.textContent = profile === 'live' ? 'LIVE' : 'Demo';
-      badge.className = 'px-2 py-0.5 rounded text-xs font-semibold shrink-0 ' + (profile === 'live' ? 'bg-amber-600/90 text-amber-950' : 'bg-slate-600/80 text-slate-300');
-      badge.setAttribute('data-tooltip', profile === 'live' ? 'Real money – trades execute on your live IG account' : 'Demo account – no real money at risk');
-      badge.classList.remove('hidden');
+      if (!isIgLoggedIn()) {
+        badge.classList.add('hidden');
+        badge.removeAttribute('data-tooltip');
+      } else {
+        var profile = state.activeProfile || 'demo';
+        var isLive = profile === 'live';
+        badge.textContent = isLive ? 'LIVE' : 'Demo';
+        badge.className = 'profile-indicator ' + (isLive ? 'profile-indicator--live' : 'profile-indicator--demo');
+        badge.classList.remove('hidden');
+        badge.setAttribute('aria-label', isLive ? 'Live account' : 'Demo account');
+        if (isLive) {
+          badge.setAttribute('data-tooltip', 'Real money — trades execute on your live IG account');
+        } else {
+          badge.removeAttribute('data-tooltip');
+        }
+      }
     }
     var dealLiveWarn = document.getElementById('dealLiveWarning');
     if (dealLiveWarn) {
@@ -34,6 +68,7 @@ export function initAccount(socket, state, setBaseEnabled, clearDealMessage, onW
       accountInfo.classList.add('hidden');
       accountInfo.textContent = '';
       state.accountCurrency = '';
+      updateProfileBadge();
       fetch('/api/config').then(function (r) { return r.json(); }).then(function (cfg) {
         state.activeProfile = cfg.activeProfile || 'demo';
         updateProfileBadge();
@@ -41,7 +76,7 @@ export function initAccount(socket, state, setBaseEnabled, clearDealMessage, onW
       if (mainPlaceholder) { mainPlaceholder.textContent = ''; mainPlaceholder.classList.add('hidden'); }
       if (splashHint) { splashHint.textContent = ''; splashHint.classList.add('hidden'); }
       fetch('/api/config').then(function (r) { return r.json(); }).then(function (cfg) {
-        updateHeaderInstrument(cfg);
+        syncHeaderInstrument(state, cfg);
       }).catch(function () {});
       setBaseEnabled(false);
       if (onWorkspaceConnectionChange) onWorkspaceConnectionChange(false);
@@ -77,6 +112,7 @@ export function initAccount(socket, state, setBaseEnabled, clearDealMessage, onW
     if (onWorkspaceConnectionChange) onWorkspaceConnectionChange(sessionActive);
     if (sessionActive) socket.emit('getWatchlists');
     fetch('/api/config').then(function (r) { return r.json(); }).then(function (cfg) {
+      syncHeaderInstrument(state, cfg);
       var sizeEl = document.getElementById('dealSize');
       if (sizeEl && cfg.defaultSize) {
         if (!sizeEl.value) sizeEl.value = cfg.defaultSize;
@@ -96,12 +132,13 @@ export function initAccount(socket, state, setBaseEnabled, clearDealMessage, onW
   socket.on('disconnect', function () {
     setAccount(null);
     if (disconnectBanner) disconnectBanner.classList.remove('hidden');
-    if (splashHint) splashHint.textContent = 'Server disconnected. Use Connect in your workspace to reconnect.';
+    if (splashHint) splashHint.textContent = 'Server disconnected. Open Account or Home to reconnect.';
     if (splashHint) splashHint.classList.add('text-red-200');
   });
 
   socket.on('status', function (status) {
     if (splashHint && status === 'connecting') splashHint.textContent = 'Connecting...';
+    updateProfileBadge();
   });
 
   socket.on('login_error', function (msg) {

@@ -2481,6 +2481,14 @@ export function initTestRules(socket, state, log, profileOpts) {
     return 'text-red-400/90';
   }
 
+  /** Dealing-hours coverage badge (backtest readiness uses this, not span coverage). */
+  function dealingCoverageQualityClass(pct, backtestReady) {
+    if (backtestReady) return 'text-emerald-400/90';
+    if (pct == null || isNaN(pct)) return 'text-slate-500';
+    if (pct >= 85) return 'text-amber-400/90';
+    return 'text-red-400/90';
+  }
+
   function renderDaysList(dayStats) {
     if (!daysListEl) return;
     daysListEl.innerHTML = '';
@@ -2510,6 +2518,13 @@ export function initTestRules(socket, state, log, profileOpts) {
         var day = (s && s.day) || '';
         var count = s && typeof s.count === 'number' ? s.count : null;
         var coveragePct = s && typeof s.coveragePct === 'number' ? s.coveragePct : null;
+        var dealingCoveragePct =
+          s && typeof s.dealingCoveragePct === 'number' ? s.dealingCoveragePct : null;
+        var backtestReady = !!(s && s.backtestReady);
+        var notReadyReasons =
+          s && s.backtestNotReadyReasons && s.backtestNotReadyReasons.length
+            ? s.backtestNotReadyReasons
+            : null;
         var value = epic !== '__unknown__' ? day + '|' + epic : day;
         var label = document.createElement('label');
         label.className = 'flex items-center gap-1 cursor-pointer text-slate-400 hover:text-slate-300';
@@ -2519,24 +2534,45 @@ export function initTestRules(socket, state, log, profileOpts) {
         cb.className = 'rounded bg-slate-800 border-slate-600 text-emerald-500';
         label.appendChild(cb);
         var countStr = typeof count === 'number' && count >= 0 ? ' (' + count.toLocaleString() + ')' : '';
-        var isSparse = typeof count === 'number' && count >= 0 && count < 3600;
-        if (isSparse) {
+        if (backtestReady) {
+          label.className =
+            'flex items-center gap-1 cursor-pointer text-emerald-400/95 hover:text-emerald-300 font-medium';
+        } else if (typeof count === 'number' && count >= 0 && count < 3600) {
           label.className = 'flex items-center gap-1 cursor-pointer text-amber-400/90 hover:text-amber-300';
-        } else if (coveragePct != null && coveragePct < 85) {
+        } else if (dealingCoveragePct != null && dealingCoveragePct < 85) {
           label.className = 'flex items-center gap-1 cursor-pointer text-red-400/80 hover:text-red-300';
+        } else if (notReadyReasons) {
+          label.className = 'flex items-center gap-1 cursor-pointer text-amber-400/90 hover:text-amber-300';
         }
         var titleParts = [];
-        if (isSparse) titleParts.push('Sparse day (< 3,600 samples)');
+        if (backtestReady) {
+          titleParts.push('Good for backtest: ≥90% samples during IG dealing hours, no gap over 10 min while dealing');
+        } else if (notReadyReasons) {
+          titleParts.push('Not ideal for backtest: ' + notReadyReasons.join('; '));
+        }
+        if (typeof count === 'number' && count >= 0 && count < 3600) {
+          titleParts.push('Sparse day (< 3,600 samples)');
+        }
+        if (dealingCoveragePct != null) {
+          titleParts.push(Math.round(dealingCoveragePct) + '% of expected samples during dealing hours (saved schedule)');
+        }
         if (coveragePct != null) {
-          titleParts.push(Math.round(coveragePct) + '% coverage over active span (first to last sample)');
+          titleParts.push(Math.round(coveragePct) + '% density first→last sample (legacy)');
         }
         if (titleParts.length > 0) label.title = titleParts.join('. ');
         label.appendChild(document.createTextNode(day + countStr));
-        if (coveragePct != null) {
+        if (dealingCoveragePct != null) {
           var covEl = document.createElement('span');
-          covEl.className = 'text-[10px] font-mono leading-none ' + coverageQualityClass(coveragePct);
-          covEl.textContent = Math.round(coveragePct) + '%';
+          covEl.className =
+            'text-[10px] font-mono leading-none ' +
+            dealingCoverageQualityClass(dealingCoveragePct, backtestReady);
+          covEl.textContent = Math.round(dealingCoveragePct) + '%';
           label.appendChild(covEl);
+        } else if (coveragePct != null) {
+          var covLegacy = document.createElement('span');
+          covLegacy.className = 'text-[10px] font-mono leading-none ' + coverageQualityClass(coveragePct);
+          covLegacy.textContent = Math.round(coveragePct) + '%';
+          label.appendChild(covLegacy);
         }
         var chartBtn = document.createElement('button');
         chartBtn.type = 'button';

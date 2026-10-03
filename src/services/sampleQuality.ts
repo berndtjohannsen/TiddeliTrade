@@ -2,6 +2,11 @@
  * Detect gaps, sparse coverage, and glitches in recorded price samples (1 Hz expected).
  */
 import type { RecordedSample } from './priceRecorder';
+import {
+  computeOpenMsInWindow,
+  isProbeEligibleSample,
+  type ProbeSampleFilterOpts,
+} from './probeSamples';
 
 export interface SampleQualityDayRow {
   day: string;
@@ -227,6 +232,110 @@ export function evaluateDayForGapPrune(
     reasons.push(`${row.coveragePct.toFixed(0)}% coverage (under ${lowCoveragePct}%)`);
   }
   return { prune: reasons.length > 0, reasons, row };
+}
+
+/** Local calendar day bounds (same as Research day charts). */
+function dayLocalBoundsMs(day: string): { fromTs: number; toTsInclusive: number } {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!m) return { fromTs: 0, toTsInclusive: 0 };
+  const y = parseInt(m[1], 10);
+  const mo = parseInt(m[2], 10) - 1;
+  const d = parseInt(m[3], 10);
+  const fromTs = new Date(y, mo, d, 0, 0, 0, 0).getTime();
+  const toTsInclusive = new Date(y, mo, d, 23, 59, 59, 999).getTime();
+  return { fromTs, toTsInclusive };
+}
+
+export interface BacktestDayReadinessOptions {
+  /** Min % of expected ~1 Hz samples during IG dealing hours (default 90, same as gap prune). */
+  minDealingCoveragePct?: number;
+  /** Max gap between ticks while dealing time exists in the interval (default 10 min). */
+  maxGapMsInDealing?: number;
+  /** Skip readiness when expected dealing samples under this (default 3600 ≈ 1 h). */
+  minExpectedDealingSamples?: number;
+}
+
+export interface BacktestDayReadiness {
+  backtestReady: boolean;
+  dealingCoveragePct: number;
+  maxGapMsInDealing: number;
+  expectedDealingSamples: number;
+  dealingSampleCount: number;
+  reasons: string[];
+}
+
+/** Good for backtest: dense recording during IG dealing hours, no long gaps while market should be open. */
+export function evaluateDayBacktestReadiness(
+  day: string,
+  samples: RecordedSample[],
+  dealingOpts: ProbeSampleFilterOpts,
+  options?: BacktestDayReadinessOptions
+): BacktestDayReadiness {
+  const minDealingCoveragePct = options?.minDealingCoveragePct ?? DEFAULT_GAP_PRUNE_LOW_COVERAGE_PCT;
+  const maxGapMsInDealing = options?.maxGapMsInDealing ?? DEFAULT_MAX_GAP_PRUNE_MS;
+  const minExpectedDealingSamples = options?.minExpectedDealingSamples ?? DEFAULT_SPARSE_THRESHOLD;
+
+  const { fromTs, toTsInclusive } = dayLocalBoundsMs(day);
+  const windowEndExclusive = toTsInclusive + 1;
+  const expectedDealingSamples = Math.max(
+    0,
+    Math.floor(computeOpenMsInWindow(fromTs, windowEndExclusive, dealingOpts) / DEFAULT_INTERVAL_MS)
+  );
+
+  const inDay = samples
+    .filter((s) => s.ts >= fromTs && s.ts <= toTsInclusive)
+    .sort((a, b) => a.ts - b.ts);
+
+  let dealingSampleCount = 0;
+  for (const s of inDay) {
+    if (isProbeEligibleSample(s, dealingOpts)) dealingSampleCount++;
+  }
+
+  const dealingCoveragePct =
+    expectedDealingSamples > 0
+      ? Math.min(100, (dealingSampleCount / expectedDealingSamples) * 100)
+      : dealingSampleCount > 0
+        ? 100
+        : 0;
+
+  let maxGap = 0;
+  for (let i = 1; i < inDay.length; i++) {
+    const delta = inDay[i].ts - inDay[i - 1].ts;
+    if (delta <= DEFAULT_INTERVAL_MS * 1.5) continue;
+    const openMsInGap = computeOpenMsInWindow(inDay[i - 1].ts, inDay[i].ts, dealingOpts);
+    if (openMsInGap >= DEFAULT_INTERVAL_MS * 1.5) {
+      maxGap = Math.max(maxGap, delta);
+    }
+  }
+
+  const reasons: string[] = [];
+  if (expectedDealingSamples < minExpectedDealingSamples) {
+    reasons.push(
+      `short dealing window (~${expectedDealingSamples.toLocaleString()} expected samples, need ${minExpectedDealingSamples.toLocaleString()})`
+    );
+  }
+  if (expectedDealingSamples >= minExpectedDealingSamples && dealingCoveragePct < minDealingCoveragePct) {
+    reasons.push(
+      `${dealingCoveragePct.toFixed(0)}% during dealing hours (need ${minDealingCoveragePct}%)`
+    );
+  }
+  if (maxGap > maxGapMsInDealing) {
+    reasons.push(`longest in-session gap ${formatGapMs(maxGap)} (over ${formatGapMs(maxGapMsInDealing)})`);
+  }
+
+  const backtestReady =
+    expectedDealingSamples >= minExpectedDealingSamples &&
+    dealingCoveragePct >= minDealingCoveragePct &&
+    maxGap <= maxGapMsInDealing;
+
+  return {
+    backtestReady,
+    dealingCoveragePct,
+    maxGapMsInDealing: maxGap,
+    expectedDealingSamples,
+    dealingSampleCount,
+    reasons,
+  };
 }
 
 /** Analyse recorded samples grouped by local calendar day. */

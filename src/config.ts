@@ -53,6 +53,10 @@ export interface UserConfig {
     probesLongPeriod?: number;
     /** Max days to backfill for probes (cap; actual backfill = longest probe period, uses IG allowance) */
     probesBackfillDays?: number;
+    /** When true, live Trade chart day-seed merges SQLite recordings (Research DB). Default false for trading-only deployments. */
+    liveChartUseRecordedSamples?: boolean;
+    /** When true, persist live stream ticks to SQLite while not in Research recording mode. Default false. */
+    persistStreamSamplesWhileTrading?: boolean;
     /** Trading rules: true = engine running (manual trading disabled), false = engine stopped */
     tradingRulesRunning?: boolean;
     /** When false, engine places deals automatically without confirmation dialog */
@@ -453,6 +457,8 @@ const DEFAULT_CONFIG: UserConfig = {
     probesMediumPeriod: 60,
     probesLongPeriod: 1440,
     probesBackfillDays: 3,
+    liveChartUseRecordedSamples: false,
+    persistStreamSamplesWhileTrading: false,
   },
 };
 

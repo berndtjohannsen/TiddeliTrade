@@ -5,9 +5,11 @@
 
 import path from 'path';
 import Database from 'better-sqlite3';
+import { getDealingFilterOptsForEpic } from './backtestMarketSnapshot';
 import {
   DEFAULT_MAX_GAP_PRUNE_MS,
   coveragePctForSampleSpan,
+  evaluateDayBacktestReadiness,
   evaluateDayForGapPrune,
   type GapPruneEvaluateOptions,
 } from './sampleQuality';
@@ -21,6 +23,8 @@ const SAMPLE_INTERVAL_MS = 1000;
 let db: Database.Database | null = null;
 let recording = false;
 let lastSampleTsByEpic: Record<string, number> = {};
+/** Throttle for auto-save while live streaming on Trade (when Research recording is off). */
+let lastStreamSampleTsByEpic: Record<string, number> = {};
 let sessionSampleCount = 0;
 let sessionStartTs = 0;
 let lastDbErrorLogTs = 0;
@@ -105,6 +109,34 @@ export interface ClientSentiment {
   shortPct: number;
 }
 
+function insertPriceSample(
+  epic: string,
+  now: number,
+  bid: number,
+  offer: number,
+  spread: number,
+  sentiment?: ClientSentiment | null
+): boolean {
+  const longPct = sentiment && typeof sentiment.longPct === 'number' ? sentiment.longPct : null;
+  const shortPct = sentiment && typeof sentiment.shortPct === 'number' ? sentiment.shortPct : null;
+  try {
+    const database = getDb();
+    const stmt = database.prepare(
+      'INSERT OR IGNORE INTO price_samples (epic, ts, bid, offer, spread, long_pct, short_pct) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    );
+    stmt.run(epic, now, bid, offer, spread, longPct, shortPct);
+    return true;
+  } catch (err) {
+    const ts = Date.now();
+    if (ts - lastDbErrorLogTs >= DB_ERROR_LOG_INTERVAL_MS) {
+      lastDbErrorLogTs = ts;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[priceRecorder] DB write failed:', msg);
+    }
+    return false;
+  }
+}
+
 export function recordPrice(epic: string, data: PriceData, sentiment?: ClientSentiment | null): boolean {
   if (!recording || !epic) return false;
 
@@ -118,28 +150,27 @@ export function recordPrice(epic: string, data: PriceData, sentiment?: ClientSen
   if (now - last < SAMPLE_INTERVAL_MS) return false;
 
   lastSampleTsByEpic[epic] = now;
+  lastStreamSampleTsByEpic[epic] = now;
+  if (!insertPriceSample(epic, now, bid, offer, isNaN(spread) ? 0 : spread, sentiment)) return false;
+  sessionSampleCount++;
+  return true;
+}
 
-  const longPct = sentiment && typeof sentiment.longPct === 'number' ? sentiment.longPct : null;
-  const shortPct = sentiment && typeof sentiment.shortPct === 'number' ? sentiment.shortPct : null;
-
-  try {
-    const database = getDb();
-    const stmt = database.prepare(
-      'INSERT OR IGNORE INTO price_samples (epic, ts, bid, offer, spread, long_pct, short_pct) VALUES (?, ?, ?, ?, ?, ?, ?)'
-    );
-    stmt.run(epic, now, bid, offer, isNaN(spread) ? 0 : spread, longPct, shortPct);
-    sessionSampleCount++;
-    return true;
-  } catch (err) {
-    // Do not disrupt the stream; log at most once per minute so gaps are visible in container logs
-    const now = Date.now();
-    if (now - lastDbErrorLogTs >= DB_ERROR_LOG_INTERVAL_MS) {
-      lastDbErrorLogTs = now;
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('[priceRecorder] DB write failed:', msg);
-    }
-    return false;
-  }
+/**
+ * Persist live stream ticks for the Trade chart (same DB as Research recordings).
+ * Skipped while Research recording is active — recordPrice already writes.
+ */
+export function recordStreamSample(epic: string, data: PriceData, sentiment?: ClientSentiment | null): boolean {
+  if (!epic || recording) return false;
+  const bid = parseFloat(data.bid);
+  const offer = parseFloat(data.offer);
+  const spread = parseFloat(data.spread);
+  if (isNaN(bid) || isNaN(offer)) return false;
+  const now = Date.now();
+  const last = lastStreamSampleTsByEpic[epic] ?? 0;
+  if (now - last < SAMPLE_INTERVAL_MS) return false;
+  lastStreamSampleTsByEpic[epic] = now;
+  return insertPriceSample(epic, now, bid, offer, isNaN(spread) ? 0 : spread, sentiment);
 }
 
 export function closePriceRecorder(): void {
@@ -265,8 +296,21 @@ export function getDayStats(epic: string): { day: string; count: number; epic?: 
   }
 }
 
+export interface RecordedDayStat {
+  day: string;
+  count: number;
+  epic: string;
+  /** Coverage over first→last sample that day (legacy list metric). */
+  coveragePct: number;
+  /** Good for backtest: ≥90% samples during IG dealing hours, no gap >10 min while dealing. */
+  backtestReady?: boolean;
+  dealingCoveragePct?: number;
+  maxGapMsInDealing?: number;
+  backtestNotReadyReasons?: string[];
+}
+
 /** Returns days with count and epic for ALL epics in the DB, sorted by day then epic. */
-export function getAllDayStats(): { day: string; count: number; epic: string; coveragePct: number }[] {
+export function getAllDayStats(): RecordedDayStat[] {
   try {
     const database = getDb();
     const rows = database.prepare(
@@ -284,6 +328,50 @@ export function getAllDayStats(): { day: string; count: number; epic: string; co
   } catch {
     return [];
   }
+}
+
+/** Day list stats plus backtest readiness from saved dealing schedule per epic. */
+export function getAllDayStatsWithBacktestReadiness(): RecordedDayStat[] {
+  const base = getAllDayStats();
+  if (base.length === 0) return base;
+
+  const byEpic = new Map<string, RecordedDayStat[]>();
+  for (const row of base) {
+    const list = byEpic.get(row.epic);
+    if (list) list.push(row);
+    else byEpic.set(row.epic, [row]);
+  }
+
+  for (const [epic, rows] of byEpic) {
+    const dealingOpts = getDealingFilterOptsForEpic(epic);
+    const days = rows.map((r) => r.day);
+    const samples = getRecordedSamplesFiltered(epic, { days });
+    const byDay = new Map<string, typeof samples>();
+    for (const s of samples) {
+      const dayKey = dayKeyLocalFromTs(s.ts);
+      const arr = byDay.get(dayKey);
+      if (arr) arr.push(s);
+      else byDay.set(dayKey, [s]);
+    }
+    for (const row of rows) {
+      const daySamples = byDay.get(row.day) ?? [];
+      const readiness = evaluateDayBacktestReadiness(row.day, daySamples, dealingOpts);
+      row.backtestReady = readiness.backtestReady;
+      row.dealingCoveragePct = readiness.dealingCoveragePct;
+      row.maxGapMsInDealing = readiness.maxGapMsInDealing;
+      row.backtestNotReadyReasons = readiness.reasons.length > 0 ? readiness.reasons : undefined;
+    }
+  }
+
+  return base;
+}
+
+function dayKeyLocalFromTs(ts: number): string {
+  const d = new Date(ts);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 const YYYY_MM_DD = /^\d{4}-\d{2}-\d{2}$/;

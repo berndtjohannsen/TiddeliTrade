@@ -1,19 +1,36 @@
 /**
- * Settings modal.
+ * Account modal — IG credentials, connect/disconnect.
  */
-export function initSettings(log, onConfigSaved) {
-  var settingsBtn = document.getElementById('settingsBtn');
+import { state } from './state.js';
+
+function isIgLoggedIn() {
+  return state.engineStatus === 'connected' || state.engineStatus === 'running';
+}
+
+/**
+ * @param {(msg: string) => void} log
+ * @param {{ onConfigSaved?: (data: object) => void, socket?: import('socket.io-client').Socket }} [opts]
+ */
+export function initSettings(log, opts) {
+  var onConfigSaved = opts && opts.onConfigSaved ? opts.onConfigSaved : null;
+  var socket = opts && opts.socket ? opts.socket : null;
+
   var settingsModal = document.getElementById('settingsModal');
   var settingsClose = document.getElementById('settingsClose');
   var settingsCancel = document.getElementById('settingsCancel');
   var settingsForm = document.getElementById('settingsForm');
   var settingsStatus = document.getElementById('settingsStatus');
   var profileSelect = document.getElementById('igProfileSelect');
+  var accountConnectBtn = document.getElementById('accountConnectBtn');
+  var accountDisconnectBtn = document.getElementById('accountDisconnectBtn');
+  var accountConnectionStatus = document.getElementById('accountConnectionStatus');
+  var credentialsConfigured = false;
 
   function loadConfigIntoForm() {
-    fetch('/api/config')
+    return fetch('/api/config')
       .then(function (r) { return r.json(); })
       .then(function (data) {
+        credentialsConfigured = !!data.credentialsConfigured;
         var usernameEl = document.getElementById('igUsername');
         var apiKeyEl = document.getElementById('igApiKey');
         var passwordEl = document.getElementById('igPassword');
@@ -29,8 +46,10 @@ export function initSettings(log, onConfigSaved) {
         }
         if (apiKeyEl) { apiKeyEl.value = ''; apiKeyEl.placeholder = p.credentialsConfigured ? '••••••' : 'IG API key'; }
         if (passwordEl) { passwordEl.value = ''; passwordEl.placeholder = p.credentialsConfigured ? '••••••' : 'IG password'; }
+        updateConnectionButtons();
+        return data;
       })
-      .catch(function () {});
+      .catch(function () { return null; });
   }
 
   function onProfileChange() {
@@ -55,7 +74,36 @@ export function initSettings(log, onConfigSaved) {
       .catch(function () {});
   }
 
-  function showSettings() {
+  function updateConnectionButtons() {
+    var loggedIn = isIgLoggedIn();
+    var connecting = state.engineStatus === 'connecting';
+    if (accountConnectBtn) {
+      accountConnectBtn.classList.toggle('hidden', loggedIn || connecting);
+      accountConnectBtn.disabled = connecting || !credentialsConfigured;
+    }
+    if (accountDisconnectBtn) {
+      accountDisconnectBtn.classList.toggle('hidden', !loggedIn || connecting);
+    }
+    if (accountConnectionStatus) {
+      if (connecting) {
+        accountConnectionStatus.textContent = 'Connecting…';
+        accountConnectionStatus.className = 'text-xs text-slate-400';
+      } else if (loggedIn) {
+        accountConnectionStatus.textContent = state.engineStatus === 'running'
+          ? 'Logged in — stream active'
+          : 'Logged in';
+        accountConnectionStatus.className = 'text-xs text-emerald-400/90';
+      } else if (!credentialsConfigured) {
+        accountConnectionStatus.textContent = 'Enter credentials and click OK';
+        accountConnectionStatus.className = 'text-xs text-amber-400/90';
+      } else {
+        accountConnectionStatus.textContent = 'Not connected';
+        accountConnectionStatus.className = 'text-xs text-slate-500';
+      }
+    }
+  }
+
+  function showAccount() {
     loadConfigIntoForm();
     if (settingsModal) {
       settingsModal.classList.remove('hidden');
@@ -63,7 +111,7 @@ export function initSettings(log, onConfigSaved) {
     }
   }
 
-  function hideSettings() {
+  function hideAccount() {
     if (settingsModal) {
       settingsModal.classList.add('hidden');
       settingsModal.setAttribute('aria-hidden', 'true');
@@ -74,14 +122,49 @@ export function initSettings(log, onConfigSaved) {
     }
   }
 
-  if (settingsBtn) settingsBtn.addEventListener('click', showSettings);
-  if (settingsClose) settingsClose.addEventListener('click', hideSettings);
-  if (settingsCancel) settingsCancel.addEventListener('click', hideSettings);
+  function onConnectClick() {
+    if (!socket) return;
+    if (!credentialsConfigured) {
+      if (settingsStatus) {
+        settingsStatus.textContent = 'Enter credentials and click OK first.';
+        settingsStatus.className = 'text-sm text-amber-400';
+        settingsStatus.classList.remove('hidden');
+      }
+      return;
+    }
+    if (accountConnectionStatus) {
+      accountConnectionStatus.textContent = 'Connecting…';
+      accountConnectionStatus.className = 'text-xs text-slate-400';
+    }
+    socket.emit('connect_ig');
+  }
+
+  function onDisconnectClick() {
+    if (socket) socket.emit('stop');
+  }
+
+  if (settingsClose) settingsClose.addEventListener('click', hideAccount);
+  if (settingsCancel) settingsCancel.addEventListener('click', hideAccount);
   if (profileSelect) profileSelect.addEventListener('change', onProfileChange);
+  if (accountConnectBtn) accountConnectBtn.addEventListener('click', onConnectClick);
+  if (accountDisconnectBtn) accountDisconnectBtn.addEventListener('click', onDisconnectClick);
 
   if (settingsModal) {
     settingsModal.addEventListener('click', function (e) {
-      if (e.target === settingsModal) hideSettings();
+      if (e.target === settingsModal) hideAccount();
+    });
+  }
+
+  if (socket) {
+    socket.on('status', function () {
+      updateConnectionButtons();
+    });
+    socket.on('login_error', function (msg) {
+      if (accountConnectionStatus) {
+        accountConnectionStatus.textContent = 'Login failed: ' + msg;
+        accountConnectionStatus.className = 'text-xs text-red-400';
+      }
+      updateConnectionButtons();
     });
   }
 
@@ -106,27 +189,13 @@ export function initSettings(log, onConfigSaved) {
       })
         .then(function (r) { return r.json(); })
         .then(function (data) {
-          log('Config saved');
+          credentialsConfigured = !!data.credentialsConfigured;
+          log('Account saved');
           if (typeof onConfigSaved === 'function') onConfigSaved(data);
-          if (settingsStatus) {
-            settingsStatus.textContent = 'Saved.';
-            settingsStatus.classList.remove('hidden');
-            settingsStatus.className = 'text-sm text-emerald-500';
-          }
-          var activeProfile = data.activeProfile || 'demo';
-          var profiles = data.igProfilesSafe || { demo: {}, live: {} };
-          var p = profiles[activeProfile] || {};
-          if (profileSelect) profileSelect.value = activeProfile;
-          if (username) username.value = p.igUsername || username.value;
-          if (baseUrlEl) {
-            baseUrlEl.value = p.igBaseUrl || '';
-            baseUrlEl.placeholder = activeProfile === 'live' ? 'https://api.ig.com' : 'https://demo-api.ig.com';
-          }
-          if (apiKey) { apiKey.value = ''; apiKey.placeholder = p.credentialsConfigured ? '••••••' : 'IG API key'; }
-          if (password) { password.value = ''; password.placeholder = p.credentialsConfigured ? '••••••' : 'IG password'; }
+          hideAccount();
         })
         .catch(function (err) {
-          log('Config save failed: ' + (err.message || 'Unknown error'));
+          log('Account save failed: ' + (err.message || 'Unknown error'));
           if (settingsStatus) {
             settingsStatus.textContent = 'Error: ' + (err.message || 'Failed to save');
             settingsStatus.classList.remove('hidden');
@@ -135,4 +204,11 @@ export function initSettings(log, onConfigSaved) {
         });
     });
   }
+
+  return {
+    showAccount: showAccount,
+    hideAccount: hideAccount,
+    updateConnectionButtons: updateConnectionButtons,
+    refreshFromConfig: loadConfigIntoForm
+  };
 }

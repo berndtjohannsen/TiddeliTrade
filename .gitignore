@@ -14,4 +14,6 @@ ignore.txt
 docker-data/
 
 # scripts/kill-port.js is kept (used by npm run kill-port)
+# Local server crash diagnostics — copy to minisforum manually, do not publish
+scripts/collect-crash-diagnostics.sh
 

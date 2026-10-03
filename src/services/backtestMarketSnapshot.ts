@@ -11,6 +11,7 @@ import {
   dealingWeekFromMarketTimes,
   defaultDealingWeekLondonMonFri,
 } from './dealingSchedule';
+import type { ProbeSampleFilterOpts } from './probeSamples';
 
 export type StoredDealingScheduleSource = 'ig' | 'default' | 'off';
 
@@ -249,4 +250,14 @@ export async function resolveDayStartsForBacktest(
 export function getInstrumentSettings(epic: string): InstrumentSettings | null {
   const cfg = loadConfig();
   return cfg.ui?.instruments?.[epic] ?? null;
+}
+
+/** Dealing filter for recorded samples (saved IG snapshot, else default Mon–Fri London). */
+export function getDealingFilterOptsForEpic(epic: string): ProbeSampleFilterOpts {
+  const stored = readStoredDealingSnapshot(getInstrumentSettings(epic));
+  if (stored?.is24_7) return { is24_7: true, dealingWeekLondon: null };
+  if (stored?.dealingWeekLondon) {
+    return { is24_7: false, dealingWeekLondon: stored.dealingWeekLondon };
+  }
+  return { is24_7: false, dealingWeekLondon: defaultDealingWeekLondonMonFri() };
 }

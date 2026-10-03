@@ -619,9 +619,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   var tradeViewRoot = document.getElementById('tradeViewRoot');
   var tradeManualSection = document.getElementById('tradeManualSection');
   var sessionBanner = document.getElementById('tradeSessionStatusBanner');
-  var sessionStatusHeading = document.getElementById('tradeSessionStatusHeading');
-  var sessionProbesLabel = document.getElementById('tradeSessionProbesLabel');
-  var sessionProbesText = document.getElementById('tradeSessionProbesText');
+  var sessionStatusDot = document.getElementById('tradeSessionStatusDot');
   var sessionRulesLabel = document.getElementById('tradeSessionRulesLabel');
   var sessionRulesText = document.getElementById('tradeSessionRulesText');
   var navRulesBadge = document.getElementById('appNavTradeRulesBadge');
@@ -1005,31 +1003,24 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   function formatRulesSessionLabel(ui) {
     if (ui.key === 'paused') return 'Paused';
     if (ui.key === 'halted-loss') return 'Halted';
-    if (ui.key === 'active') return 'Active';
+    if (ui.key === 'active') return 'Rules Active';
     if (ui.key === 'armed-schedule' && ui.scheduleExpired) return 'Expired';
     if (ui.key === 'armed-schedule' && ui.doneForToday) return 'Done';
     if (ui.key === 'armed-schedule' && ui.beforeOpen) return 'Waiting';
-    if (ui.key === 'stopped') return 'Stopped';
+    if (ui.key === 'stopped') return 'Rules Stop';
     return 'Armed';
   }
 
   function rulesSessionValueClass(ui) {
-    if (ui.key === 'paused') return 'trade-session-status-value trade-session-status-value--paused';
-    if (ui.key === 'halted-loss') return 'trade-session-status-value trade-session-status-value--done';
-    if (ui.key === 'active') return 'trade-session-status-value trade-session-status-value--active';
-    if (ui.key === 'stopped') return 'trade-session-status-value trade-session-status-value--stopped';
-    if (ui.key === 'armed-schedule' && ui.scheduleExpired) return 'trade-session-status-value trade-session-status-value--expired';
-    if (ui.key === 'armed-schedule' && ui.doneForToday) return 'trade-session-status-value trade-session-status-value--done';
-    if (ui.key === 'armed-schedule' && ui.beforeOpen) return 'trade-session-status-value trade-session-status-value--waiting';
-    if (ui.key === 'armed-schedule') return 'trade-session-status-value trade-session-status-value--armed';
-    return 'trade-session-status-value trade-session-status-value--armed';
-  }
-
-  function probesSessionValueClass(probesUi) {
-    if (probesUi.key === 'running') return 'trade-session-status-value trade-session-status-value--running';
-    if (probesUi.key === 'connecting') return 'trade-session-status-value trade-session-status-value--connecting';
-    if (probesUi.key === 'disconnected') return 'trade-session-status-value trade-session-status-value--disconnected';
-    return 'trade-session-status-value trade-session-status-value--stopped';
+    if (ui.key === 'paused') return 'trade-overview-rules-label trade-overview-rules-label--paused';
+    if (ui.key === 'halted-loss') return 'trade-overview-rules-label trade-overview-rules-label--done';
+    if (ui.key === 'active') return 'trade-overview-rules-label trade-overview-rules-label--active';
+    if (ui.key === 'stopped') return 'trade-overview-rules-label trade-overview-rules-label--stopped';
+    if (ui.key === 'armed-schedule' && ui.scheduleExpired) return 'trade-overview-rules-label trade-overview-rules-label--expired';
+    if (ui.key === 'armed-schedule' && ui.doneForToday) return 'trade-overview-rules-label trade-overview-rules-label--done';
+    if (ui.key === 'armed-schedule' && ui.beforeOpen) return 'trade-overview-rules-label trade-overview-rules-label--waiting';
+    if (ui.key === 'armed-schedule') return 'trade-overview-rules-label trade-overview-rules-label--armed';
+    return 'trade-overview-rules-label trade-overview-rules-label--armed';
   }
 
   /** @returns {{ key: string }} */
@@ -1039,20 +1030,6 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     if (st === 'connecting') return { key: 'connecting' };
     if (st === 'disconnected') return { key: 'disconnected' };
     return { key: 'stopped' };
-  }
-
-  function formatProbesSessionLabel(probesUi) {
-    if (probesUi.key === 'running') return 'Running';
-    if (probesUi.key === 'connecting') return 'Connecting';
-    if (probesUi.key === 'disconnected') return 'Disconnected';
-    return 'Stopped';
-  }
-
-  function formatProbesSessionDetail(probesUi) {
-    if (probesUi.key === 'running') return 'Price stream active';
-    if (probesUi.key === 'connecting') return 'Starting stream…';
-    if (probesUi.key === 'disconnected') return 'Reconnect to resume';
-    return '';
   }
 
   function updateTradeSessionUi() {
@@ -1069,7 +1046,16 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     }
     if (tradeManualSection) tradeManualSection.classList.toggle('trade-manual-locked', rulesEngineRunning || isPausedOnLoss());
     setProbesSettingsLockedFn(sessionActive);
-    if (sessionStatusHeading) sessionStatusHeading.classList.toggle('hidden', !sessionActive);
+    if (sessionStatusDot) {
+      sessionStatusDot.classList.remove(
+        'trade-session-status-dot--idle',
+        'trade-session-status-dot--probes',
+        'trade-session-status-dot--live'
+      );
+      if (sessionActive) sessionStatusDot.classList.add('trade-session-status-dot--live');
+      else if (probesActive || probesUi.key === 'running') sessionStatusDot.classList.add('trade-session-status-dot--probes');
+      else sessionStatusDot.classList.add('trade-session-status-dot--idle');
+    }
     if (sessionBanner) {
       sessionBanner.classList.remove(
         'trade-session-banner-idle',
@@ -1086,20 +1072,11 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
         else if (ui.key === 'paused') sessionBanner.classList.add('trade-rules-banner-paused');
         else if (ui.key === 'armed-schedule') sessionBanner.classList.add('trade-rules-banner-schedule');
         else sessionBanner.classList.add('trade-rules-banner-armed');
-      } else if (probesActive) {
+      } else if (probesUi.key === 'running' || probesUi.key === 'connecting') {
         sessionBanner.classList.add('trade-session-banner-probes');
       } else {
         sessionBanner.classList.add('trade-session-banner-idle');
       }
-    }
-    if (sessionProbesLabel) {
-      sessionProbesLabel.textContent = formatProbesSessionLabel(probesUi);
-      sessionProbesLabel.className = probesSessionValueClass(probesUi);
-    }
-    var probesDetail = formatProbesSessionDetail(probesUi);
-    if (sessionProbesText) {
-      sessionProbesText.textContent = probesDetail;
-      sessionProbesText.classList.toggle('hidden', !probesDetail);
     }
     if (sessionRulesLabel) {
       sessionRulesLabel.textContent = formatRulesSessionLabel(ui);
@@ -1107,7 +1084,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     }
     if (sessionRulesText) {
       sessionRulesText.textContent = formatRulesSessionDetail(ui);
-      sessionRulesText.className = 'trade-session-status-detail';
+      sessionRulesText.className = 'trade-overview-rules-detail';
     }
     if (navRulesBadge) navRulesBadge.classList.toggle('hidden', !sessionActive);
   }
@@ -1862,7 +1839,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
 
   function updateToggleButton() {
     var text = rulesEngineRunning ? 'Stop rules' : 'Start rules';
-    var cls = 'px-3 py-1 rounded text-xs font-medium transition-colors ' + (rulesEngineRunning ? 'bg-amber-600 hover:bg-amber-500 text-white' : 'bg-emerald-600 hover:bg-emerald-500 text-white');
+    var cls = 'px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ' + (rulesEngineRunning ? 'bg-amber-600 hover:bg-amber-500 text-white' : 'bg-emerald-600 hover:bg-emerald-500 text-white');
     var title = rulesEngineRunning
       ? 'Stop automated rules trading (manual Deal/Order re-enabled)'
       : 'Start automated rules trading (manual Deal/Order disabled while running)';

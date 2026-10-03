@@ -19,8 +19,11 @@ import {
   getMarketTradingInfo,
   getIndicativeCostsOpen,
   getHistoricalPrices,
+  getHistoricalPricesRange,
   getDayStartPrice,
   getClientSentiment,
+  londonDateKeyFromTimestamp,
+  londonDayStartMs,
   type MarketDetails,
 } from '../services/ig';
 import { getLastStreamMarketState, isStreaming, startStream, stopStream, switchEpic } from '../services/stream';
@@ -29,6 +32,7 @@ import { setOnProfileChangeListener } from '../onProfileChange';
 import { preventSleep, allowSleep } from '../preventSleep';
 import {
   recordPrice,
+  recordStreamSample,
   startRecording,
   stopRecording,
   isRecording,
@@ -38,7 +42,7 @@ import {
   getRecordedSampleCount,
   getRecordedDays,
   getDayStats,
-  getAllDayStats,
+  getAllDayStatsWithBacktestReadiness,
   getEpicsWithData,
   deleteSamplesByDays,
   deleteSparseDays,
@@ -300,6 +304,19 @@ let pollPositionsChain: Promise<unknown> = Promise.resolve();
 
 const BACKFILL_CACHE_TTL_MS = 60000;
 let lastBackfillCache: { epic: string; at: number; samples: { ts: number; mid: number; spread: number }[]; allowance: { total: number; remaining: number; expirySeconds: number } } | null = null;
+const DAY_SEED_CACHE_TTL_MS = 120_000;
+let lastDaySeedCache: {
+  epic: string;
+  londonDay: string;
+  at: number;
+  samples: { ts: number; mid: number; spread: number; bid?: number; offer?: number; marketState?: string | null }[];
+} | null = null;
+/** Skip IG /prices when demo/live historical quota is exhausted (see log). */
+let igHistoricalBlockedUntilMs = 0;
+let daySeedInflightEpic: string | null = null;
+let daySeedInflight: Promise<void> | null = null;
+let daySeedLastAttemptByEpic: Record<string, number> = {};
+const DAY_SEED_MIN_INTERVAL_MS = 8000;
 const lastClientSentimentByEpic: Record<string, { longPct: number; shortPct: number } | null> = {};
 
 async function pollAndEmitWorkingOrders(session: IgSession, io: Server): Promise<void> {
@@ -408,7 +425,7 @@ async function pollAndEmitPositionsImpl(
     io.emit('positions', enriched);
     const cfg = loadConfig();
     const streamEpic = cfg.epic || '';
-    if (streamEpic) syncDynamicStopLossWithPositions(positions, streamEpic, cfg);
+    if (streamEpic) syncDynamicStopLossWithPositions(positions, streamEpic, cfg, (msg) => io.emit('log', msg));
     onDynamicStopLossPositionPoll(
       session,
       enriched.map((p) => ({
@@ -687,6 +704,133 @@ async function recordTransactionFromPosition(
   }
 }
 
+type LiveChartSeedSample = {
+  ts: number;
+  mid: number;
+  spread: number;
+  bid?: number;
+  offer?: number;
+  marketState?: string | null;
+};
+
+function mergeLiveDaySeedSamples(recorded: RecordedSample[], ig: LiveChartSeedSample[]): LiveChartSeedSample[] {
+  const byTs = new Map<number, LiveChartSeedSample>();
+  for (const s of ig) {
+    byTs.set(s.ts, { ts: s.ts, mid: s.mid, spread: s.spread });
+  }
+  for (const r of recorded) {
+    byTs.set(r.ts, {
+      ts: r.ts,
+      mid: (r.bid + r.offer) / 2,
+      spread: r.spread,
+      bid: r.bid,
+      offer: r.offer,
+    });
+  }
+  return Array.from(byTs.values()).sort((a, b) => a.ts - b.ts);
+}
+
+function isIgHistoricalQuotaError(msg: string): boolean {
+  return /exceeded-account-allowance|exceeded-account-historical-data-allowance|allowance/i.test(msg);
+}
+
+/** Today (Europe/London) intraday history — IG minutes when quota allows; optional SQLite merge (config). */
+async function fetchAndEmitLiveDaySeed(session: IgSession, epic: string, io: Server): Promise<void> {
+  const cfg = loadConfig();
+  const useRecorded = cfg.ui?.liveChartUseRecordedSamples === true;
+  const now = Date.now();
+  const londonDay = londonDateKeyFromTimestamp(now);
+  if (
+    lastDaySeedCache &&
+    lastDaySeedCache.epic === epic &&
+    lastDaySeedCache.londonDay === londonDay &&
+    now - lastDaySeedCache.at < DAY_SEED_CACHE_TTL_MS
+  ) {
+    io.emit('live_chart_day_seed', { epic, londonDay, samples: lastDaySeedCache.samples, cached: true });
+    return;
+  }
+  const fromMs = londonDayStartMs(now);
+  const toMs = now;
+  const recorded = useRecorded ? getRecordedSamplesFiltered(epic, { fromTs: fromMs, toTs: toMs }) : [];
+  let igSamples: LiveChartSeedSample[] = [];
+  const igBlocked = now < igHistoricalBlockedUntilMs;
+  if (igBlocked) {
+    if (useRecorded) {
+      io.emit(
+        'log',
+        'Live chart: IG historical quota exhausted — using today\'s locally saved stream samples only (chart fills as you stream).'
+      );
+    } else {
+      io.emit(
+        'log',
+        'Live chart: IG historical quota exhausted — chart uses live stream only (recorded samples disabled in config).'
+      );
+    }
+  } else {
+    try {
+      const { samples, allowance } = await getHistoricalPricesRange(session, epic, fromMs, toMs, 'MINUTE');
+      igSamples = samples.map((s) => ({ ts: s.ts, mid: s.mid, spread: s.spread }));
+      const { remaining, total } = allowance;
+      if (remaining <= 0) {
+        igHistoricalBlockedUntilMs = now + Math.max(3600000, (allowance.expirySeconds || 3600) * 1000);
+      }
+      io.emit(
+        'log',
+        `Live chart: IG intraday seed ${igSamples.length} points (London ${londonDay}). Quota ${remaining}/${total} remaining`
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (isIgHistoricalQuotaError(msg)) {
+        igHistoricalBlockedUntilMs = now + 3600000;
+        io.emit(
+          'log',
+          useRecorded
+            ? 'Live chart: IG historical quota exhausted — using locally saved stream samples for today (if any). The chart will grow from the live stream (~1 sample/sec).'
+            : 'Live chart: IG historical quota exhausted — chart will grow from the live stream only (~1 sample/sec).'
+        );
+      } else {
+        io.emit('log', 'Live chart day seed (IG): ' + msg);
+      }
+    }
+  }
+  const merged = mergeLiveDaySeedSamples(recorded, igSamples);
+  if (merged.length === 0) {
+    if (igBlocked || igSamples.length === 0) {
+      io.emit(
+        'log',
+        'Live chart: no earlier-today data yet for this instrument — keep Trade open to build today\'s chart locally (no IG backfill until quota resets).'
+      );
+    }
+    return;
+  }
+  lastDaySeedCache = { epic, londonDay, at: now, samples: merged };
+  io.emit('live_chart_day_seed', { epic, londonDay, samples: merged, cached: false });
+  const recordedNote = useRecorded ? `${recorded.length} recorded, ` : '';
+  io.emit(
+    'log',
+    `Live chart: seeded ${merged.length} samples from start of London day (${recordedNote}${igSamples.length} IG)`
+  );
+}
+
+function scheduleLiveDaySeed(session: IgSession, epic: string, io: Server): void {
+  const now = Date.now();
+  const last = daySeedLastAttemptByEpic[epic] ?? 0;
+  if (now - last < DAY_SEED_MIN_INTERVAL_MS && daySeedInflightEpic === epic) return;
+  if (daySeedInflight && daySeedInflightEpic === epic) return;
+  daySeedLastAttemptByEpic[epic] = now;
+  daySeedInflightEpic = epic;
+  daySeedInflight = fetchAndEmitLiveDaySeed(session, epic, io)
+    .catch(() => {
+      /* logged inside */
+    })
+    .finally(() => {
+      if (daySeedInflightEpic === epic) {
+        daySeedInflightEpic = null;
+        daySeedInflight = null;
+      }
+    });
+}
+
 async function fetchAndEmitProbesBackfill(session: IgSession, epic: string, io: Server): Promise<void> {
   const now = Date.now();
   if (lastBackfillCache && lastBackfillCache.epic === epic && now - lastBackfillCache.at < BACKFILL_CACHE_TTL_MS) {
@@ -928,18 +1072,35 @@ export function registerSocketHandlers(io: Server): void {
     }
   }
 
-  function doStop(logMsg?: string): void {
+  /** Clear live market header fields after IG logout. */
+  function emitClearMarketDetails(io: Server): void {
+    const epic = loadConfig().epic || '';
+    io.emit('marketDetails', {
+      epic,
+      minDealSize: null,
+      currencyCode: null,
+      contractSize: null,
+      marginFactor: null,
+      lotSize: null,
+      valueOfOnePip: null,
+      scalingFactor: null,
+      exchangeRateToAccount: null,
+      defaultCloseAt: null,
+      is24_7: false,
+      dealingWeekLondon: null,
+      dealingScheduleSource: null,
+      dayStartBuy: null,
+      clientSentiment: null,
+    });
+  }
+
+  /** Stop stream/recording but keep IG login (status → connected). */
+  function doStopStream(logMsg?: string): void {
     lastPriceSocketEmitTs = 0;
     loggedClosedDealIds.clear();
     streamEpicCache = null;
     invalidateRecordedCountCache();
     stopStream();
-    currentSession = null;
-    scheduledCloses = [];
-    previousPositions = [];
-    positionsBaselineEstablished = false;
-    previousWorkingOrderIds = new Set();
-    for (const k of Object.keys(pendingOrderCloses)) delete pendingOrderCloses[k];
     if (closeSchedulerTimer) {
       clearInterval(closeSchedulerTimer);
       closeSchedulerTimer = null;
@@ -953,13 +1114,7 @@ export function registerSocketHandlers(io: Server): void {
       ordersPollTimer = null;
     }
     clearDynamicStopLossTracking();
-    engineStatus = 'stopped';
-    io.emit('status', engineStatus);
-    io.emit('account', null);
     io.emit('price_update', null);
-    io.emit('positions', []);
-    io.emit('working_orders', []);
-    io.emit('scheduled_closes', []);
     io.emit('dynamic_stop_loss_status', []);
     if (recordingStatusTimer) {
       clearInterval(recordingStatusTimer);
@@ -967,6 +1122,27 @@ export function registerSocketHandlers(io: Server): void {
     }
     stopRecording();
     emitRecordingStatus(io);
+    engineStatus = currentSession ? 'connected' : 'ready';
+    io.emit('status', engineStatus);
+    updateSleepPrevention(io, currentSession !== null);
+    if (logMsg) io.emit('log', logMsg);
+  }
+
+  function doStop(logMsg?: string): void {
+    doStopStream();
+    currentSession = null;
+    scheduledCloses = [];
+    previousPositions = [];
+    positionsBaselineEstablished = false;
+    previousWorkingOrderIds = new Set();
+    for (const k of Object.keys(pendingOrderCloses)) delete pendingOrderCloses[k];
+    engineStatus = 'stopped';
+    io.emit('status', engineStatus);
+    io.emit('account', null);
+    io.emit('positions', []);
+    io.emit('working_orders', []);
+    io.emit('scheduled_closes', []);
+    emitClearMarketDetails(io);
     updateSleepPrevention(io, false);
     io.emit('log', logMsg || 'Stopped');
   }
@@ -1017,10 +1193,13 @@ export function registerSocketHandlers(io: Server): void {
         epic,
         (data) => {
           const epicNow = streamEpicCache;
+          const sentiment = epicNow ? lastClientSentimentByEpic[epicNow] ?? null : null;
           if (epicNow && isRecording()) {
-            if (recordPrice(epicNow, data, lastClientSentimentByEpic[epicNow] ?? null)) {
+            if (recordPrice(epicNow, data, sentiment)) {
               io.emit('recorded_sample', { epic: epicNow, ts: Date.now(), bid: data.bid, offer: data.offer, spread: data.spread });
             }
+          } else if (epicNow && loadConfig().ui?.persistStreamSamplesWhileTrading === true) {
+            recordStreamSample(epicNow, data, sentiment);
           }
           const now = Date.now();
           if (now - lastPriceSocketEmitTs < PRICE_SOCKET_EMIT_MIN_MS) return;
@@ -1040,6 +1219,16 @@ export function registerSocketHandlers(io: Server): void {
         (msg) => io.emit('log', msg)
       );
       io.emit('log', 'Streaming: ' + epic);
+      scheduleLiveDaySeed(session, epic, io);
+      const cfgStream = loadConfig();
+      if (cfgStream.ui?.liveChartUseRecordedSamples === true) {
+        setTimeout(() => {
+          if (streamEpicCache === epic && isStreaming()) {
+            lastDaySeedCache = null;
+            scheduleLiveDaySeed(session, epic, io);
+          }
+        }, 12000);
+      }
     } catch (streamErr) {
       const msg = streamErr instanceof Error ? streamErr.message : 'Stream failed';
       io.emit('log', 'Stream: ' + msg);
@@ -1415,6 +1604,7 @@ export function registerSocketHandlers(io: Server): void {
     });
 
     socket.on('stop', () => doStop());
+    socket.on('stop_stream', () => doStopStream('Stream stopped'));
 
     socket.on('getWatchlists', async () => {
       if (!currentSession) {
@@ -1498,7 +1688,7 @@ export function registerSocketHandlers(io: Server): void {
 
     socket.on('get_recorded_days', (_epic: string) => {
       // Return days for ALL epics so UI can show them with clear labels
-      const dayStats = getAllDayStats();
+      const dayStats = getAllDayStatsWithBacktestReadiness();
       const days = dayStats.map((s) => s.day);
       const epicsWithData = getEpicsWithData();
       socket.emit('recorded_days', { dayStats, days, epicsWithData, allEpics: true });
@@ -2611,6 +2801,7 @@ export function registerSocketHandlers(io: Server): void {
               contractSize: cs,
               settings: dslSettings,
               initialStopLevel: placedPosition?.stopLevel ?? null,
+              log: (msg) => io.emit('log', msg),
             });
             io.emit('dynamic_stop_loss_status', getDynamicStopLossStatuses());
           }

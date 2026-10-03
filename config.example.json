@@ -9,6 +9,8 @@
     "probesMediumPeriod": 60,
     "probesLongPeriod": 1440,
     "probesBackfillDays": 3,
+    "liveChartUseRecordedSamples": false,
+    "persistStreamSamplesWhileTrading": false,
     "tradingRules": [],
     "tradingRulesRunning": false,
     "tradingRulesConfirmBeforePlace": true,

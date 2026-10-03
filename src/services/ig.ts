@@ -1108,6 +1108,89 @@ export interface HistoricalPricesAllowance {
   expirySeconds: number;
 }
 
+/** UTC ms when the Europe/London calendar day containing `nowMs` begins (matches IG day charts). */
+export function londonDayStartMs(nowMs: number = Date.now()): number {
+  const dayKey = londonDateKeyFromTimestamp(nowMs);
+  let lo = nowMs - 48 * 60 * 60 * 1000;
+  let hi = nowMs;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (londonDateKeyFromTimestamp(mid) < dayKey) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function parseMidFromBidAsk(obj: { bid?: number; ask?: number } | undefined): number | null {
+  if (!obj) return null;
+  const b = typeof obj.bid === 'number' ? obj.bid : parseFloat(String(obj?.bid ?? 0));
+  const a = typeof obj.ask === 'number' ? obj.ask : parseFloat(String(obj?.ask ?? 0));
+  if (isNaN(b) || isNaN(a)) return null;
+  return (b + a) / 2;
+}
+
+/** IG /prices candles → mid samples (close only — one point per candle). */
+function historicalCloseMidsFromRows(
+  prices: Array<{ snapshotTimeUTC?: string; closePrice?: { bid?: number; ask?: number } }>
+): HistoricalPriceSample[] {
+  const samples: HistoricalPriceSample[] = [];
+  for (const p of prices) {
+    const ts = p.snapshotTimeUTC ? new Date(p.snapshotTimeUTC).getTime() : 0;
+    if (isNaN(ts) || !ts) continue;
+    const close = p.closePrice;
+    const closeMid = parseMidFromBidAsk(close);
+    if (closeMid == null) continue;
+    const spread =
+      close && typeof close.ask === 'number' && typeof close.bid === 'number' ? close.ask - close.bid : 0;
+    samples.push({ ts, mid: closeMid, spread });
+  }
+  return samples;
+}
+
+/**
+ * Historical prices for an explicit UTC range (Europe/London SOD charts use londonDayStartMs → now).
+ */
+export async function getHistoricalPricesRange(
+  session: IgSession,
+  epic: string,
+  fromMs: number,
+  toMs: number,
+  resolution: 'MINUTE' | 'HOUR' = 'MINUTE'
+): Promise<{ samples: HistoricalPriceSample[]; allowance: HistoricalPricesAllowance }> {
+  const fromDate = new Date(Math.min(fromMs, toMs));
+  const toDate = new Date(Math.max(fromMs, toMs));
+  const from = fmtUtcForPricesQuery(fromDate);
+  const to = fmtUtcForPricesQuery(toDate);
+  const url = `${baseUrl()}/gateway/deal/prices/${encodeURIComponent(epic)}?resolution=${resolution}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&pageSize=0`;
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: { ...authHeaders(session), Version: '3' },
+  });
+  if (!res.ok) {
+    const errBody = (await res.json().catch(() => ({}))) as { errorCode?: string; errorMessage?: string };
+    throw new Error(
+      errBody.errorCode ? `${errBody.errorCode}: ${errBody.errorMessage || ''}` : `Historical prices failed: ${res.status}`
+    );
+  }
+  const data = (await res.json()) as {
+    prices?: Array<{ snapshotTimeUTC?: string; closePrice?: { bid?: number; ask?: number } }>;
+    metadata?: {
+      allowance?: { totalAllowance?: number; remainingAllowance?: number; allowanceExpiry?: number };
+      pageData?: { allowance?: { totalAllowance?: number; remainingAllowance?: number; allowanceExpiry?: number } };
+    };
+  };
+  const allowance = data.metadata?.allowance ?? data.metadata?.pageData?.allowance ?? {};
+  const total = allowance.totalAllowance ?? 0;
+  const remaining = allowance.remainingAllowance ?? 0;
+  const expirySeconds = allowance.allowanceExpiry ?? 0;
+  let samples = historicalCloseMidsFromRows(data.prices ?? []);
+  samples = samples.filter((s) => s.ts >= fromMs && s.ts <= toMs);
+  return {
+    samples,
+    allowance: { total, remaining, expirySeconds },
+  };
+}
+
 /**
  * Get historical OHLC prices. GET /gateway/deal/prices/{epic} | Version: 3
  * Uses HOUR resolution to minimise allowance (e.g. 72 points for 3 days).
@@ -1169,19 +1252,12 @@ export async function getHistoricalPrices(
     const close = p.closePrice;
     const high = p.highPrice;
     const low = p.lowPrice;
-    const parseMid = (obj: { bid?: number; ask?: number } | undefined): number | null => {
-      if (!obj) return null;
-      const b = typeof obj.bid === 'number' ? obj.bid : parseFloat(String(obj?.bid ?? 0));
-      const a = typeof obj.ask === 'number' ? obj.ask : parseFloat(String(obj?.ask ?? 0));
-      if (isNaN(b) || isNaN(a)) return null;
-      return (b + a) / 2;
-    };
-    const closeMid = parseMid(close);
+    const closeMid = parseMidFromBidAsk(close);
     if (closeMid == null) continue;
     const spread = close && typeof close.ask === 'number' && typeof close.bid === 'number' ? close.ask - close.bid : 0;
     samples.push({ ts, mid: closeMid, spread });
-    const lowMid = parseMid(low);
-    const highMid = parseMid(high);
+    const lowMid = parseMidFromBidAsk(low);
+    const highMid = parseMidFromBidAsk(high);
     if (lowMid != null) samples.push({ ts: ts + 1, mid: lowMid, spread });
     if (highMid != null) samples.push({ ts: ts + 2, mid: highMid, spread });
   }

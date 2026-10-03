@@ -52,3 +52,60 @@ export function formatLogTimestamp(isoString) {
   var tzSuffix = tzPart ? ' (' + tzPart.value + ')' : '';
   return dateStr + ', ' + timeStr + tzSuffix;
 }
+
+/** Hide the initial startup overlay once Home is ready. */
+export function hideAppBootOverlay() {
+  var el = document.getElementById('appBootOverlay');
+  if (!el || el.classList.contains('app-boot-overlay--hidden')) return;
+  el.classList.add('app-boot-overlay--hidden');
+  el.setAttribute('aria-busy', 'false');
+}
+
+/** In-app confirm dialog (replaces browser confirm). Returns a promise resolving to true/false. */
+export function initAppConfirmModal() {
+  var modal = document.getElementById('appConfirmModal');
+  var titleEl = document.getElementById('appConfirmTitle');
+  var messageEl = document.getElementById('appConfirmMessage');
+  var okBtn = document.getElementById('appConfirmOk');
+  var cancelBtn = document.getElementById('appConfirmCancel');
+  var pending = null;
+
+  function hide() {
+    if (modal) {
+      modal.classList.add('hidden');
+      modal.setAttribute('aria-hidden', 'true');
+    }
+    pending = null;
+  }
+
+  function showConfirm(options) {
+    options = options || {};
+    if (!modal || !titleEl || !messageEl || !okBtn || !cancelBtn) {
+      return Promise.resolve(false);
+    }
+    titleEl.textContent = options.title || 'Confirm';
+    messageEl.textContent = options.message || '';
+    okBtn.textContent = options.okLabel || 'OK';
+    cancelBtn.textContent = options.cancelLabel || 'Cancel';
+    modal.classList.remove('hidden');
+    modal.setAttribute('aria-hidden', 'false');
+    return new Promise(function (resolve) {
+      pending = resolve;
+    });
+  }
+
+  function finish(result) {
+    if (pending) pending(result);
+    hide();
+  }
+
+  if (okBtn) okBtn.addEventListener('click', function () { finish(true); });
+  if (cancelBtn) cancelBtn.addEventListener('click', function () { finish(false); });
+  if (modal) {
+    modal.addEventListener('click', function (e) {
+      if (e.target === modal) finish(false);
+    });
+  }
+
+  return { showConfirm: showConfirm };
+}

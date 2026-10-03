@@ -8,6 +8,13 @@ import {
   isProbeEligibleSample,
   probeFilterOptsFromState
 } from './probeSamples.js';
+import {
+  drawLiveProbeChart,
+  drawChartCrosshair,
+  prepareChartCanvas,
+  nearestSampleIndex
+} from './priceChartCore.js';
+import { formatTimeWithTz } from './utils.js';
 
 const MAX_SAMPLES = 100000;
 const SAMPLE_INTERVAL_MS = 1000;
@@ -19,7 +26,7 @@ export function initProbes(socket, state, log) {
   var mediumInput = document.getElementById('probeMediumPeriod');
   var longInput = document.getElementById('probeLongPeriod');
   var periodInputsWrap = document.getElementById('probesPeriodInputs');
-  var sessionStopBtn = document.getElementById('probesSessionStopBtn');
+  var sessionStopBtn = null;
   var coverageWarningEl = document.getElementById('probesCoverageWarning');
   var STOP_PROBE_TOOLTIP_DEFAULT = 'Stop price stream and probes';
   var STOP_PROBE_TOOLTIP_LOCKED = 'Stop rules trading first — probing cannot be stopped while rules are active';
@@ -143,6 +150,181 @@ export function initProbes(socket, state, log) {
     else el.classList.add('text-slate-500');
   }
 
+  var streamCanvas = document.getElementById('probeStreamCanvas');
+  var streamCanvasOverlay = document.getElementById('probeStreamCanvasOverlay');
+  var streamCanvasWrap = document.getElementById('probeStreamCanvasWrap');
+  var streamMeta = document.getElementById('probeStreamMeta');
+  var streamHoverBar = document.getElementById('probeStreamHoverBar');
+  var streamHint = document.getElementById('probeStreamDiagramHint');
+  var streamChartState = {
+    layout: null,
+    samples: [],
+    probeSeries: null,
+    probeMs: null,
+    hoverIdx: null
+  };
+  var streamResizeObserver = null;
+
+  function streamWrapSize() {
+    if (!streamCanvasWrap) return { w: 0, h: 0 };
+    var rect = streamCanvasWrap.getBoundingClientRect();
+    return { w: Math.max(0, Math.floor(rect.width)), h: Math.max(0, Math.floor(rect.height)) };
+  }
+
+  function formatProbePeriodMinutes(minutes) {
+    if (minutes >= 1440 && minutes % 1440 === 0) return minutes / 1440 + 'd';
+    if (minutes >= 60 && minutes % 60 === 0) return minutes / 60 + 'h';
+    return minutes + 'm';
+  }
+
+  function probeMsFromPeriods(p) {
+    return {
+      short: p.short * 60 * 1000,
+      medium: p.medium * 60 * 1000,
+      long: p.long * 60 * 1000,
+      shortMin: p.short,
+      mediumMin: p.medium,
+      longMin: p.long
+    };
+  }
+
+  function updateStreamHoverBar(idx) {
+    if (!streamHoverBar) return;
+    var samples = streamChartState.samples;
+    var probeMs = streamChartState.probeMs;
+    var series = streamChartState.probeSeries;
+    if (idx == null || idx < 0 || !samples || !samples[idx]) {
+      streamHoverBar.classList.add('hidden');
+      streamHoverBar.textContent = '';
+      return;
+    }
+    var s = samples[idx];
+    var parts = [formatTimeWithTz(new Date(s.ts).toISOString()), 'Mid ' + Number(s.mid).toFixed(2)];
+    if (s.bid != null && s.offer != null) {
+      parts.push('Buy ' + Number(s.offer).toFixed(2));
+      parts.push('Sell ' + Number(s.bid).toFixed(2));
+    }
+    if (series && probeMs) {
+      if (series.short[idx] != null) parts.push('S(' + probeMs.shortMin + 'm) ' + series.short[idx].toFixed(2));
+      if (series.medium[idx] != null) parts.push('M(' + probeMs.mediumMin + 'm) ' + series.medium[idx].toFixed(2));
+      if (series.long[idx] != null) parts.push('L(' + formatProbePeriodMinutes(probeMs.longMin) + ') ' + series.long[idx].toFixed(2));
+    }
+    streamHoverBar.textContent = parts.join('  ·  ');
+    streamHoverBar.classList.remove('hidden');
+  }
+
+  function clearStreamCrosshair() {
+    if (!streamCanvasOverlay || !streamCanvasWrap) return;
+    var size = streamWrapSize();
+    if (size.w > 0 && size.h > 0) prepareChartCanvas(streamCanvasOverlay, size.w, size.h, false);
+  }
+
+  function onStreamChartMouseMove(e) {
+    var layout = streamChartState.layout;
+    var samples = streamChartState.samples;
+    if (!layout || !samples.length || !streamCanvasOverlay) return;
+    var rect = streamCanvasOverlay.getBoundingClientRect();
+    var x = e.clientX - rect.left;
+    var y = e.clientY - rect.top;
+    var plotRight = layout.padL + layout.plotW;
+    var plotBottom = layout.padT + layout.plotH;
+    if (x < layout.padL || x > plotRight || y < layout.padT || y > plotBottom) {
+      if (streamChartState.hoverIdx != null) {
+        streamChartState.hoverIdx = null;
+        updateStreamHoverBar(null);
+        clearStreamCrosshair();
+      }
+      return;
+    }
+    var ts = layout.t0 + ((x - layout.padL) / layout.plotW) * layout.tSpan;
+    var idx = nearestSampleIndex(samples, ts);
+    if (streamChartState.hoverIdx === idx) return;
+    streamChartState.hoverIdx = idx;
+    updateStreamHoverBar(idx);
+    drawChartCrosshair(streamCanvasOverlay, layout, samples[idx]);
+  }
+
+  function onStreamChartMouseLeave() {
+    streamChartState.hoverIdx = null;
+    updateStreamHoverBar(null);
+    clearStreamCrosshair();
+  }
+
+  function paintStreamChart(p, longSamp, shortStats, mediumStats, longStats, shortT, mediumT, longT) {
+    if (!streamCanvas || !streamCanvasWrap) return;
+    var now = Date.now();
+    var probeMs = probeMsFromPeriods(p);
+    var bid = state.currentBid;
+    var offer = state.currentOffer;
+    var st = state.engineStatus || 'ready';
+    var statusText = 'Collecting samples…';
+    if (st === 'connecting') statusText = 'Connecting to IG and price stream…';
+    else if (st === 'connected') statusText = 'Starting price stream…';
+    else if (st !== 'running') statusText = 'Waiting for live prices — open Trade to start the stream.';
+
+    if (streamMeta) {
+      var bidStr = bid != null && !isNaN(bid) ? formatVal(bid) : '—';
+      var offerStr = offer != null && !isNaN(offer) ? formatVal(offer) : '—';
+      streamMeta.innerHTML =
+        '<span class="text-slate-500">Buy / Sell</span> ' + offerStr + ' / ' + bidStr +
+        ' &nbsp;|&nbsp; <span class="text-slate-500">S</span> ' + (shortT.text || '—') +
+        ' &nbsp;|&nbsp; <span class="text-slate-500">M</span> ' + (mediumT.text || '—') +
+        ' &nbsp;|&nbsp; <span class="text-slate-500">L</span> ' + (longT.text || '—');
+    }
+
+    var size = streamWrapSize();
+    var result = drawLiveProbeChart(streamCanvas, {
+      width: size.w,
+      height: size.h,
+      samples: longSamp,
+      probeMs: probeMs,
+      refTs: now,
+      probeStats: { short: shortStats, medium: mediumStats, long: longStats },
+      statusText: statusText
+    });
+    streamChartState.layout = result.layout;
+    streamChartState.samples = result.samples;
+    streamChartState.probeSeries = result.probeSeries;
+    streamChartState.probeMs = probeMs;
+    if (streamChartState.hoverIdx != null) {
+      var hi = streamChartState.hoverIdx;
+      if (hi >= result.samples.length) {
+        streamChartState.hoverIdx = null;
+        updateStreamHoverBar(null);
+        clearStreamCrosshair();
+      } else {
+        updateStreamHoverBar(hi);
+        drawChartCrosshair(streamCanvasOverlay, result.layout, result.samples[hi]);
+      }
+    }
+  }
+
+  function updateStreamDiagram(p, shortSamp, mediumSamp, longSamp, shortStats, mediumStats, longStats, shortT, mediumT, longT) {
+    paintStreamChart(p, longSamp, shortStats, mediumStats, longStats, shortT, mediumT, longT);
+    if (streamHint) {
+      var hasData = longSamp.length >= 2;
+      var eng = state.engineStatus || 'ready';
+      streamHint.classList.toggle('hidden', hasData);
+      if (!hasData && eng !== 'running' && eng !== 'connecting') {
+        streamHint.textContent =
+          eng === 'connected'
+            ? 'Starting price stream…'
+            : 'Live chart starts automatically on Trade (independent of rules).';
+      }
+    }
+  }
+
+  if (streamCanvasOverlay) {
+    streamCanvasOverlay.addEventListener('mousemove', onStreamChartMouseMove);
+    streamCanvasOverlay.addEventListener('mouseleave', onStreamChartMouseLeave);
+  }
+  if (streamCanvasWrap && typeof ResizeObserver !== 'undefined') {
+    streamResizeObserver = new ResizeObserver(function () {
+      render();
+    });
+    streamResizeObserver.observe(streamCanvasWrap);
+  }
+
   function setSampleCountEl(el, row) {
     if (!el || !row) return;
     el.textContent = formatProbeSampleCount(row.count, row.expectedCount, row.coveragePct);
@@ -239,7 +421,49 @@ export function initProbes(socket, state, log) {
       medium: { min: mediumStats.min, max: mediumStats.max, avg: mediumStats.avg, range: mediumStats.range, stdDev: mediumStats.stdDev, avgSpread: mediumStats.avgSpread, count: mediumStats.count, trendDir: mediumT.dir, trendPct: mediumT.pct, periodStartBuy: mediumPeriodStart.periodStartBuy, periodStartSell: mediumPeriodStart.periodStartSell },
       long: { min: longStats.min, max: longStats.max, avg: longStats.avg, range: longStats.range, stdDev: longStats.stdDev, avgSpread: longStats.avgSpread, count: longStats.count, trendDir: longT.dir, trendPct: longT.pct, periodStartBuy: longPeriodStart.periodStartBuy, periodStartSell: longPeriodStart.periodStartSell }
     };
+    updateStreamDiagram(p, shortSamp, mediumSamp, longSamp, shortStats, mediumStats, longStats, shortT, mediumT, longT);
     if (onProbeUpdateCallback) onProbeUpdateCallback();
+  }
+
+  /** Merge IG/recorded seed points with live history; live bid/offer wins on duplicate timestamps. */
+  function mergePriceHistoryFromSeed(incoming) {
+    if (!incoming || !incoming.length) return;
+    var existing = state.priceHistory || [];
+    var map = {};
+    function norm(s) {
+      var bid = s.bid;
+      var offer = s.offer;
+      var mid = s.mid;
+      if (mid == null && bid != null && offer != null && !isNaN(bid) && !isNaN(offer)) {
+        mid = (Number(bid) + Number(offer)) / 2;
+      }
+      return {
+        ts: s.ts,
+        mid: mid,
+        spread: s.spread || 0,
+        marketState: s.marketState != null ? s.marketState : null,
+        bid: bid,
+        offer: offer
+      };
+    }
+    function add(s) {
+      if (!s || s.ts == null) return;
+      var k = String(s.ts);
+      var next = norm(s);
+      var prev = map[k];
+      if (!prev) {
+        map[k] = next;
+        return;
+      }
+      if (next.bid != null && next.offer != null) map[k] = next;
+    }
+    for (var i = 0; i < incoming.length; i++) add(incoming[i]);
+    for (var j = 0; j < existing.length; j++) add(existing[j]);
+    var merged = Object.keys(map).map(function (k) { return map[k]; });
+    merged.sort(function (a, b) { return (a.ts || 0) - (b.ts || 0); });
+    if (merged.length > MAX_SAMPLES) merged = merged.slice(-MAX_SAMPLES);
+    state.priceHistory = merged;
+    render();
   }
 
   function addSample(bid, offer, spread, marketState) {
@@ -266,8 +490,7 @@ export function initProbes(socket, state, log) {
 
   socket.on('price_update', function (data) {
     if (!data) {
-      state.priceHistory = [];
-      state.currentEpic = null;
+      // Stream stopped — keep today's samples for chart when stream restarts (server re-seeds from DB).
       lastShortTrend = lastMediumTrend = lastLongTrend = { dir: 'flat', pct: null, text: '—' };
       render();
       return;
@@ -275,23 +498,17 @@ export function initProbes(socket, state, log) {
     addSample(data.bid, data.offer, data.spread, data.marketState);
   });
 
+  socket.on('live_chart_day_seed', function (payload) {
+    if (!payload || !Array.isArray(payload.samples)) return;
+    if (payload.epic && state.currentEpic && payload.epic !== state.currentEpic) return;
+    mergePriceHistoryFromSeed(payload.samples);
+  });
+
   socket.on('probes_backfill', function (payload) {
     if (!payload || !Array.isArray(payload.samples)) return;
-    var existing = state.priceHistory || [];
-    var merged = payload.samples.concat(existing);
-    merged.sort(function (a, b) { return (a.ts || 0) - (b.ts || 0); });
-    var seen = {};
-    merged = merged.filter(function (s) {
-      var k = String(s.ts || 0);
-      if (seen[k]) return false;
-      seen[k] = true;
-      return true;
-    });
-    if (merged.length > MAX_SAMPLES) merged = merged.slice(-MAX_SAMPLES);
-    state.priceHistory = merged;
+    mergePriceHistoryFromSeed(payload.samples);
     setBackfillLoading(false);
     setBackfillStatus('', false);
-    render();
   });
 
   socket.on('probes_backfill_error', function (msg) {

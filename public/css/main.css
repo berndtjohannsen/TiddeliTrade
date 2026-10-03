@@ -56,6 +56,32 @@
   visibility: visible;
 }
 
+/* Header Demo/Live label — read-only indicator, not a control */
+.profile-indicator {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 0.125rem 0.5rem;
+  border-radius: 0.25rem;
+  border: 1px solid;
+  cursor: default;
+  user-select: none;
+}
+.profile-indicator--demo {
+  color: #cbd5e1;
+  border-color: #475569;
+  background: transparent;
+}
+.profile-indicator--live {
+  color: #fcd34d;
+  border-color: #d97706;
+  background: rgba(217, 119, 6, 0.15);
+}
+.profile-indicator[data-tooltip] {
+  cursor: help;
+}
+
 /* Chart modal — visible resize grip (bottom-right) */
 #tradeChartModalPanel {
   box-sizing: border-box;
@@ -159,21 +185,78 @@
 .trade-session-status-banner,
 .trade-rules-session-banner {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   align-items: stretch;
-  gap: 0.75rem;
-  padding: 0.75rem 1rem;
-  border-radius: 0.875rem;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border-radius: 0.75rem;
   border: 1px solid rgb(51 65 85 / 0.55);
-  background: rgb(15 23 42 / 0.45);
-  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease, padding 0.2s ease;
+  background: rgb(15 23 42 / 0.92);
+  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+.trade-overview-panel {
+  grid-column: 1 / -1;
+}
+.trade-overview-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.trade-overview-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.trade-overview-session-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.625rem 0.75rem;
+  min-width: 0;
+}
+.trade-overview-rules-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.5rem;
+  min-width: 0;
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+.trade-overview-rules-label {
+  font-weight: 600;
+  color: rgb(148 163 184);
+}
+.trade-overview-rules-label--active { color: rgb(52 211 153); }
+.trade-overview-rules-label--paused { color: rgb(251 191 36); }
+.trade-overview-rules-label--stopped { color: rgb(100 116 139); }
+.trade-overview-rules-label--armed { color: rgb(56 189 248); }
+.trade-overview-rules-label--waiting { color: rgb(251 191 36); }
+.trade-overview-rules-label--done { color: rgb(148 163 184); }
+.trade-overview-rules-label--expired { color: rgb(248 113 113); }
+.trade-overview-rules-detail::before {
+  content: '·';
+  margin-right: 0.5rem;
+  color: rgb(71 85 105);
+}
+.trade-overview-rules-detail {
+  color: rgb(100 116 139);
+}
+.trade-overview-summary {
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: rgb(148 163 184);
 }
 .trade-session-status-inner {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
   min-width: 0;
-  flex: 1;
+  width: 100%;
 }
 .trade-session-status-heading {
   display: flex;
@@ -193,6 +276,23 @@
   border-radius: 9999px;
   background: rgb(52 211 153);
   box-shadow: 0 0 0 2px rgb(52 211 153 / 0.25);
+}
+.trade-session-status-dot--idle {
+  background: rgb(100 116 139);
+  box-shadow: 0 0 0 2px rgb(100 116 139 / 0.2);
+  animation: none;
+}
+.trade-session-status-dot--probes {
+  background: rgb(56 189 248);
+  box-shadow: 0 0 0 2px rgb(56 189 248 / 0.25);
+}
+.trade-session-status-dot--live {
+  background: rgb(52 211 153);
+  box-shadow: 0 0 0 2px rgb(52 211 153 / 0.25);
+}
+.trade-session-status-dot--probes,
+.trade-session-status-dot--live {
+  animation: trade-session-pulse 2s ease-in-out infinite;
 }
 .trade-session-status-grid {
   display: grid;
@@ -215,6 +315,91 @@
   border-radius: 0.625rem;
   border: 1px solid rgb(51 65 85 / 0.45);
   background: rgb(2 6 23 / 0.35);
+}
+.trade-session-status-block--solo {
+  max-width: 28rem;
+}
+
+/* Overview — live stream chart (matches Research tradeChart canvas layout) */
+.probe-stream-diagram {
+  width: 100%;
+  padding: 0.75rem 0.875rem;
+  border-radius: 0.625rem;
+  border: 1px solid rgb(51 65 85 / 0.55);
+  background: rgb(2 6 23 / 0.45);
+}
+.probe-stream-diagram-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 0.75rem;
+  margin-bottom: 0.375rem;
+}
+.probe-stream-diagram-title {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgb(100 116 139);
+}
+.probe-stream-legend-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  font-size: 0.625rem;
+  color: rgb(148 163 184);
+}
+.probe-stream-legend-key::before {
+  content: '';
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 2px;
+  margin-right: 0.25rem;
+  vertical-align: middle;
+}
+.probe-stream-legend-key--mid::before { background: #0ea5e9; }
+.probe-stream-legend-key--short::before { background: #22d3ee; }
+.probe-stream-legend-key--medium::before { background: #a78bfa; }
+.probe-stream-legend-key--long::before { background: #f472b6; }
+.probe-stream-meta {
+  margin-bottom: 0.375rem;
+  min-height: 1.25rem;
+}
+.probe-stream-hover-bar {
+  padding: 0.25rem 0;
+  margin-bottom: 0.25rem;
+  font-size: 0.625rem;
+  color: rgb(125 211 252 / 0.95);
+  white-space: nowrap;
+  overflow-x: auto;
+}
+.probe-stream-canvas-wrap {
+  position: relative;
+  width: 100%;
+  height: 220px;
+  min-height: 160px;
+  border-radius: 0.375rem;
+  background: rgb(2 6 23 / 0.8);
+  overflow: hidden;
+}
+.probe-stream-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.probe-stream-canvas-overlay {
+  cursor: crosshair;
+  pointer-events: auto;
+}
+.probe-stream-diagram-hint {
+  margin: 0.5rem 0 0;
+  font-size: 0.625rem;
+  color: rgb(100 116 139);
+  line-height: 1.4;
 }
 .trade-session-status-block-label {
   font-size: 0.6875rem;
@@ -399,4 +584,46 @@
 }
 .trade-manual-heading {
   grid-column: 1 / -1;
+}
+
+/* Initial startup overlay — visible before JS modules finish loading */
+.app-boot-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(2 6 23 / 0.94);
+  transition: opacity 0.2s ease, visibility 0.2s ease;
+}
+.app-boot-overlay--hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.app-boot-overlay-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  text-align: center;
+}
+.app-boot-spinner {
+  width: 2.25rem;
+  height: 2.25rem;
+  border: 3px solid rgb(51 65 85);
+  border-top-color: rgb(16 185 129);
+  border-radius: 9999px;
+  animation: app-boot-spin 0.75s linear infinite;
+}
+.app-boot-message {
+  margin: 0;
+  font-size: 0.875rem;
+  color: rgb(148 163 184);
+}
+@keyframes app-boot-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }

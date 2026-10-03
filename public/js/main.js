@@ -18,14 +18,15 @@ import { initTradingRules } from './tradingRules.js';
 import { initTransactionLog } from './transactionLog.js';
 import { initAppView } from './appView.js';
 import { initOnboarding } from './onboarding.js';
-import { formatTimeWithTz } from './utils.js';
+import { formatTimeWithTz, initAppConfirmModal, hideAppBootOverlay } from './utils.js';
 import { updateDynamicTpStatusDisplay } from './dynamicTpUi.js';
 
 const socket = io();
+const appConfirm = initAppConfirmModal();
 
 const log = initLog();
 socket.on('log', log);
-socket.on('marketDetails', function (data) {
+function applyMarketDetails(data) {
   state.defaultCloseAt = data && data.defaultCloseAt ? data.defaultCloseAt : null;
   state.is24_7Market = !!(data && data.is24_7);
   state.dealingWeekLondon = data && data.dealingWeekLondon ? data.dealingWeekLondon : null;
@@ -68,9 +69,11 @@ socket.on('marketDetails', function (data) {
       sentimentEl.className = cls;
     }
   }
-});
-socket.on('connect', function () { log('Connected'); });
-socket.on('disconnect', function () { log('Disconnected'); });
+}
+
+socket.on('marketDetails', applyMarketDetails);
+socket.on('connect', function () { log('Connected to server'); });
+socket.on('disconnect', function () { log('Disconnected from server'); });
 log('UI ready');
 
 const dealApi = initDeal(socket, state, log);
@@ -87,19 +90,6 @@ var testRulesApi = initTestRules(socket, state, log, {
   }
 });
 var tradingRulesApi = initTradingRules(socket, state, dealApi.setDealEnabled, orderApi.setOrderEnabled, probesApi.setProbesPanelEnabled, probesApi.setBackfillEnabled, probesApi.setProbesSettingsLocked, probesApi.getProbeValues, dealApi.triggerDealConfirm, dealApi.placeDealDirect, log);
-initStatus(socket, log, {
-  onStopProbing: function () {
-    tradingRulesApi.stopRulesEngine('Rules engine stopped (probing ended)');
-  },
-  onEngineStatusChange: function () {
-    if (tradingRulesApi.updateDealEnabled) tradingRulesApi.updateDealEnabled();
-    if (tradingRulesApi.updateSessionUi) tradingRulesApi.updateSessionUi();
-  }
-});
-probesApi.setOnProbeUpdate(function () { tradingRulesApi.updateDealEnabled(); });
-socket.on('marketDetails', function () {
-  if (probesApi.refreshProbes) probesApi.refreshProbes();
-});
 var transactionLogApi = initTransactionLog(socket);
 
 function setTradePanelsVisible(visible) {
@@ -116,6 +106,16 @@ function hideAllWorkspacePanels() {
   testRulesApi.setTestRulesPanelEnabled(false);
 }
 
+/** Trade view: live diagram uses the price stream — start it without starting rules. */
+function ensureTradePriceStream() {
+  if (!appView.isWorkspaceReady() || appView.getView() !== 'trade') return;
+  var st = state.engineStatus || 'ready';
+  if (st === 'running' || st === 'connecting') return;
+  if (st !== 'connected' && st !== 'ready') return;
+  log('Trade view: starting price stream (not rules)');
+  socket.emit('start');
+}
+
 function refreshWorkspacePanels() {
   if (!appView.isWorkspaceReady()) {
     hideAllWorkspacePanels();
@@ -124,11 +124,57 @@ function refreshWorkspacePanels() {
   var onTrade = appView.getView() === 'trade';
   setTradePanelsVisible(onTrade);
   testRulesApi.setTestRulesPanelEnabled(!onTrade);
+  if (onTrade) ensureTradePriceStream();
 }
 
-var appView = initAppView({ onViewChange: refreshWorkspacePanels });
+function onWorkspaceViewChange(view) {
+  refreshWorkspacePanels();
+  if (view === 'trade') ensureTradePriceStream();
+}
 
-initOnboarding(socket, state, appView, log, {
+var appView = initAppView({ onViewChange: onWorkspaceViewChange });
+
+initStatus(socket, log, {
+  onStopProbing: function () {
+    tradingRulesApi.stopRulesEngine('Rules engine stopped (probing ended)');
+  },
+  onEngineStatusChange: function () {
+    if (tradingRulesApi.updateDealEnabled) tradingRulesApi.updateDealEnabled();
+    if (tradingRulesApi.updateSessionUi) tradingRulesApi.updateSessionUi();
+    if (appView.getView() === 'trade') ensureTradePriceStream();
+  }
+});
+probesApi.setOnProbeUpdate(function () { tradingRulesApi.updateDealEnabled(); });
+socket.on('marketDetails', function () {
+  if (probesApi.refreshProbes) probesApi.refreshProbes();
+});
+
+var accountApi = initAccount(socket, state, tradingRulesApi.setBaseEnabled, dealApi.clearDealMessage, function (connected) {
+  appView.setConnected(connected);
+  if (appView.isWorkspaceReady()) refreshWorkspacePanels();
+  else hideAllWorkspacePanels();
+});
+
+var onboardingApi = null;
+var settingsApi = initSettings(log, {
+  socket: socket,
+  onConfigSaved: function (cfg) {
+    if (accountApi.updateProfileFromConfig) accountApi.updateProfileFromConfig(cfg);
+    if (onboardingApi && onboardingApi.onConfigUpdated) onboardingApi.onConfigUpdated(cfg);
+  }
+});
+
+onboardingApi = initOnboarding(socket, state, appView, log, {
+  accountApi: settingsApi,
+  showConfirm: appConfirm.showConfirm,
+  prepareForHome: function () {
+    if (state.rulesEngineRunning && tradingRulesApi.stopRulesEngine) {
+      tradingRulesApi.stopRulesEngine('Rules engine stopped (returned to Home)');
+    }
+    if (state.engineStatus === 'running') {
+      socket.emit('stop_stream');
+    }
+  },
   onEnterWorkspace: refreshWorkspacePanels,
   onEpicSaved: function () {
     dealApi.loadDealSettings();
@@ -141,16 +187,14 @@ initOnboarding(socket, state, appView, log, {
   }
 });
 
-var accountApi = initAccount(socket, state, tradingRulesApi.setBaseEnabled, dealApi.clearDealMessage, function (connected) {
-  appView.setConnected(connected);
-  if (appView.isWorkspaceReady()) refreshWorkspacePanels();
-  else hideAllWorkspacePanels();
-});
-
 socket.on('status', function (status) {
   if (status === 'disconnected') return;
+  if (status === 'stopped' || status === 'ready') {
+    applyMarketDetails(null);
+  }
   var running = status === 'running';
   appView.setConnected(running);
+  if (onboardingApi && onboardingApi.syncHeaderInstrument) onboardingApi.syncHeaderInstrument();
   if (appView.isWorkspaceReady()) refreshWorkspacePanels();
 });
 initWatchlists(socket, state, log, {
@@ -167,4 +211,6 @@ initWatchlists(socket, state, log, {
 initPrices(socket, state, log);
 initPositions(socket, state, dealApi.showDealMessage, dealApi.clearDealMessage, log);
 initOrders(socket, state, log);
-initSettings(log, accountApi && accountApi.updateProfileFromConfig ? accountApi.updateProfileFromConfig : null);
+
+// Never leave the startup overlay up if initialization throws before Home is ready.
+setTimeout(function () { hideAppBootOverlay(); }, 20000);
