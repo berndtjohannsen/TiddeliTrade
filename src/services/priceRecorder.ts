@@ -13,11 +13,14 @@ import {
   evaluateDayForGapPrune,
   type GapPruneEvaluateOptions,
 } from './sampleQuality';
+import { createLondonDayKeyResolver, londonDayBoundsMs } from './ig';
 
 // Resolve DB path from this module's location (works for both ts-node and compiled dist)
 const _moduleDir = path.dirname(__dirname); // src/services -> src, or dist/services -> dist
 const _projectRoot = path.resolve(_moduleDir, '..');
 const DB_PATH = process.env.PRICE_RECORDS_DB || path.join(_projectRoot, 'price_records.db');
+/** Calendar used for day keys in this DB (IG / dealing schedule alignment). */
+export const RECORDING_DAY_CALENDAR = 'Europe/London';
 const SAMPLE_INTERVAL_MS = 1000;
 
 let db: Database.Database | null = null;
@@ -53,10 +56,47 @@ function getDb(): Database.Database {
   return db;
 }
 
-/** Local calendar day bounds (matches strftime localtime day keys). */
-function dayLocalBoundsMs(day: string): { fromTs: number; toTsExclusive: number } {
-  const fromTs = new Date(`${day}T00:00:00`).getTime();
-  return { fromTs, toTsExclusive: fromTs + 86400000 };
+interface DayAggRow {
+  epic: string;
+  day: string;
+  count: number;
+  firstTs: number;
+  lastTs: number;
+}
+
+/** One table scan; group by epic + Europe/London day (no SQLite JS UDF — too slow on large DBs). */
+function aggregateDayStatsFromDb(epicFilter?: string): DayAggRow[] {
+  const database = getDb();
+  const sql = epicFilter
+    ? 'SELECT epic, ts FROM price_samples WHERE epic = ? ORDER BY ts ASC'
+    : 'SELECT epic, ts FROM price_samples ORDER BY epic ASC, ts ASC';
+  const rows = (epicFilter
+    ? database.prepare(sql).all(epicFilter)
+    : database.prepare(sql).all()) as Array<{ epic: string; ts: number }>;
+
+  const buckets = new Map<string, DayAggRow>();
+  let dayKey = createLondonDayKeyResolver();
+  let lastEpic = '';
+
+  for (const r of rows) {
+    if (!r.epic) continue;
+    if (r.epic !== lastEpic) {
+      lastEpic = r.epic;
+      dayKey = createLondonDayKeyResolver();
+    }
+    const day = dayKey(r.ts);
+    const key = `${r.epic}\0${day}`;
+    let b = buckets.get(key);
+    if (!b) {
+      b = { epic: r.epic, day, count: 0, firstTs: r.ts, lastTs: r.ts };
+      buckets.set(key, b);
+    }
+    b.count++;
+    if (r.ts < b.firstTs) b.firstTs = r.ts;
+    if (r.ts > b.lastTs) b.lastTs = r.ts;
+  }
+
+  return Array.from(buckets.values());
 }
 
 function ensureClosed(): void {
@@ -204,7 +244,7 @@ export function getRecordedSamplesFiltered(
     if (opts?.days && opts.days.length > 0) {
       const dayClauses: string[] = [];
       for (const day of opts.days) {
-        const { fromTs, toTsExclusive } = dayLocalBoundsMs(day);
+        const { fromTs, toTsExclusive } = londonDayBoundsMs(day);
         dayClauses.push('(ts >= ? AND ts < ?)');
         params.push(fromTs, toTsExclusive);
       }
@@ -261,15 +301,30 @@ export function getDbPath(): string {
   return DB_PATH;
 }
 
-/** Returns distinct dates (YYYY-MM-DD) that have recorded samples for the epic, sorted ascending. */
-export function getRecordedDays(epic: string): string[] {
+/** Helps verify local vs container use the same DB file and day-calendar logic. */
+export function getRecordingDbInfo(): {
+  dbPath: string;
+  recordingDayCalendar: string;
+  totalSampleCount: number;
+} {
   try {
     const database = getDb();
-    const rows = database.prepare(
-      `SELECT DISTINCT strftime('%Y-%m-%d', ts / 1000, 'unixepoch', 'localtime') as day
-       FROM price_samples WHERE epic = ? ORDER BY day ASC`
-    ).all(epic) as Array<{ day: string }>;
-    return rows.map((r) => r.day).filter(Boolean);
+    const row = database.prepare('SELECT COUNT(*) as c FROM price_samples').get() as { c: number };
+    return {
+      dbPath: DB_PATH,
+      recordingDayCalendar: RECORDING_DAY_CALENDAR,
+      totalSampleCount: row?.c ?? 0,
+    };
+  } catch {
+    return { dbPath: DB_PATH, recordingDayCalendar: RECORDING_DAY_CALENDAR, totalSampleCount: 0 };
+  }
+}
+
+/** Returns distinct Europe/London dates (YYYY-MM-DD) with samples for the epic, sorted ascending. */
+export function getRecordedDays(epic: string): string[] {
+  try {
+    const days = aggregateDayStatsFromDb(epic).map((r) => r.day);
+    return [...new Set(days)].sort();
   } catch {
     return [];
   }
@@ -278,19 +333,15 @@ export function getRecordedDays(epic: string): string[] {
 /** Returns days with sample count for the epic, sorted ascending. */
 export function getDayStats(epic: string): { day: string; count: number; epic?: string; coveragePct: number }[] {
   try {
-    const database = getDb();
-    const rows = database.prepare(
-      `SELECT strftime('%Y-%m-%d', ts / 1000, 'unixepoch', 'localtime') as day,
-              COUNT(*) as count, MIN(ts) as firstTs, MAX(ts) as lastTs
-       FROM price_samples WHERE epic = ?
-       GROUP BY 1 ORDER BY 1 ASC`
-    ).all(epic) as Array<{ day: string; count: number; firstTs: number; lastTs: number }>;
-    return rows.filter((r) => r.day).map((r) => ({
-      day: r.day,
-      count: Number(r.count),
-      epic,
-      coveragePct: coveragePctForSampleSpan(Number(r.count), Number(r.firstTs), Number(r.lastTs)),
-    }));
+    return aggregateDayStatsFromDb(epic)
+      .filter((r) => r.day)
+      .sort((a, b) => a.day.localeCompare(b.day))
+      .map((r) => ({
+        day: r.day,
+        count: r.count,
+        epic,
+        coveragePct: coveragePctForSampleSpan(r.count, r.firstTs, r.lastTs),
+      }));
   } catch {
     return [];
   }
@@ -312,50 +363,118 @@ export interface RecordedDayStat {
 /** Returns days with count and epic for ALL epics in the DB, sorted by day then epic. */
 export function getAllDayStats(): RecordedDayStat[] {
   try {
-    const database = getDb();
-    const rows = database.prepare(
-      `SELECT epic, strftime('%Y-%m-%d', ts / 1000, 'unixepoch', 'localtime') as day,
-              COUNT(*) as count, MIN(ts) as firstTs, MAX(ts) as lastTs
-       FROM price_samples
-       GROUP BY epic, day ORDER BY day ASC, epic ASC`
-    ).all() as Array<{ epic: string; day: string; count: number; firstTs: number; lastTs: number }>;
-    return rows.filter((r) => r.day && r.epic).map((r) => ({
-      day: r.day,
-      count: Number(r.count),
-      epic: r.epic,
-      coveragePct: coveragePctForSampleSpan(Number(r.count), Number(r.firstTs), Number(r.lastTs)),
-    }));
+    return aggregateDayStatsFromDb()
+      .filter((r) => r.day && r.epic)
+      .sort((a, b) => a.day.localeCompare(b.day) || a.epic.localeCompare(b.epic))
+      .map((r) => ({
+        day: r.day,
+        count: r.count,
+        epic: r.epic,
+        coveragePct: coveragePctForSampleSpan(r.count, r.firstTs, r.lastTs),
+      }));
   } catch {
     return [];
   }
 }
 
-/** Day list stats plus backtest readiness from saved dealing schedule per epic. */
+function rowToRecordedSample(r: {
+  epic: string;
+  ts: number;
+  bid: number;
+  offer: number;
+  spread: number;
+  long_pct: number | null;
+  short_pct: number | null;
+}): RecordedSample {
+  return {
+    epic: r.epic,
+    ts: r.ts,
+    bid: r.bid,
+    offer: r.offer,
+    spread: r.spread,
+    longPct: r.long_pct,
+    shortPct: r.short_pct,
+  };
+}
+
+function finishDayStatRow(
+  epic: string,
+  day: string,
+  samples: RecordedSample[],
+  dealingOpts: ReturnType<typeof getDealingFilterOptsForEpic>
+): RecordedDayStat {
+  const count = samples.length;
+  const firstTs = samples[0]?.ts ?? 0;
+  const lastTs = samples[count - 1]?.ts ?? firstTs;
+  const row: RecordedDayStat = {
+    day,
+    epic,
+    count,
+    coveragePct: coveragePctForSampleSpan(count, firstTs, lastTs),
+  };
+  const readiness = evaluateDayBacktestReadiness(day, samples, dealingOpts);
+  row.backtestReady = readiness.backtestReady;
+  row.dealingCoveragePct = readiness.dealingCoveragePct;
+  row.maxGapMsInDealing = readiness.maxGapMsInDealing;
+  row.backtestNotReadyReasons = readiness.reasons.length > 0 ? readiness.reasons : undefined;
+  return row;
+}
+
+/**
+ * One ordered scan: London day stats + backtest readiness (keeps at most one day of samples in memory).
+ */
 export function getAllDayStatsWithBacktestReadiness(): RecordedDayStat[] {
-  const base = getAllDayStats();
-  if (base.length === 0) return base;
+  try {
+    const database = getDb();
+    const rows = database
+      .prepare(
+        `SELECT epic, ts, bid, offer, spread, long_pct, short_pct
+         FROM price_samples ORDER BY epic ASC, ts ASC`
+      )
+      .all() as Array<{
+      epic: string;
+      ts: number;
+      bid: number;
+      offer: number;
+      spread: number;
+      long_pct: number | null;
+      short_pct: number | null;
+    }>;
 
-  const byEpic = new Map<string, RecordedDayStat[]>();
-  for (const row of base) {
-    const list = byEpic.get(row.epic);
-    if (list) list.push(row);
-    else byEpic.set(row.epic, [row]);
-  }
+    const out: RecordedDayStat[] = [];
+    let curEpic = '';
+    let curDay = '';
+    let daySamples: RecordedSample[] = [];
+    let dayKey = createLondonDayKeyResolver();
+    let dealingOpts = getDealingFilterOptsForEpic('');
 
-  // One local calendar day per query — avoid loading an entire epic history (OOM in Docker).
-  for (const [epic, rows] of byEpic) {
-    const dealingOpts = getDealingFilterOptsForEpic(epic);
-    for (const row of rows) {
-      const daySamples = getRecordedSamplesFiltered(epic, { days: [row.day] });
-      const readiness = evaluateDayBacktestReadiness(row.day, daySamples, dealingOpts);
-      row.backtestReady = readiness.backtestReady;
-      row.dealingCoveragePct = readiness.dealingCoveragePct;
-      row.maxGapMsInDealing = readiness.maxGapMsInDealing;
-      row.backtestNotReadyReasons = readiness.reasons.length > 0 ? readiness.reasons : undefined;
+    const flushDay = () => {
+      if (!curEpic || !curDay || daySamples.length === 0) return;
+      out.push(finishDayStatRow(curEpic, curDay, daySamples, dealingOpts));
+      daySamples = [];
+    };
+
+    for (const r of rows) {
+      if (!r.epic) continue;
+      if (r.epic !== curEpic) {
+        flushDay();
+        curEpic = r.epic;
+        curDay = '';
+        dayKey = createLondonDayKeyResolver();
+        dealingOpts = getDealingFilterOptsForEpic(curEpic);
+      }
+      const day = dayKey(r.ts);
+      if (curDay && day !== curDay) flushDay();
+      curDay = day;
+      daySamples.push(rowToRecordedSample(r));
     }
-  }
+    flushDay();
 
-  return base;
+    out.sort((a, b) => a.day.localeCompare(b.day) || a.epic.localeCompare(b.epic));
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 const YYYY_MM_DD = /^\d{4}-\d{2}-\d{2}$/;
@@ -366,11 +485,17 @@ export function deleteSamplesByDays(epic: string, days: string[]): number {
   if (!valid.length) return 0;
   try {
     const database = getDb();
-    const placeholders = valid.map(() => '?').join(',');
+    const dayClauses: string[] = [];
+    const params: (string | number)[] = [epic];
+    for (const day of valid) {
+      const { fromTs, toTsExclusive } = londonDayBoundsMs(day);
+      dayClauses.push('(ts >= ? AND ts < ?)');
+      params.push(fromTs, toTsExclusive);
+    }
     const stmt = database.prepare(
-      `DELETE FROM price_samples WHERE epic = ? AND strftime('%Y-%m-%d', ts / 1000, 'unixepoch', 'localtime') IN (${placeholders})`
+      `DELETE FROM price_samples WHERE epic = ? AND (${dayClauses.join(' OR ')})`
     );
-    const result = stmt.run(epic, ...valid);
+    const result = stmt.run(...params);
     return result.changes;
   } catch {
     return 0;

@@ -43,6 +43,7 @@ import {
   getRecordedDays,
   getDayStats,
   getAllDayStatsWithBacktestReadiness,
+  getRecordingDbInfo,
   getEpicsWithData,
   deleteSamplesByDays,
   deleteSparseDays,
@@ -50,6 +51,7 @@ import {
   previewGapDays,
   type RecordedSample,
 } from '../services/priceRecorder';
+import { VERSION } from '../version';
 import path from 'path';
 import { Worker } from 'worker_threads';
 import {
@@ -1703,7 +1705,13 @@ export function registerSocketHandlers(io: Server): void {
       const dayStats = getAllDayStatsWithBacktestReadiness();
       const days = dayStats.map((s) => s.day);
       const epicsWithData = getEpicsWithData();
-      socket.emit('recorded_days', { dayStats, days, epicsWithData, allEpics: true });
+      socket.emit('recorded_days', {
+        dayStats,
+        days,
+        epicsWithData,
+        allEpics: true,
+        recordingMeta: { ...getRecordingDbInfo(), appVersion: VERSION },
+      });
     });
 
     /** Mid/bid/offer series for trade chart (Test rules modal). Downsampled if huge. */

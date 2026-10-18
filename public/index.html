@@ -971,7 +971,7 @@
             <span class="text-slate-500 text-xs">%</span>
             <button type="button" id="testRulesPruneGapBtn" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300" data-tooltip="Scan for days with a gap longer than the limit and/or under the coverage threshold, then confirm before removing">Prune gaps</button>
           </div>
-          <div id="testRulesDaysList" class="flex flex-col gap-0.5 max-h-36 overflow-y-auto" data-tooltip="Grouped by instrument. Green day = good for backtest (≥90% samples during saved IG dealing hours, no gap &gt;10 min while dealing). Hover for details."></div>
+          <div id="testRulesDaysList" class="flex flex-col gap-0.5 max-h-36 overflow-y-auto" data-tooltip="UK/London calendar days (IG). All recorded days are listed. Green = good for backtest. Use Prune sparse to remove thin days from the DB. Hover for details."></div>
           <div class="flex flex-wrap items-center gap-2 text-slate-500">
             <label for="testRulesFromDate">Or range:</label>
             <input type="date" id="testRulesFromDate" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono w-28">

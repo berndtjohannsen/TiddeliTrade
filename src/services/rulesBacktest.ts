@@ -21,6 +21,7 @@ import {
   precomputeProbeEligibleFlags,
   type ProbeSampleFilterOpts,
 } from './probeSamples';
+import { londonDateKeyFromTimestamp } from './ig';
 
 export type { DealingDaySlotLondon, DealingWeekLondon };
 export {
@@ -692,20 +693,16 @@ function mergeBlockerAggregateMap(blockerAggregate: Map<string, number>): RuleBl
   return out;
 }
 
+/** Backtest / recording calendar day (Europe/London — same as Load days and dealing schedule). */
 function getDayKey(ts: number): string {
-  const d = new Date(ts);
-  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-}
-
-function londonDateKeyFromTs(ts: number): string {
-  return new Date(ts).toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+  return londonDateKeyFromTimestamp(ts);
 }
 
 /** First sample mid per Europe/London day — fallback when IG day open unavailable. */
 function fallbackDayStartByLondonDate(samples: { ts: number; bid: number; offer: number }[]): Record<string, number> {
   const out: Record<string, number> = {};
   for (const s of samples) {
-    const key = londonDateKeyFromTs(s.ts);
+    const key = londonDateKeyFromTimestamp(s.ts);
     if (out[key] == null) out[key] = (s.bid + s.offer) / 2;
   }
   return out;
@@ -716,14 +713,14 @@ function resolveDayStartForTs(
   config: BacktestConfig,
   fallbackByLondon: Record<string, number>
 ): number | null {
-  const key = londonDateKeyFromTs(ts);
+  const key = londonDateKeyFromTimestamp(ts);
   const ig = config.dayStartByLondonDate?.[key];
   if (ig != null && !isNaN(ig)) return ig;
   const fb = fallbackByLondon[key];
   return fb != null && !isNaN(fb) ? fb : null;
 }
 
-/** Calendar day key (local) for a sample/trade timestamp. */
+/** Calendar day key (Europe/London) for a sample/trade timestamp. */
 export function dayKeyFromTimestamp(ts: number): string {
   return getDayKey(ts);
 }

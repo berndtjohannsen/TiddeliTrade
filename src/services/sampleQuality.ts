@@ -2,6 +2,7 @@
  * Detect gaps, sparse coverage, and glitches in recorded price samples (1 Hz expected).
  */
 import type { RecordedSample } from './priceRecorder';
+import { londonDateKeyFromTimestamp, londonDayBoundsMs } from './ig';
 import {
   computeOpenMsInWindow,
   isProbeEligibleSample,
@@ -74,12 +75,9 @@ export function coveragePctForSampleSpan(
   return expectedInSpan > 0 ? Math.min(100, (count / expectedInSpan) * 100) : 100;
 }
 
-function dayKeyLocal(ts: number): string {
-  const d = new Date(ts);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
+/** Europe/London day key for recorded samples (IG calendar). */
+function recordingDayKey(ts: number): string {
+  return londonDateKeyFromTimestamp(ts);
 }
 
 function formatGapMs(ms: number): string {
@@ -234,16 +232,10 @@ export function evaluateDayForGapPrune(
   return { prune: reasons.length > 0, reasons, row };
 }
 
-/** Local calendar day bounds (same as Research day charts). */
-function dayLocalBoundsMs(day: string): { fromTs: number; toTsInclusive: number } {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
-  if (!m) return { fromTs: 0, toTsInclusive: 0 };
-  const y = parseInt(m[1], 10);
-  const mo = parseInt(m[2], 10) - 1;
-  const d = parseInt(m[3], 10);
-  const fromTs = new Date(y, mo, d, 0, 0, 0, 0).getTime();
-  const toTsInclusive = new Date(y, mo, d, 23, 59, 59, 999).getTime();
-  return { fromTs, toTsInclusive };
+/** Europe/London day bounds (same as Research day charts and priceRecorder). */
+function recordingDayBoundsInclusive(day: string): { fromTs: number; toTsInclusive: number } {
+  const { fromTs, toTsExclusive } = londonDayBoundsMs(day);
+  return { fromTs, toTsInclusive: toTsExclusive - 1 };
 }
 
 export interface BacktestDayReadinessOptions {
@@ -275,7 +267,7 @@ export function evaluateDayBacktestReadiness(
   const maxGapMsInDealing = options?.maxGapMsInDealing ?? DEFAULT_MAX_GAP_PRUNE_MS;
   const minExpectedDealingSamples = options?.minExpectedDealingSamples ?? DEFAULT_SPARSE_THRESHOLD;
 
-  const { fromTs, toTsInclusive } = dayLocalBoundsMs(day);
+  const { fromTs, toTsInclusive } = recordingDayBoundsInclusive(day);
   const windowEndExclusive = toTsInclusive + 1;
   const expectedDealingSamples = Math.max(
     0,
@@ -338,7 +330,7 @@ export function evaluateDayBacktestReadiness(
   };
 }
 
-/** Analyse recorded samples grouped by local calendar day. */
+/** Analyse recorded samples grouped by Europe/London calendar day. */
 export function analyzeSampleQuality(
   samples: RecordedSample[],
   options?: SampleQualityOptions
@@ -351,7 +343,7 @@ export function analyzeSampleQuality(
 
   const byDay = new Map<string, RecordedSample[]>();
   for (const s of samples) {
-    const day = dayKeyLocal(s.ts);
+    const day = recordingDayKey(s.ts);
     const arr = byDay.get(day);
     if (arr) arr.push(s);
     else byDay.set(day, [s]);

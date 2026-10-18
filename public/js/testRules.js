@@ -473,16 +473,47 @@ export function initTestRules(socket, state, log, profileOpts) {
     return er || '—';
   }
 
-  function dayChartTimeRange(dayStr) {
-    var parts = (dayStr || '').split('-');
-    if (parts.length !== 3) return null;
+  /** Europe/London day key (matches server recording_london_day / IG). */
+  function recordingDayKeyFromTs(ms) {
+    return new Date(ms).toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+  }
+
+  function recordingDayStartMs(dayKey) {
+    var parts = (dayKey || '').split('-');
+    if (parts.length !== 3) return 0;
     var y = parseInt(parts[0], 10);
-    var m = parseInt(parts[1], 10) - 1;
+    var mo = parseInt(parts[1], 10);
     var d = parseInt(parts[2], 10);
-    if (isNaN(y) || isNaN(m) || isNaN(d)) return null;
-    var start = new Date(y, m, d, 0, 0, 0, 0).getTime();
-    var end = new Date(y, m, d, 23, 59, 59, 999).getTime();
-    return { start: start, end: end };
+    if (isNaN(y) || isNaN(mo) || isNaN(d)) return 0;
+    var anchor = Date.UTC(y, mo - 1, d, 12, 0, 0);
+    var lo = anchor - 48 * 60 * 60 * 1000;
+    var hi = anchor + 48 * 60 * 60 * 1000;
+    while (lo < hi) {
+      var mid = Math.floor((lo + hi) / 2);
+      if (recordingDayKeyFromTs(mid) < dayKey) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  function recordingDayEndExclusiveMs(dayKey) {
+    var fromTs = recordingDayStartMs(dayKey);
+    if (!fromTs) return 0;
+    var lo = fromTs + 1;
+    var hi = fromTs + 48 * 60 * 60 * 1000;
+    while (lo < hi) {
+      var mid = Math.floor((lo + hi) / 2);
+      if (recordingDayKeyFromTs(mid) === dayKey) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  function dayChartTimeRange(dayStr) {
+    var start = recordingDayStartMs(dayStr);
+    if (!start) return null;
+    var endExclusive = recordingDayEndExclusiveMs(dayStr);
+    return { start: start, end: endExclusive - 1 };
   }
 
   var CHART_GAP_MS = 5000;
@@ -1431,7 +1462,7 @@ export function initTestRules(socket, state, log, profileOpts) {
       '</div>' +
       '<div><span class="text-slate-500">Date</span> ' +
       escapeHtml(day) +
-      ' (local calendar day) &nbsp;|&nbsp; <span class="text-slate-500">Recorded</span> ' +
+      ' (UK/London calendar day) &nbsp;|&nbsp; <span class="text-slate-500">Recorded</span> ' +
       countStr +
       '</div>' +
       '<div class="text-slate-500">Recorded mid price — no backtest required.</div>';
@@ -1441,7 +1472,7 @@ export function initTestRules(socket, state, log, profileOpts) {
     }
     if (tradeChartModalHint) {
       tradeChartModalHint.textContent =
-        'SOD/EOD = start/end of local calendar day. Hover for values; toggle probe avg curves to match rule conditions.';
+        'SOD/EOD = start/end of UK/London calendar day (IG). Hover for values; toggle probe avg curves to match rule conditions.';
     }
     requestChartSamples(epic, range.start, range.end, chartCtx, [day]);
   }
@@ -2614,6 +2645,19 @@ export function initTestRules(socket, state, log, profileOpts) {
       var msg = stats.length > 0
         ? 'Loaded ' + stats.length + ' day(s) across ' + (data.dayStats ? new Set(data.dayStats.map(function (s) { return s.epic; }).filter(Boolean)).size : 1) + ' instrument(s)'
         : 'No recorded days (Record with streaming first)';
+      if (data.recordingMeta) {
+        var meta = data.recordingMeta;
+        msg +=
+          ' · calendar ' +
+          (meta.recordingDayCalendar || 'unknown') +
+          ' · ' +
+          (typeof meta.totalSampleCount === 'number' ? meta.totalSampleCount.toLocaleString() : '?') +
+          ' samples · app v' +
+          (meta.appVersion || '?');
+        if (meta.dbPath) appendLog('Recording DB: ' + meta.dbPath);
+      } else {
+        appendLog('Server has no recordingMeta — day list may use old timezone grouping (rebuild/deploy app ≥0.2.9).');
+      }
       appendLog(msg);
       if (stats.length === 0 && data.epicsWithData && data.epicsWithData.length > 0) {
         appendLog('Data exists for: ' + data.epicsWithData.join(', ') + ' – select that instrument');

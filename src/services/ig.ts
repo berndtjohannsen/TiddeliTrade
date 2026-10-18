@@ -1108,17 +1108,49 @@ export interface HistoricalPricesAllowance {
   expirySeconds: number;
 }
 
-/** UTC ms when the Europe/London calendar day containing `nowMs` begins (matches IG day charts). */
-export function londonDayStartMs(nowMs: number = Date.now()): number {
-  const dayKey = londonDateKeyFromTimestamp(nowMs);
-  let lo = nowMs - 48 * 60 * 60 * 1000;
-  let hi = nowMs;
+/** UTC ms when Europe/London calendar day `dayKey` (YYYY-MM-DD) begins. */
+export function londonDayStartMsForDayKey(dayKey: string): number {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dayKey);
+  if (!m) return 0;
+  const y = parseInt(m[1], 10);
+  const mo = parseInt(m[2], 10);
+  const d = parseInt(m[3], 10);
+  const anchor = Date.UTC(y, mo - 1, d, 12, 0, 0);
+  let lo = anchor - 48 * 60 * 60 * 1000;
+  let hi = anchor + 48 * 60 * 60 * 1000;
   while (lo < hi) {
     const mid = Math.floor((lo + hi) / 2);
     if (londonDateKeyFromTimestamp(mid) < dayKey) lo = mid + 1;
     else hi = mid;
   }
   return lo;
+}
+
+/** First UTC ms strictly after `dayKey` in Europe/London. */
+export function londonDayEndExclusiveMs(dayKey: string): number {
+  const fromTs = londonDayStartMsForDayKey(dayKey);
+  if (!fromTs) return 0;
+  let lo = fromTs + 1;
+  let hi = fromTs + 48 * 60 * 60 * 1000;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (londonDateKeyFromTimestamp(mid) === dayKey) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/** Inclusive last ms of a Europe/London calendar day (for chart windows). */
+export function londonDayBoundsMs(dayKey: string): { fromTs: number; toTsExclusive: number } {
+  return {
+    fromTs: londonDayStartMsForDayKey(dayKey),
+    toTsExclusive: londonDayEndExclusiveMs(dayKey),
+  };
+}
+
+/** UTC ms when the Europe/London calendar day containing `nowMs` begins (matches IG day charts). */
+export function londonDayStartMs(nowMs: number = Date.now()): number {
+  return londonDayStartMsForDayKey(londonDateKeyFromTimestamp(nowMs));
 }
 
 function parseMidFromBidAsk(obj: { bid?: number; ask?: number } | undefined): number | null {
@@ -1287,6 +1319,22 @@ function fmtUtcForPricesQuery(d: Date): string {
 /** Europe/London calendar date YYYY-MM-DD for a timestamp. */
 export function londonDateKeyFromTimestamp(ms: number): string {
   return new Date(ms).toLocaleDateString('en-CA', { timeZone: 'Europe/London' });
+}
+
+/**
+ * Fast day key for ascending ts scans (e.g. 1 Hz recordings): avoids repeated Intl work within the same London day.
+ */
+export function createLondonDayKeyResolver(): (ts: number) => string {
+  let day = '';
+  let from = 0;
+  let end = 0;
+  return (ts: number) => {
+    if (day && ts >= from && ts < end) return day;
+    day = londonDateKeyFromTimestamp(ts);
+    from = londonDayStartMsForDayKey(day);
+    end = londonDayEndExclusiveMs(day);
+    return day;
+  };
 }
 
 function londonCalendarDateKey(ms: number): string {
