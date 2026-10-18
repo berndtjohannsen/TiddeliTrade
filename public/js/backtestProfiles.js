@@ -760,6 +760,9 @@ export function initBacktestProfiles(opts) {
     if (!skipApply && applyTradeProfile) applyTradeProfile(profile);
     clearBacktestOverrides();
     activeTradeProfileByEpic[epic] = profile.id;
+    applyProfileMarketSnapshotToServer(epic, profile).catch(function () {
+      /* Non-fatal: analyse may still use existing server snapshot */
+    });
     applyAnalyseOptionsToDom(epic, profile.analyseOptions);
     persistActiveTradeProfileId(epic, profile.id).then(function () {
       renderTradeSelect(epic);
@@ -787,6 +790,57 @@ export function initBacktestProfiles(opts) {
 
   function getProfilesForEpic(epic) {
     return profilesByEpic[epic] || [];
+  }
+
+  /** Dealing hours + day-start mids from server config (for profile save / parity export). */
+  function marketSnapshotFromInst(inst) {
+    if (!inst || inst.backtestDealingSnapshotAt == null) return null;
+    var src = inst.backtestDealingScheduleSource;
+    if (src !== 'ig' && src !== 'default' && src !== 'off') return null;
+    return {
+      is24_7: !!inst.backtestIs24_7,
+      dealingWeekLondon: inst.backtestDealingWeekLondon || null,
+      dealingScheduleSource: src,
+      dealingSnapshotAt: inst.backtestDealingSnapshotAt,
+      dayStartByLondonDate: inst.backtestDayStartByLondonDate || {}
+    };
+  }
+
+  function fetchMarketSnapshotForEpic(epic) {
+    if (!epic) return Promise.resolve(null);
+    return fetch('/api/config')
+      .then(function (r) {
+        return r.json();
+      })
+      .then(function (cfg) {
+        var inst = cfg.ui && cfg.ui.instruments && cfg.ui.instruments[epic];
+        return marketSnapshotFromInst(inst);
+      })
+      .catch(function () {
+        return null;
+      });
+  }
+
+  function persistMarketSnapshotToServer(epic, snapshot) {
+    if (!epic || !snapshot || typeof snapshot.dealingSnapshotAt !== 'number') {
+      return Promise.resolve();
+    }
+    return fetch('/api/backtest-market-snapshot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ epic: epic, snapshot: snapshot })
+    }).then(function (r) {
+      if (!r.ok) {
+        return r.json().catch(function () { return {}; }).then(function (body) {
+          throw new Error((body && body.error) || 'Could not apply market snapshot (HTTP ' + r.status + ')');
+        });
+      }
+    });
+  }
+
+  function applyProfileMarketSnapshotToServer(epic, profile) {
+    if (!profile || !profile.backtestMarketSnapshot) return Promise.resolve();
+    return persistMarketSnapshotToServer(epic, profile.backtestMarketSnapshot);
   }
 
   function suggestUniqueProfileName(base, epic) {
@@ -999,11 +1053,14 @@ export function initBacktestProfiles(opts) {
       savedReport: savedReport,
       lastResult: savedReport ? summaryFromReport(savedReport.report, savedReport.runAt) : undefined
     };
-    var profiles = getProfilesForEpic(epic).slice();
-    profiles.push(profile);
-    return persistProfiles(epic, profiles).then(function () {
-      activateTradeProfile(profile, epic, { skipApply: true, skipReport: true });
-      return profile;
+    return fetchMarketSnapshotForEpic(epic).then(function (snap) {
+      if (snap) profile.backtestMarketSnapshot = snap;
+      var profiles = getProfilesForEpic(epic).slice();
+      profiles.push(profile);
+      return persistProfiles(epic, profiles).then(function () {
+        activateTradeProfile(profile, epic, { skipApply: true, skipReport: true });
+        return profile;
+      });
     });
   }
 
@@ -1018,11 +1075,15 @@ export function initBacktestProfiles(opts) {
       if (profiles[i].id === profileId) idx = i;
     }
     if (idx < 0) return Promise.resolve();
-    profiles[idx] = Object.assign({}, profiles[idx], {
-      savedReport: savedReport,
-      lastResult: summaryFromReport(savedReport.report, savedReport.runAt)
+    return fetchMarketSnapshotForEpic(epic).then(function (snap) {
+      var patch = {
+        savedReport: savedReport,
+        lastResult: summaryFromReport(savedReport.report, savedReport.runAt)
+      };
+      if (snap) patch.backtestMarketSnapshot = snap;
+      profiles[idx] = Object.assign({}, profiles[idx], patch);
+      return persistProfiles(epic, profiles);
     });
-    return persistProfiles(epic, profiles);
   }
 
   function deleteProfile(epic, id) {
@@ -1553,6 +1614,13 @@ export function initBacktestProfiles(opts) {
     },
     getActiveTradeProfileId: function (epic) {
       return getActiveTradeProfileId(epic || getEpic());
+    },
+    getActiveBacktestMarketSnapshot: function (epic) {
+      var e = epic || getEpic();
+      var id = getActiveTradeProfileId(e);
+      if (!id) return null;
+      var p = findProfile(e, id);
+      return p && p.backtestMarketSnapshot ? p.backtestMarketSnapshot : null;
     },
     updateLoadedProfileResult: function (epic, report) {
       var activeId = getActiveTradeProfileId(epic);

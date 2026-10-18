@@ -85,12 +85,14 @@ import {
 } from '../services/dynamicStopLoss';
 import { analyzeSampleQuality, DEFAULT_GAP_PRUNE_LOW_COVERAGE_PCT, type SampleQualityReport } from '../services/sampleQuality';
 import {
+  applyProfileMarketSnapshot,
   buildDealingSnapshotFromMarketInfo,
   getInstrumentSettings,
   resolveDayStartsForBacktest,
   resolveDealingForBacktest,
   resolveDealingForLiveSchedule,
   saveDealingSnapshot,
+  type BacktestProfileMarketSnapshot,
 } from '../services/backtestMarketSnapshot';
 
 let scheduledCloses: ScheduledCloseEntry[] = [];
@@ -1893,11 +1895,17 @@ export function registerSocketHandlers(io: Server): void {
       scheduleTimezone?: string;
       forcedCloseTime?: string;
       maxRunDays?: number;
+      /** From loaded profile — applied before dealing/day-start resolve for cross-machine parity. */
+      backtestMarketSnapshot?: BacktestProfileMarketSnapshot;
     }) => {
       const epic = (params?.epic || '').trim();
       if (!epic) {
         socket.emit('analyse_recording_report', { error: 'No epic specified' });
         return;
+      }
+      const profileSnap = params?.backtestMarketSnapshot;
+      if (profileSnap && typeof profileSnap.dealingSnapshotAt === 'number') {
+        applyProfileMarketSnapshot(epic, profileSnap);
       }
       const priorCancel = activeAnalyseBySocket.get(socket.id);
       if (priorCancel) {

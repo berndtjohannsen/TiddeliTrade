@@ -278,8 +278,19 @@ export interface BacktestProfile {
   lastResult?: BacktestProfileLastResult;
   /** Full backtest report as shown in Research (trades, quality, blockers, summary). */
   savedReport?: BacktestProfileSavedReport;
+  /** IG dealing hours + day-start mids for reproducible backtest across machines (export/import). */
+  backtestMarketSnapshot?: BacktestProfileMarketSnapshot;
   /** Extra keys from newer app versions are preserved on import/export. */
   [key: string]: unknown;
+}
+
+/** Bundled with profile export so container and local backtests match. */
+export interface BacktestProfileMarketSnapshot {
+  is24_7: boolean;
+  dealingWeekLondon: Array<{ openMin: number; closeMin: number } | null> | null;
+  dealingScheduleSource: 'ig' | 'default' | 'off';
+  dealingSnapshotAt: number;
+  dayStartByLondonDate: Record<string, number>;
 }
 
 /** Personal profile file envelope (.tiddeli-profile.json). */

@@ -217,6 +217,7 @@ export function prepareImportedProfile(profile, options) {
 
 export function describeExportContents(profile) {
   var parts = ['Rules & probes', 'Engine controls', 'Analyse options'];
+  if (profile && profile.backtestMarketSnapshot) parts.push('Dealing schedule & day-start cache');
   if (profile && profile.savedReport) parts.push('Saved backtest report');
   else if (profile && profile.lastResult) parts.push('Backtest summary');
   return parts.join(' · ');

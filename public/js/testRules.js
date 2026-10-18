@@ -2854,6 +2854,8 @@ export function initTestRules(socket, state, log, profileOpts) {
       lastAnalyseEpic = epic;
       lastAnalyseSelectedDays = selectedDays.slice().sort();
       lastAnalyseProbeMs = probeMsFromCfg(cfg);
+      var marketSnap =
+        profilesApi.getActiveBacktestMarketSnapshot && profilesApi.getActiveBacktestMarketSnapshot(epic);
       socket.emit('analyse_recording', {
         epic: epic,
         intradayOnly: intradayOnly,
@@ -2865,7 +2867,8 @@ export function initTestRules(socket, state, log, profileOpts) {
         probeShortMinutes: cfg.probeShortMinutes,
         probeMediumMinutes: cfg.probeMediumMinutes,
         probeLongMinutes: cfg.probeLongMinutes,
-        is24_7: !!state.is24_7Market,
+        is24_7: marketSnap ? !!marketSnap.is24_7 : !!state.is24_7Market,
+        backtestMarketSnapshot: marketSnap || undefined,
         takeProfit: takeProfit,
         stopLoss: stopLoss,
         tpSlMode: tpSlMode,

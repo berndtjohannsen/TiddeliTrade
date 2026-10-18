@@ -5,7 +5,13 @@
 
 import { loadConfig, updateConfig, type InstrumentSettings } from '../config';
 import type { IgSession } from './ig';
-import { getMarketTradingInfo, getDayStartPricesInRange, type MarketTradingInfo } from './ig';
+import {
+  getMarketTradingInfo,
+  getDayStartPricesInRange,
+  londonDayEndExclusiveMs,
+  londonDayStartMsForDayKey,
+  type MarketTradingInfo,
+} from './ig';
 import {
   type DealingWeekLondon,
   dealingWeekFromMarketTimes,
@@ -20,6 +26,15 @@ export interface BacktestDealingSnapshot {
   dealingWeekLondon: DealingWeekLondon | null;
   dealingScheduleSource: StoredDealingScheduleSource;
   savedAt: number;
+}
+
+/** Dealing schedule + day-start cache for profile export/import (cross-environment backtest parity). */
+export interface BacktestProfileMarketSnapshot {
+  is24_7: boolean;
+  dealingWeekLondon: DealingWeekLondon | null;
+  dealingScheduleSource: StoredDealingScheduleSource;
+  dealingSnapshotAt: number;
+  dayStartByLondonDate: Record<string, number>;
 }
 
 export interface ResolvedBacktestDealing {
@@ -80,6 +95,38 @@ export function persistBacktestMarketSnapshot(epic: string, patch: Partial<Instr
 
 export function saveDealingSnapshot(epic: string, snapshot: BacktestDealingSnapshot): void {
   persistBacktestMarketSnapshot(epic, dealingSnapshotToInstrumentPatch(snapshot));
+}
+
+/** Read reproducible backtest market context from instrument settings. */
+export function marketSnapshotFromInstrument(
+  inst: InstrumentSettings | null | undefined
+): BacktestProfileMarketSnapshot | null {
+  const dealing = readStoredDealingSnapshot(inst);
+  if (!dealing) return null;
+  return {
+    is24_7: dealing.is24_7,
+    dealingWeekLondon: dealing.dealingWeekLondon,
+    dealingScheduleSource: dealing.dealingScheduleSource,
+    dealingSnapshotAt: dealing.savedAt,
+    dayStartByLondonDate: mergeDayStartCache(inst),
+  };
+}
+
+/** Apply profile export snapshot to server config (dealing + day-start cache). */
+export function applyProfileMarketSnapshot(
+  epic: string,
+  snapshot: BacktestProfileMarketSnapshot | null | undefined
+): void {
+  if (!epic || !snapshot) return;
+  persistBacktestMarketSnapshot(epic, {
+    ...dealingSnapshotToInstrumentPatch({
+      is24_7: snapshot.is24_7,
+      dealingWeekLondon: snapshot.dealingWeekLondon,
+      dealingScheduleSource: snapshot.dealingScheduleSource,
+      savedAt: snapshot.dealingSnapshotAt,
+    }),
+    backtestDayStartByLondonDate: { ...(snapshot.dayStartByLondonDate || {}) },
+  });
 }
 
 async function fetchDealingSnapshotFromIg(
@@ -212,8 +259,8 @@ export async function resolveDayStartsForBacktest(
   if (missing.length > 0 && session) {
     try {
       const sorted = needed;
-      const fromMs = new Date(sorted[0] + 'T00:00:00').getTime() - 3 * 86400000;
-      const toMs = new Date(sorted[sorted.length - 1] + 'T23:59:59').getTime() + 3 * 86400000;
+      const fromMs = londonDayStartMsForDayKey(sorted[0]);
+      const toMs = londonDayEndExclusiveMs(sorted[sorted.length - 1]);
       const fetched = await getDayStartPricesInRange(session, epic, fromMs, toMs);
       if (Object.keys(fetched).length > 0) {
         cached = { ...cached, ...fetched };
