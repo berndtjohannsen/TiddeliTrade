@@ -72,7 +72,10 @@ function applyMarketDetails(data) {
 }
 
 socket.on('marketDetails', applyMarketDetails);
-socket.on('connect', function () { log('Connected to server'); });
+socket.on('connect', function () {
+  log('Connected to server');
+  hideAppBootOverlay();
+});
 socket.on('disconnect', function () { log('Disconnected from server'); });
 log('UI ready');
 
@@ -89,7 +92,20 @@ var testRulesApi = initTestRules(socket, state, log, {
     if (tradingRulesApi.applyTradeProfile) tradingRulesApi.applyTradeProfile(profile);
   }
 });
-var tradingRulesApi = initTradingRules(socket, state, dealApi.setDealEnabled, orderApi.setOrderEnabled, probesApi.setProbesPanelEnabled, probesApi.setBackfillEnabled, probesApi.setProbesSettingsLocked, probesApi.getProbeValues, dealApi.triggerDealConfirm, dealApi.placeDealDirect, log);
+var tradingRulesApi = initTradingRules(
+  socket,
+  state,
+  dealApi.setDealEnabled,
+  orderApi.setOrderEnabled,
+  probesApi.setProbesPanelEnabled,
+  probesApi.setBackfillEnabled,
+  probesApi.setProbesSettingsLocked,
+  probesApi.getProbeValues,
+  probesApi.getProbeCoverage,
+  dealApi.triggerDealConfirm,
+  dealApi.placeDealDirect,
+  log
+);
 var transactionLogApi = initTransactionLog(socket);
 
 function setTradePanelsVisible(visible) {
@@ -106,12 +122,16 @@ function hideAllWorkspacePanels() {
   testRulesApi.setTestRulesPanelEnabled(false);
 }
 
+var tradeStreamStartSent = false;
+
 /** Trade view: live diagram uses the price stream — start it without starting rules. */
 function ensureTradePriceStream() {
   if (!appView.isWorkspaceReady() || appView.getView() !== 'trade') return;
   var st = state.engineStatus || 'ready';
   if (st === 'running' || st === 'connecting') return;
   if (st !== 'connected' && st !== 'ready') return;
+  if (tradeStreamStartSent) return;
+  tradeStreamStartSent = true;
   log('Trade view: starting price stream (not rules)');
   socket.emit('start');
 }
@@ -189,6 +209,9 @@ onboardingApi = initOnboarding(socket, state, appView, log, {
 
 socket.on('status', function (status) {
   if (status === 'disconnected') return;
+  if (status === 'running' || status === 'connected' || status === 'ready' || status === 'stopped') {
+    tradeStreamStartSent = status === 'running';
+  }
   if (status === 'stopped' || status === 'ready') {
     applyMarketDetails(null);
   }

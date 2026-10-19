@@ -78,12 +78,8 @@ export function appendTransaction(tx: Omit<Transaction, 'id'>): Transaction | nu
   if (did) {
     const dup = state.transactions.some((t) => txKind(t) === kind && (t.dealId || '').trim() === did);
     if (dup) return null;
+    // Skip late "open" rows if close was already logged (e.g. missed open at deal time).
     if (kind === 'open' && hasClosedForDeal(state, did)) return null;
-    if (kind === 'closed') {
-      state.transactions = state.transactions.filter(
-        (t) => !(txKind(t) === 'open' && (t.dealId || '').trim() === did)
-      );
-    }
   }
   const id = `tx-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   const full: Transaction = { ...tx, id };

@@ -16,6 +16,7 @@ import {
   updateDynamicTpStatusDisplay,
   writeRulesDynamicSlScope
 } from './dynamicTpUi.js';
+import { PROBE_LOW_COVERAGE_PCT } from './probeSamples.js';
 
 var RULE_LEFT = [
   { value: 'Buy', label: 'Buy' },
@@ -473,6 +474,10 @@ export function applyEngineControlsSnapshot(controls) {
     var mp = controls.maxParallelDeals != null ? controls.maxParallelDeals : 1;
     maxParallelDealsInput.value = String(Math.max(1, Math.min(10, mp)));
   }
+  var requireProbeWarmupEl = document.getElementById('tradingRulesRequireProbeWarmup');
+  if (requireProbeWarmupEl) {
+    requireProbeWarmupEl.checked = controls.requireProbeWarmup !== false;
+  }
   if (stopAfterConsecutiveInput) {
     var legacyStop = !!(controls.stopAfterLossBuy || controls.stopAfterLossSell);
     var streak = resolveStopAfterConsecutiveLossesFromSaved(controls.stopAfterConsecutiveLosses, legacyStop);
@@ -513,6 +518,10 @@ function readEngineControlsFromDom() {
     pauseOnLossSecondsBuy: pauseSec,
     pauseOnLossSecondsSell: pauseSec,
     maxParallelDeals: parseMaxParallelDealsInput(maxParallelDealsInput),
+    requireProbeWarmup: (function () {
+      var el = document.getElementById('tradingRulesRequireProbeWarmup');
+      return !el || el.checked !== false;
+    })(),
     scheduleStartTime: scheduleStart && scheduleStart.value ? scheduleStart.value : '',
     scheduleStopTime: scheduleStop && scheduleStop.value ? scheduleStop.value : '',
     scheduleRepeatDaily: scheduleRepeat ? scheduleRepeat.checked !== false : true,
@@ -590,7 +599,20 @@ export function getRulesForBacktest() {
   };
 }
 
-export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled, setProbesPanelEnabled, setProbesBackfillEnabled, setProbesSettingsLocked, getProbeValues, triggerDealConfirm, placeDealDirect, log) {
+export function initTradingRules(
+  socket,
+  state,
+  setDealEnabled,
+  setOrderEnabled,
+  setProbesPanelEnabled,
+  setProbesBackfillEnabled,
+  setProbesSettingsLocked,
+  getProbeValues,
+  getProbeCoverage,
+  triggerDealConfirm,
+  placeDealDirect,
+  log
+) {
   var toggleBtn = document.getElementById('tradingRulesToggle');
   var confirmCheck = document.getElementById('tradingRulesConfirmBeforePlace');
   var rulesBuyGroupsRoot = document.getElementById('tradingRulesBuyGroups');
@@ -608,6 +630,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   var dealEngineMsg = document.getElementById('dealEngineActiveMsg');
   var orderEngineMsg = document.getElementById('orderEngineActiveMsg');
   var pauseOnLossInput = document.getElementById('tradingRulesPauseOnLoss');
+  var requireProbeWarmupCheck = document.getElementById('tradingRulesRequireProbeWarmup');
   var maxParallelDealsInput = document.getElementById('tradingRulesMaxParallelDeals');
   var stopAfterConsecutiveInput = document.getElementById('tradingRulesStopAfterConsecutiveLosses');
   var scheduleStartInput = document.getElementById('tradingRulesScheduleStart');
@@ -707,6 +730,12 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     return parseMaxParallelDealsInput(maxParallelDealsInput);
   }
 
+  /** Default true — block deals until probe windows meet coverage (see Require full probe lookback). */
+  function getRequireProbeWarmup() {
+    if (!requireProbeWarmupCheck) return true;
+    return requireProbeWarmupCheck.checked !== false;
+  }
+
   function armRulesDealPending() {
     if (!state) return false;
     state.rulesDealPending = true;
@@ -731,6 +760,12 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   var lossHandlingWatchDayKey = null;
   var draggedRuleWrap = null;
   var getProbeValuesFn = getProbeValues || function () { return null; };
+  var getProbeCoverageFn = typeof getProbeCoverage === 'function' ? getProbeCoverage : function () { return null; };
+  /** Updated each engine tick — blocks deals until required probe windows pass coverage. */
+  var lastProbesReadyForRules = true;
+  var lastProbesWarmupDetail = '';
+  var serverPauseRemainingSec = 0;
+  var serverHaltedForLoss = false;
   var triggerDealConfirmFn = typeof triggerDealConfirm === 'function' ? triggerDealConfirm : function () { return false; };
   var placeDealDirectFn = typeof placeDealDirect === 'function' ? placeDealDirect : function () { return false; };
   var setOrderEnabledFn = typeof setOrderEnabled === 'function' ? setOrderEnabled : function () {};
@@ -898,6 +933,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   }
 
   function runForcedCloseIfNeeded(nowMs) {
+    if (rulesEngineRunning) return false;
     if (!hasForcedCloseTime() || !isPastForcedClose(nowMs)) return false;
     var today = localDateKey(new Date(nowMs));
     if (forcedCloseLastRunDate === today) return false;
@@ -961,6 +997,10 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   /** @returns {{ key: string, pauseSec?: number, scheduleText?: string }} */
   function getRulesUiMode() {
     if (!rulesEngineRunning) return { key: 'stopped' };
+    if (rulesEngineRunning) {
+      if (serverPauseRemainingSec > 0) return { key: 'paused', pauseSec: serverPauseRemainingSec };
+      if (serverHaltedForLoss) return { key: 'halted-loss' };
+    }
     var pauseSec = getPauseRemainingSec();
     if (pauseSec > 0) return { key: 'paused', pauseSec: pauseSec };
     if (isLossHaltedToday()) return { key: 'halted-loss' };
@@ -977,6 +1017,9 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       };
     }
     if (rulesRunningWithoutProbes()) return { key: 'armed-probes' };
+    if (!lastProbesReadyForRules) {
+      return { key: 'armed-warmup', warmupDetail: lastProbesWarmupDetail || 'probes filling' };
+    }
     return { key: 'active' };
   }
 
@@ -994,6 +1037,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       return 'Next window ' + ui.scheduleText;
     }
     if (ui.key === 'armed-probes') return 'Start probing for live prices';
+    if (ui.key === 'armed-warmup') return 'Waiting for probes — ' + (ui.warmupDetail || 'filling lookback windows');
     if (ui.key === 'active') return 'Monitoring conditions';
     if (canManualTrade()) return 'Manual trading available';
     if (isIgLoggedInLocal()) return 'Stop rules to trade manually';
@@ -1424,9 +1468,109 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     return false;
   }
 
+  /** Which probe horizon a rule field references (short / medium / long). */
+  function probeHorizonFromToken(token) {
+    if (typeof token !== 'string' || !token) return null;
+    if (token === 'short' || token.indexOf('short.') === 0) return 'short';
+    if (token === 'medium' || token.indexOf('medium.') === 0) return 'medium';
+    if (token === 'long' || token.indexOf('long.') === 0) return 'long';
+    return null;
+  }
+
+  function ruleUsesProbeHorizon(rule) {
+    if (!rule || rule.enabled === false) return null;
+    var fromLeft = probeHorizonFromToken(rule.left);
+    if (fromLeft) return fromLeft;
+    if (RIGHT_REF_KEYS.indexOf(rule.right) >= 0) return probeHorizonFromToken(rule.right);
+    return null;
+  }
+
+  /** Horizons required by enabled rules (for coverage gating). */
+  function getRequiredProbeHorizons(rules) {
+    var need = { short: false, medium: false, long: false };
+    if (!rules || !rules.length) return need;
+    for (var i = 0; i < rules.length; i++) {
+      var h = ruleUsesProbeHorizon(rules[i]);
+      if (h) need[h] = true;
+    }
+    return need;
+  }
+
+  function ruleNeedsLiveProbeStats(rules) {
+    if (!rules || !rules.length) return false;
+    for (var i = 0; i < rules.length; i++) {
+      var r = rules[i];
+      if (r.enabled === false) continue;
+      if (ruleUsesProbeHorizon(r)) return true;
+      if (r.left !== 'currentTime' && RIGHT_REF_KEYS.indexOf(r.right) >= 0) return true;
+      if (r.left === 'short.volume' || r.left === 'medium.volume' || r.left === 'long.volume') return true;
+      if (r.left === 'short.trend' || r.left === 'medium.trend' || r.left === 'long.trend') return true;
+      if (r.left === 'short.trendPct' || r.left === 'medium.trendPct' || r.left === 'long.trendPct') return true;
+      if (r.left === 'short.range' || r.left === 'medium.range' || r.left === 'long.range') return true;
+    }
+    return false;
+  }
+
+  /**
+   * Rules may start while probes fill; deals stay blocked until each required window meets coverage.
+   * @returns {{ ready: boolean, detail: string }}
+   */
+  function evaluateProbesReadyForRules(allEnabledRules) {
+    if (!allEnabledRules || allEnabledRules.length === 0) {
+      return { ready: true, detail: '' };
+    }
+    if (!ruleNeedsLiveProbeStats(allEnabledRules)) {
+      return { ready: true, detail: '' };
+    }
+    if (!isProbingActive()) {
+      return { ready: false, detail: 'start price stream' };
+    }
+    if (!getProbeValuesFn()) {
+      return { ready: false, detail: 'collecting first samples' };
+    }
+    if (!getRequireProbeWarmup()) {
+      return { ready: true, detail: '' };
+    }
+    var need = getRequiredProbeHorizons(allEnabledRules);
+    if (!need.short && !need.medium && !need.long) {
+      return { ready: true, detail: '' };
+    }
+    var cov = getProbeCoverageFn();
+    if (!cov || !cov.rows) {
+      return { ready: false, detail: 'probe coverage unknown' };
+    }
+    var waiting = [];
+    for (var ri = 0; ri < cov.rows.length; ri++) {
+      var row = cov.rows[ri];
+      if (!need[row.probe]) continue;
+      if (row.lowCoverage) {
+        var pct = row.coveragePct != null ? row.coveragePct + '%' : 'low';
+        waiting.push(row.label + ' (' + pct + ', need ≥' + PROBE_LOW_COVERAGE_PCT + '%)');
+      }
+    }
+    if (waiting.length > 0) {
+      return { ready: false, detail: waiting.join('; ') };
+    }
+    return { ready: true, detail: '' };
+  }
+
+  /** Reset one-shot deal edge detection; probe warmup is separate (server keeps probes on reconnect). */
+  function resetRulesPassMemoryForWarmup() {
+    prevRulesPass = false;
+    prevBlocked = true;
+    if (!rulesEngineRunning) lastProbesReadyForRules = false;
+  }
+
   function getContext() {
-    var pv = getProbeValuesFn();
-    var probes = pv ? { short: pv.short, medium: pv.medium, long: pv.long } : {};
+    var probes = {};
+    var dayStart = state.dayStartBuy;
+    if (rulesEngineRunning && state.serverProbeSnapshot && state.serverProbeSnapshot.probes) {
+      probes = state.serverProbeSnapshot.probes;
+      if (state.serverProbeSnapshot.dayStart != null) dayStart = state.serverProbeSnapshot.dayStart;
+    } else {
+      var pv = getProbeValuesFn();
+      probes = pv ? { short: pv.short, medium: pv.medium, long: pv.long } : {};
+    }
     var sentiment = null;
     var s = state.clientSentiment;
     if (s && (s.longPct !== 0 || s.shortPct !== 0)) {
@@ -1436,7 +1580,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     return {
       offer: state.currentOffer,
       bid: state.currentBid,
-      dayStart: state.dayStartBuy,
+      dayStart: dayStart,
       currentTime: state.currentUpdateTime || '',
       currentTrend: state.currentTrend || null,
       sentiment: sentiment,
@@ -1653,6 +1797,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       else line += ' • next window ' + ui.scheduleText;
     }
     if (ui.key === 'armed-probes') line += ' • No live prices — start probing';
+    if (ui.key === 'armed-warmup') line += ' • Probes warming up — no deals until lookbacks fill';
     if (rulesEngineRunning && sleepPreventionStatus) line += ' • ' + sleepPreventionStatus;
     return line;
   }
@@ -1744,17 +1889,34 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     var runSell = runRuleSets.indexOf('SELL') >= 0;
     var buyRules = ruleSets.buy && ruleSets.buy.rules ? ruleSets.buy.rules : [];
     var sellRules = ruleSets.sell && ruleSets.sell.rules ? ruleSets.sell.rules : [];
+    var activeBuyRules = runBuy ? buyRules : [];
+    var activeSellRules = runSell ? sellRules : [];
+    var allEnabledRules = activeBuyRules.filter(function (r) { return r.enabled !== false; }).concat(activeSellRules.filter(function (r) { return r.enabled !== false; }));
+    var probeReady = evaluateProbesReadyForRules(allEnabledRules);
+    var wasProbesReadyForRules = lastProbesReadyForRules;
+    if (rulesEngineRunning) {
+      probeReady = {
+        ready: lastProbesReadyForRules,
+        detail: lastProbesWarmupDetail || probeReady.detail || ''
+      };
+    } else {
+      lastProbesReadyForRules = probeReady.ready;
+      lastProbesWarmupDetail = probeReady.detail || '';
+    }
+    if (rulesEngineRunning && probeReady.ready && !wasProbesReadyForRules && ruleNeedsLiveProbeStats(allEnabledRules)) {
+      var logWarmFn = typeof log === 'function' ? log : function () {};
+      logWarmFn('Rules: probe lookbacks ready — deal placement enabled');
+    }
+
     var buyPass = runBuy && buyRules.length > 0 && evaluateRules(ctx, { rules: buyRules });
     var sellPass = runSell && sellRules.length > 0 && evaluateRules(ctx, { rules: sellRules });
     var triggeredSet = buyPass ? 'buy' : (sellPass ? 'sell' : null);
     var pass = !!triggeredSet;
     var scheduleBlocked = hasScheduleLimits() && !isWithinScheduleWindow(Date.now());
     var lossHalted = isLossHaltedToday();
-    var blocked = hasPositionOrOrder() || scheduleBlocked || lossHalted;
+    var probesWarmupBlocked = !probeReady.ready;
+    var blocked = hasPositionOrOrder() || scheduleBlocked || lossHalted || probesWarmupBlocked;
 
-    var activeBuyRules = runBuy ? buyRules : [];
-    var activeSellRules = runSell ? sellRules : [];
-    var allEnabledRules = activeBuyRules.filter(function (r) { return r.enabled !== false; }).concat(activeSellRules.filter(function (r) { return r.enabled !== false; }));
     if (statusEl) {
       var needsProbes = allEnabledRules.some(function (r) {
         return (r.left !== 'currentTime' && RIGHT_REF_KEYS.indexOf(r.right) >= 0) ||
@@ -1773,6 +1935,9 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       }
       else if (allEnabledRules.length === 0) status = 'Enable at least one rule';
       else if (needsProbes && !getProbeValuesFn()) status = 'Waiting for probe data';
+      else if (probesWarmupBlocked && ruleNeedsLiveProbeStats(allEnabledRules)) {
+        status = 'Probes warming up — ' + (probeReady.detail || 'filling lookbacks') + ' (no deals yet)';
+      }
       else if (needsPrices && (state.currentBid == null || state.currentOffer == null)) status = 'Waiting for prices';
       else if (needsNowTrend && state.currentTrend == null) status = 'Waiting for price updates (now.trend)';
       else if (pass && hasPositionOrOrder()) {
@@ -1793,6 +1958,9 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       else if (pass && lossHalted) {
         status = 'Conditions met – halted for today (loss), resumes tomorrow';
       }
+      else if (pass && probesWarmupBlocked) {
+        status = 'Conditions met – waiting for probes (' + (probeReady.detail || 'warming up') + '), no new deal';
+      }
       else if (pass && !blocked) {
         var willFireThisTick = !prevRulesPass || prevBlocked;
         status =
@@ -1807,6 +1975,13 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     }
 
     if (pass && !blocked && (!prevRulesPass || prevBlocked)) {
+      if (rulesEngineRunning) {
+        prevRulesPass = pass;
+        prevBlocked = blocked;
+        updateRuleStatusIndicators();
+        updateTradeSessionUi();
+        return;
+      }
       var set = triggeredSet === 'buy' ? ruleSets.buy : ruleSets.sell;
       var confirm = triggeredSet === 'buy' ? config.confirmBeforePlaceBuy : config.confirmBeforePlaceSell;
       var nowMs = Date.now();
@@ -2241,6 +2416,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
         tradingRulesPauseOnLossSecondsBuy: getPauseOnLossSeconds(),
         tradingRulesPauseOnLossSecondsSell: getPauseOnLossSeconds(),
         tradingRulesMaxParallelDeals: getMaxParallelDeals(),
+        tradingRulesRequireProbeWarmup: getRequireProbeWarmup(),
         tradingRulesStopAfterConsecutiveLosses: getStopAfterConsecutiveLosses() || undefined,
         tradingRulesScheduleStartTime: config.scheduleStartTime || '',
         tradingRulesScheduleStopTime: config.scheduleStopTime || '',
@@ -2296,6 +2472,10 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       var maxParallel = inst.tradingRulesMaxParallelDeals != null
         ? inst.tradingRulesMaxParallelDeals
         : (ui.tradingRulesMaxParallelDeals != null ? ui.tradingRulesMaxParallelDeals : 1);
+      var requireProbeWarmup = inst.tradingRulesRequireProbeWarmup != null
+        ? inst.tradingRulesRequireProbeWarmup !== false
+        : (ui.tradingRulesRequireProbeWarmup != null ? ui.tradingRulesRequireProbeWarmup !== false : true);
+      if (requireProbeWarmupCheck) requireProbeWarmupCheck.checked = requireProbeWarmup;
       var schedStart = inst.tradingRulesScheduleStartTime != null ? inst.tradingRulesScheduleStartTime : (ui.tradingRulesScheduleStartTime || '');
       var schedStop = inst.tradingRulesScheduleStopTime != null ? inst.tradingRulesScheduleStopTime : (ui.tradingRulesScheduleStopTime || '');
       var schedRepeat = inst.tradingRulesScheduleRepeatDaily != null ? inst.tradingRulesScheduleRepeatDaily !== false : (ui.tradingRulesScheduleRepeatDaily !== false);
@@ -2403,6 +2583,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       }
       updateToggleButton();
       if (rulesEngineRunning) {
+        resetRulesPassMemoryForWarmup();
         markScheduleInsideIfNeeded(Date.now());
         if (!runMaxRunDaysStopIfNeeded(Date.now()) && !runScheduleExpiredStopIfNeeded(Date.now())) syncScheduleTimer();
       } else {
@@ -2497,6 +2678,8 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     clearPauseOnLossState();
     clearConsecutiveLossCount();
     syncLossHandlingDayRollover(Date.now());
+    resetRulesPassMemoryForWarmup();
+    lastProbesReadyForRules = false;
     rulesEngineRunning = true;
     rulesEngineStartedDate = localDateKey(new Date());
     markScheduleInsideIfNeeded(Date.now());
@@ -2517,6 +2700,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     clearRulesDealPending();
     lastRulesDealAttemptMs = 0;
     rulesEngineRunning = false;
+    state.serverProbeSnapshot = null;
     scheduleLastInsideDate = null;
     rulesEngineStartedDate = null;
     syncScheduleTimer();
@@ -2589,6 +2773,15 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
   }
   if (buyEnabledCheck) buyEnabledCheck.addEventListener('change', function () { saveRules(); updateEngineState(); });
   if (sellEnabledCheck) sellEnabledCheck.addEventListener('change', function () { saveRules(); updateEngineState(); });
+  if (requireProbeWarmupCheck) {
+    requireProbeWarmupCheck.addEventListener('change', function () {
+      saveRules();
+      updateEngineState();
+      var logFn = typeof log === 'function' ? log : function () {};
+      if (getRequireProbeWarmup()) logFn('Rules: full probe lookback required before deals');
+      else logFn('Rules: override on — deals may use partial probe data');
+    });
+  }
   if (confirmCheck) confirmCheck.addEventListener('change', saveRules);
   if (maxParallelDealsInput) {
     maxParallelDealsInput.addEventListener('change', function () {
@@ -2688,6 +2881,26 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     bindRuleGroupDropZone(document.getElementById(groupContainerId('sell', gdz)));
   }
 
+  socket.on('live_rules_status', function (msg) {
+    if (!msg) return;
+    if (msg.probesDetail != null) lastProbesWarmupDetail = msg.probesDetail || '';
+    if (typeof msg.probesReady === 'boolean') lastProbesReadyForRules = msg.probesReady;
+    if (typeof msg.pauseRemainingSec === 'number') serverPauseRemainingSec = Math.max(0, msg.pauseRemainingSec);
+    if (typeof msg.haltedForLoss === 'boolean') serverHaltedForLoss = msg.haltedForLoss;
+    if (msg.probes) {
+      state.serverProbeSnapshot = {
+        dayStart: msg.dayStart != null ? msg.dayStart : null,
+        probes: msg.probes
+      };
+    }
+    updateEngineState();
+  });
+
+  socket.on('live_probe_stats', function () {
+    updateRuleStatusIndicators();
+    updateEngineState();
+  });
+
   socket.on('dynamic_stop_loss_status', function () {
     updateDynamicTpStatusDisplay(state);
   });
@@ -2706,6 +2919,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
 
   function resumeRulesAfterReconnect() {
     if (!rulesEngineRunning && !isPausedOnLoss()) return;
+    resetRulesPassMemoryForWarmup();
     markScheduleInsideIfNeeded(Date.now());
     if (runMaxRunDaysStopIfNeeded(Date.now())) return;
     if (runScheduleExpiredStopIfNeeded(Date.now())) return;
@@ -2727,6 +2941,7 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
       return;
     }
     if (rulesEngineRunning || isPausedOnLoss()) {
+      resetRulesPassMemoryForWarmup();
       syncScheduleTimer();
       var logFn = typeof log === 'function' ? log : function () {};
       logFn('Connection lost (' + (reason || 'unknown') + ') — rules stay armed; resume when reconnected');
@@ -2739,10 +2954,17 @@ export function initTradingRules(socket, state, setDealEnabled, setOrderEnabled,
     if (!rulesEngineRunning && !isPausedOnLoss()) return;
     resumeRulesAfterReconnect();
     var logFn = typeof log === 'function' ? log : function () {};
-    if (rulesEngineRunning) logFn('Reconnected — rules trading resumed');
+    if (rulesEngineRunning) {
+      logFn(
+        lastProbesReadyForRules
+          ? 'Reconnected — rules armed (server probes still warm)'
+          : 'Reconnected — rules armed (syncing server probe status…)'
+      );
+    }
   });
 
   socket.on('transaction_added', function (tx) {
+    if (rulesEngineRunning) return;
     if (!tx || tx.type !== 'closed' || !tx.dealId) return;
     var panel = rulesPlacedDealIds[tx.dealId];
     if (panel != null) clearRulesPlacedDealIdFromState(tx.dealId);

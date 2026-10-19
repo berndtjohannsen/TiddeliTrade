@@ -178,7 +178,7 @@ export function nearestSampleIndex(samples, ts) {
 /**
  * Live Trade Overview chart — same visual language as Research price charts.
  * @param {HTMLCanvasElement} canvas
- * @param {{ width: number, height: number, samples: object[], probeMs: object, refTs: number, probeStats?: object, statusText?: string }} opts
+ * @param {{ width: number, height: number, samples: object[], probeMs: object, refTs: number, probeStats?: object, statusText?: string, tradeMarkers?: object[] }} opts
  * @returns {{ layout: object|null, probeSeries: object|null, samples: object[] }}
  */
 export function drawLiveProbeChart(canvas, opts) {
@@ -358,6 +358,47 @@ export function drawLiveProbeChart(canvas, opts) {
     } else ctx.lineTo(sx, sy);
   }
   if (pathOpen) ctx.stroke();
+
+  // Trade open (triangle) / close (diamond) markers
+  var tradeMarkers = opts.tradeMarkers || [];
+  for (var mi = 0; mi < tradeMarkers.length; mi++) {
+    var mk = tradeMarkers[mi];
+    if (!mk || mk.ts == null || mk.price == null || isNaN(mk.price)) continue;
+    if (mk.ts < t0 || mk.ts > t1) continue;
+    var mx = xAt(mk.ts);
+    var my = yAt(mk.price);
+    if (mk.kind === 'open') {
+      var isBuy = mk.direction === 'BUY';
+      ctx.fillStyle = isBuy ? '#22c55e' : '#ef4444';
+      ctx.strokeStyle = '#0f172a';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      if (isBuy) {
+        ctx.moveTo(mx, my - 7);
+        ctx.lineTo(mx - 5, my + 4);
+        ctx.lineTo(mx + 5, my + 4);
+      } else {
+        ctx.moveTo(mx, my + 7);
+        ctx.lineTo(mx - 5, my - 4);
+        ctx.lineTo(mx + 5, my - 4);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = 'rgba(251, 191, 36, 0.45)';
+      ctx.strokeStyle = '#fbbf24';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(mx, my - 5);
+      ctx.lineTo(mx + 5, my);
+      ctx.lineTo(mx, my + 5);
+      ctx.lineTo(mx - 5, my);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
 
   // "Now" vertical
   if (refTs >= t0 && refTs <= t1) {

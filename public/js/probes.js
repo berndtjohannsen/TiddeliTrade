@@ -164,6 +164,74 @@ export function initProbes(socket, state, log) {
     hoverIdx: null
   };
   var streamResizeObserver = null;
+  var MAX_CHART_TRADE_MARKERS = 200;
+
+  /** Map transaction log row to a chart marker. */
+  function chartMarkerFromTransaction(tx) {
+    if (!tx || !tx.timestamp) return null;
+    var ts = Date.parse(tx.timestamp);
+    if (isNaN(ts)) return null;
+    var isOpen = tx.type === 'open';
+    var price = isOpen ? tx.entry : tx.exit;
+    if (price == null || isNaN(Number(price))) return null;
+    return {
+      ts: ts,
+      price: Number(price),
+      kind: isOpen ? 'open' : 'close',
+      direction: tx.direction,
+      epic: tx.epic,
+      dealId: tx.dealId
+    };
+  }
+
+  function markersForCurrentEpic() {
+    var epic = (state.savedEpic || state.currentEpic || '').trim();
+    return (state.liveChartTradeMarkers || []).filter(function (m) {
+      return !m.epic || !epic || m.epic === epic;
+    });
+  }
+
+  function addChartTradeMarker(marker) {
+    if (!marker || marker.ts == null || marker.price == null) return;
+    var epic = (marker.epic || '').trim();
+    var cur = (state.savedEpic || state.currentEpic || '').trim();
+    if (epic && cur && epic !== cur) return;
+    if (!state.liveChartTradeMarkers) state.liveChartTradeMarkers = [];
+    if (marker.dealId) {
+      for (var i = 0; i < state.liveChartTradeMarkers.length; i++) {
+        var prev = state.liveChartTradeMarkers[i];
+        if (prev.dealId === marker.dealId && prev.kind === marker.kind) return;
+      }
+    }
+    state.liveChartTradeMarkers.push(marker);
+    if (state.liveChartTradeMarkers.length > MAX_CHART_TRADE_MARKERS) {
+      state.liveChartTradeMarkers = state.liveChartTradeMarkers.slice(-MAX_CHART_TRADE_MARKERS);
+    }
+    render();
+  }
+
+  function loadChartMarkersFromTransactions() {
+    fetch('/api/transactions')
+      .then(function (r) { return r.json(); })
+      .then(function (list) {
+        if (!Array.isArray(list)) return;
+        var epic = (state.savedEpic || state.currentEpic || '').trim();
+        var seen = Object.create(null);
+        var markers = [];
+        for (var i = 0; i < list.length; i++) {
+          var m = chartMarkerFromTransaction(list[i]);
+          if (!m) continue;
+          if (epic && m.epic && m.epic !== epic) continue;
+          var key = (m.dealId || '') + ':' + m.kind + ':' + m.ts;
+          if (seen[key]) continue;
+          seen[key] = true;
+          markers.push(m);
+        }
+        state.liveChartTradeMarkers = markers.slice(-MAX_CHART_TRADE_MARKERS);
+        render();
+      })
+      .catch(function () { /* ignore */ });
+  }
 
   function streamWrapSize() {
     if (!streamCanvasWrap) return { w: 0, h: 0 };
@@ -265,11 +333,15 @@ export function initProbes(socket, state, log) {
     if (streamMeta) {
       var bidStr = bid != null && !isNaN(bid) ? formatVal(bid) : '—';
       var offerStr = offer != null && !isNaN(offer) ? formatVal(offer) : '—';
+      var tradeLegend =
+        ' &nbsp;|&nbsp; <span class="text-emerald-500" title="Deal opened (BUY)">▲</span>/<span class="text-red-500" title="Deal opened (SELL)">▼</span> open' +
+        ' &nbsp; <span class="text-amber-400" title="Deal closed">◆</span> close';
       streamMeta.innerHTML =
         '<span class="text-slate-500">Buy / Sell</span> ' + offerStr + ' / ' + bidStr +
         ' &nbsp;|&nbsp; <span class="text-slate-500">S</span> ' + (shortT.text || '—') +
         ' &nbsp;|&nbsp; <span class="text-slate-500">M</span> ' + (mediumT.text || '—') +
-        ' &nbsp;|&nbsp; <span class="text-slate-500">L</span> ' + (longT.text || '—');
+        ' &nbsp;|&nbsp; <span class="text-slate-500">L</span> ' + (longT.text || '—') +
+        tradeLegend;
     }
 
     var size = streamWrapSize();
@@ -280,7 +352,8 @@ export function initProbes(socket, state, log) {
       probeMs: probeMs,
       refTs: now,
       probeStats: { short: shortStats, medium: mediumStats, long: longStats },
-      statusText: statusText
+      statusText: statusText,
+      tradeMarkers: markersForCurrentEpic()
     });
     streamChartState.layout = result.layout;
     streamChartState.samples = result.samples;
@@ -330,13 +403,45 @@ export function initProbes(socket, state, log) {
     el.textContent = formatProbeSampleCount(row.count, row.expectedCount, row.coveragePct);
     el.classList.toggle('text-amber-400', row.lowCoverage);
     el.classList.toggle('text-slate-500', !row.lowCoverage);
-    var tip = 'In-market samples in lookback (excludes closed/out-of-hours ticks)';
+    var tip = row.fromServer
+      ? 'In-market samples on server stream buffer (matches rules engine)'
+      : 'In-market samples in lookback (excludes closed/out-of-hours ticks)';
     if (row.expectedCount > 0) {
       tip += '. Expected ~' + row.expectedCount + ' at 1 Hz during open hours';
       if (row.coveragePct != null) tip += ' (' + row.coveragePct + '% coverage)';
     }
     if (row.lowCoverage) tip += '. Sparse — probe stats may be unreliable.';
     el.title = tip;
+  }
+
+  /** Server buffer when rules run on server; trade-only view keeps local price_history (~1 Hz). */
+  function shouldUseServerProbes() {
+    return !!(
+      state.rulesEngineRunning &&
+      state.serverProbeSnapshot &&
+      state.serverProbeSnapshot.probes
+    );
+  }
+
+  function trendFromServerProbe(p) {
+    if (!p || p.trendDir == null) return null;
+    var dir = p.trendDir;
+    var pct = p.trendPct != null ? p.trendPct : 0;
+    var arrow = dir === 'up' ? '↑' : dir === 'down' ? '↓' : '→';
+    var sign = pct > 0 ? '+' : '';
+    return { dir: dir, pct: pct, text: arrow + ' ' + sign + Number(pct).toFixed(2) + '%' };
+  }
+
+  function coverageRowFromServerCount(count) {
+    return { count: count || 0, expectedCount: 0, coveragePct: null, lowCoverage: false, fromServer: true };
+  }
+
+  function applyServerProbeSnapshot(msg) {
+    if (!msg || !msg.probes) return;
+    if (msg.epic && state.savedEpic && msg.epic !== state.savedEpic) return;
+    state.serverProbeSnapshot = { dayStart: msg.dayStart != null ? msg.dayStart : null, probes: msg.probes };
+    if (state.serverProbeSnapshot.dayStart != null) state.dayStartBuy = state.serverProbeSnapshot.dayStart;
+    render();
   }
 
   function render() {
@@ -356,20 +461,59 @@ export function initProbes(socket, state, log) {
     var longSamp = history.filter(function (s) {
       return s.ts >= now - longMs && s.ts <= now && isProbeEligibleSample(s, filterOpts);
     });
-    var shortStats = computeStats(shortSamp);
-    var mediumStats = computeStats(mediumSamp);
-    var longStats = computeStats(longSamp);
-    var shortPeriodStart = computePeriodStart(shortSamp);
-    var mediumPeriodStart = computePeriodStart(mediumSamp);
-    var longPeriodStart = computePeriodStart(longSamp);
-    var coverage = analyzeProbeCoverage(history, now, p.short, p.medium, p.long, filterOpts);
+    var shortStats;
+    var mediumStats;
+    var longStats;
+    var shortPeriodStart;
+    var mediumPeriodStart;
+    var longPeriodStart;
     var coverageByProbe = {};
-    for (var ci = 0; ci < coverage.rows.length; ci++) {
-      coverageByProbe[coverage.rows[ci].probe] = coverage.rows[ci];
+    var shortTrendVal;
+    var mediumTrendVal;
+    var longTrendVal;
+    var coverage;
+
+    if (shouldUseServerProbes()) {
+      var sp = state.serverProbeSnapshot.probes;
+      shortStats = sp.short;
+      mediumStats = sp.medium;
+      longStats = sp.long;
+      shortPeriodStart = {
+        periodStartBuy: sp.short.periodStartBuy,
+        periodStartSell: sp.short.periodStartSell
+      };
+      mediumPeriodStart = {
+        periodStartBuy: sp.medium.periodStartBuy,
+        periodStartSell: sp.medium.periodStartSell
+      };
+      longPeriodStart = {
+        periodStartBuy: sp.long.periodStartBuy,
+        periodStartSell: sp.long.periodStartSell
+      };
+      coverageByProbe = {
+        short: coverageRowFromServerCount(sp.short.count),
+        medium: coverageRowFromServerCount(sp.medium.count),
+        long: coverageRowFromServerCount(sp.long.count)
+      };
+      shortTrendVal = trendFromServerProbe(sp.short);
+      mediumTrendVal = trendFromServerProbe(sp.medium);
+      longTrendVal = trendFromServerProbe(sp.long);
+      coverage = { hasWarnings: false, warnings: [] };
+    } else {
+      shortStats = computeStats(shortSamp);
+      mediumStats = computeStats(mediumSamp);
+      longStats = computeStats(longSamp);
+      shortPeriodStart = computePeriodStart(shortSamp);
+      mediumPeriodStart = computePeriodStart(mediumSamp);
+      longPeriodStart = computePeriodStart(longSamp);
+      coverage = analyzeProbeCoverage(history, now, p.short, p.medium, p.long, filterOpts);
+      for (var ci = 0; ci < coverage.rows.length; ci++) {
+        coverageByProbe[coverage.rows[ci].probe] = coverage.rows[ci];
+      }
+      shortTrendVal = computeTrend(shortSamp);
+      mediumTrendVal = computeTrend(mediumSamp);
+      longTrendVal = computeTrend(longSamp);
     }
-    var shortTrendVal = computeTrend(shortSamp);
-    var mediumTrendVal = computeTrend(mediumSamp);
-    var longTrendVal = computeTrend(longSamp);
     if (shortTrendVal) lastShortTrend = shortTrendVal;
     if (mediumTrendVal) lastMediumTrend = mediumTrendVal;
     if (longTrendVal) lastLongTrend = longTrendVal;
@@ -424,6 +568,10 @@ export function initProbes(socket, state, log) {
     updateStreamDiagram(p, shortSamp, mediumSamp, longSamp, shortStats, mediumStats, longStats, shortT, mediumT, longT);
     if (onProbeUpdateCallback) onProbeUpdateCallback();
   }
+
+  socket.on('disconnect', function () {
+    state.serverProbeSnapshot = null;
+  });
 
   /** Merge IG/recorded seed points with live history; live bid/offer wins on duplicate timestamps. */
   function mergePriceHistoryFromSeed(incoming) {
@@ -504,6 +652,24 @@ export function initProbes(socket, state, log) {
     mergePriceHistoryFromSeed(payload.samples);
   });
 
+  /** Server in-memory probe buffer after tab reload (stream kept running). */
+  socket.on('live_stream_probe_seed', function (payload) {
+    if (!payload || !Array.isArray(payload.samples)) return;
+    if (payload.epic && state.currentEpic && payload.epic !== state.currentEpic) return;
+    mergePriceHistoryFromSeed(payload.samples);
+  });
+
+  socket.on('transaction_added', function (tx) {
+    var marker = chartMarkerFromTransaction(tx);
+    if (marker) addChartTradeMarker(marker);
+  });
+
+  socket.on('live_probe_stats', applyServerProbeSnapshot);
+
+  socket.on('live_rules_status', function (msg) {
+    if (msg && msg.probes) applyServerProbeSnapshot(msg);
+  });
+
   socket.on('probes_backfill', function (payload) {
     if (!payload || !Array.isArray(payload.samples)) return;
     mergePriceHistoryFromSeed(payload.samples);
@@ -549,12 +715,18 @@ export function initProbes(socket, state, log) {
   }
 
   socket.on('epic', function (newEpic) {
-    if (newEpic !== state.currentEpic) {
-      var wasSwitching = !!state.currentEpic;
-      state.currentEpic = newEpic;
+    if (newEpic === state.currentEpic) {
+      render();
+      return;
+    }
+    var wasSwitching = !!state.currentEpic;
+    state.currentEpic = newEpic;
+    // Only clear live buffers on a real instrument change — not first epic sync after reload.
+    if (wasSwitching) {
       state.priceHistory = [];
       lastShortTrend = lastMediumTrend = lastLongTrend = { dir: 'flat', pct: null, text: '—' };
-      if (wasSwitching) setBackfillStatus('Probes cleared (instrument changed). Use Backfill for historical data.', false);
+      setBackfillStatus('Probes cleared (instrument changed). Use Backfill for historical data.', false);
+      loadChartMarkersFromTransactions();
     }
     render();
   });
@@ -590,6 +762,8 @@ export function initProbes(socket, state, log) {
     render();
   }).catch(function () { render(); });
 
+  loadChartMarkersFromTransactions();
+
   var onProbeUpdateCallback = null;
   var lastProbeValues = null;
 
@@ -618,6 +792,31 @@ export function initProbes(socket, state, log) {
       onProbeUpdateCallback = fn;
     },
     getProbeValues: function () { return lastProbeValues; },
+    /** Coverage rows for short/medium/long (same thresholds as probe warnings). */
+    getProbeCoverage: function () {
+      if (shouldUseServerProbes()) {
+        var sp = state.serverProbeSnapshot.probes;
+        return {
+          hasWarnings: false,
+          warnings: [],
+          rows: [
+            { probe: 'short', label: 'Short', count: sp.short.count, fromServer: true },
+            { probe: 'medium', label: 'Medium', count: sp.medium.count, fromServer: true },
+            { probe: 'long', label: 'Long', count: sp.long.count, fromServer: true }
+          ]
+        };
+      }
+      var history = state.priceHistory || [];
+      var p = getPeriods();
+      return analyzeProbeCoverage(
+        history,
+        Date.now(),
+        p.short,
+        p.medium,
+        p.long,
+        probeFilterOptsFromState(state)
+      );
+    },
     refreshProbes: function () { render(); }
   };
 }

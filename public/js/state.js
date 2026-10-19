@@ -65,5 +65,9 @@ export const state = {
   /** Rules forced-close HH:MM (local) from Trade tab — used by position panel when per-deal schedule not yet synced. */
   rulesForcedCloseTime: '',
   /** dealId → { iso: string, source?: string } from server scheduled_closes. */
-  scheduledCloseByDealId: Object.create(null)
+  scheduledCloseByDealId: Object.create(null),
+  /** Server probe stats (rules panel + probes panel while stream/rules active). */
+  serverProbeSnapshot: null,
+  /** Live chart markers from transaction log (open/close). */
+  liveChartTradeMarkers: []
 };

@@ -108,7 +108,7 @@ export interface BacktestConfig {
   dayStartByLondonDate?: Record<string, number>;
 }
 
-function parseScheduleTimeHHMM(s: string | undefined | null): number | null {
+export function parseScheduleTimeHHMM(s: string | undefined | null): number | null {
   if (!s || !s.trim()) return null;
   const m = s.trim().match(/^(\d{1,2}):(\d{2})$/);
   if (!m) return null;
@@ -118,7 +118,7 @@ function parseScheduleTimeHHMM(s: string | undefined | null): number | null {
   return h * 60 + min;
 }
 
-function minutesInTimezone(ts: number, timeZone: string): number {
+export function minutesInTimezone(ts: number, timeZone: string): number {
   const fmt = new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hour12: false });
   const parts = fmt.formatToParts(new Date(ts));
   const h = parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0', 10);
@@ -126,7 +126,7 @@ function minutesInTimezone(ts: number, timeZone: string): number {
   return h * 60 + min;
 }
 
-function dateKeyInTimezone(ts: number, timeZone: string): string {
+export function dateKeyInTimezone(ts: number, timeZone: string): string {
   const fmt = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' });
   return fmt.format(new Date(ts));
 }
@@ -199,7 +199,7 @@ export function isAutoStopBlockingOpens(ts: number, config: BacktestConfig): boo
   return isScheduleBlockingOpens(ts, config);
 }
 
-interface ProbeStats {
+export interface ProbeStats {
   min: number | null;
   max: number | null;
   range: number | null;
@@ -213,7 +213,7 @@ interface ProbeStats {
   periodStartSell: number | null;
 }
 
-interface Context {
+export interface LiveRulesEvalContext {
   offer: number | null;
   bid: number | null;
   dayStart: number | null;
@@ -289,7 +289,7 @@ type BacktestPriceSample = {
 type ProbeWindowEntry = { mid: number; spread: number; ts: number };
 
 /** Incremental short/medium/long probe windows — O(1) per tick instead of rescanning history. */
-class ProbeWindowTracker {
+export class ProbeWindowTracker {
   private readonly shortMs: number;
   private readonly mediumMs: number;
   private readonly longMs: number;
@@ -318,6 +318,16 @@ class ProbeWindowTracker {
 
   private trimBefore(arr: ProbeWindowEntry[], minTs: number): void {
     while (arr.length > 0 && arr[0].ts < minTs) arr.shift();
+  }
+
+  /** Eligible samples in the long probe window — for reconnect seeding browser charts. */
+  exportSeedSamples(): Array<{ ts: number; mid: number; spread: number }> {
+    return this.long.map((e) => ({ ts: e.ts, mid: e.mid, spread: e.spread }));
+  }
+
+  /** Current short/medium/long stats (same as live rules evaluation). */
+  exportSnapshot(): { short: ProbeStats; medium: ProbeStats; long: ProbeStats } {
+    return this.snapshot();
   }
 
   private snapshot(): { short: ProbeStats; medium: ProbeStats; long: ProbeStats } {
@@ -352,6 +362,8 @@ function formatTimeFromTs(ts: number): string {
   const s = d.getUTCSeconds();
   return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
 }
+
+type Context = LiveRulesEvalContext;
 
 function getLeftValue(rule: Rule, ctx: Context): number | string | null {
   if (rule.left === 'Buy') return ctx.offer;
@@ -468,7 +480,7 @@ function evaluateRule(rule: Rule, ctx: Context): boolean {
   }
 }
 
-function evaluateRules(ctx: Context, config: BacktestConfig): boolean {
+export function evaluateRules(ctx: Context, config: BacktestConfig): boolean {
   const rules = config.rules || [];
   const enabledRules = rules.filter((r) => r.enabled !== false);
   if (enabledRules.length === 0) return false;
@@ -520,7 +532,7 @@ function getTpSlConfig(
   };
 }
 
-function getTpSlLevels(
+export function getTpSlLevels(
   entry: number,
   direction: 'BUY' | 'SELL',
   config: BacktestConfig

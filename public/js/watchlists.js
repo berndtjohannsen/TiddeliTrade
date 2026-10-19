@@ -62,8 +62,11 @@ export function initWatchlists(socket, state, log, opts) {
     });
     if (cur && list.some(function (e) { return e.epic === cur; })) {
       epicSelect.value = cur;
-      socket.emit('setEpic', cur);
-      onEpicChange(cur);
+      // Avoid redundant setEpic on reload (server stream + probes stay warm).
+      if (cur !== (state.savedEpic || '')) {
+        socket.emit('setEpic', cur);
+        onEpicChange(cur);
+      }
     }
   });
 

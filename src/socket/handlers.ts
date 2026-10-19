@@ -85,6 +85,23 @@ import {
 } from '../services/dynamicStopLoss';
 import { analyzeSampleQuality, DEFAULT_GAP_PRUNE_LOW_COVERAGE_PCT, type SampleQualityReport } from '../services/sampleQuality';
 import {
+  advanceLiveStreamProbes,
+  ensureRuntimeProbeState,
+  emitLiveRulesHostStatus,
+  getLiveProbeSeedForEpic,
+  getLiveProbeStatsSnapshot,
+  getLiveRulesEngineDeps,
+  isServerRulesEngineEnabled,
+  onLiveRulesStreamTick,
+  onLiveRulesTransactionClosed,
+  registerServerRulesPlacedDeal,
+  runLiveRulesScheduledTasks,
+  setLiveRulesEngineDeps,
+  type LiveRulesEngineDeps,
+  type PlaceRulesDealParams,
+} from '../services/liveRulesEngine';
+import type { DealingWeekLondon } from '../services/dealingSchedule';
+import {
   applyProfileMarketSnapshot,
   buildDealingSnapshotFromMarketInfo,
   getInstrumentSettings,
@@ -252,6 +269,16 @@ function updateSleepPrevention(io: Server, appRunning: boolean): void {
 
 /** Active stream epic — avoids loadConfig() on every Lightstreamer tick during recording. */
 let streamEpicCache: string | null = null;
+
+/** Lightstreamer PRICE fields arrive as strings; rules engine needs numeric bid/offer. */
+function parseStreamBidOffer(data: { bid?: unknown; offer?: unknown }): { bid: number; offer: number } | null {
+  const bid =
+    typeof data.bid === 'number' ? data.bid : parseFloat(String(data.bid ?? '').trim());
+  const offer =
+    typeof data.offer === 'number' ? data.offer : parseFloat(String(data.offer ?? '').trim());
+  if (!Number.isFinite(bid) || !Number.isFinite(offer)) return null;
+  return { bid, offer };
+}
 let cachedRecordedCount: number | null = null;
 let cachedRecordedCountEpic: string | null = null;
 let cachedRecordedCountAt = 0;
@@ -322,6 +349,12 @@ let daySeedInflight: Promise<void> | null = null;
 let daySeedLastAttemptByEpic: Record<string, number> = {};
 const DAY_SEED_MIN_INTERVAL_MS = 8000;
 const lastClientSentimentByEpic: Record<string, { longPct: number; shortPct: number } | null> = {};
+/** Probe filter + contract size for server-side live rules. */
+const liveMarketContextByEpic: Record<
+  string,
+  { is24_7: boolean; dealingWeekLondon: DealingWeekLondon | null; contractSize: number }
+> = {};
+let liveRulesMaintenanceTimer: ReturnType<typeof setInterval> | null = null;
 
 async function pollAndEmitWorkingOrders(session: IgSession, io: Server): Promise<void> {
   try {
@@ -701,7 +734,13 @@ async function recordTransactionFromPosition(
       profile: currentIgProfile(),
     });
     persisted = true;
-    if (tx) io.emit('transaction_added', tx);
+    if (tx) {
+      io.emit('transaction_added', tx);
+      const liveRulesDeps = getLiveRulesEngineDeps();
+      if (liveRulesDeps && pos.epic) {
+        onLiveRulesTransactionClosed(liveRulesDeps, pos.epic, tx);
+      }
+    }
   } catch {
     if (!persisted) loggedClosedDealIds.delete(dealIdKey);
     /* ignore – transaction log is best-effort */
@@ -978,6 +1017,119 @@ function accountToClient(session: IgSession) {
 export function registerSocketHandlers(io: Server): void {
   let engineStatus: EngineStatus = 'ready';
   let currentSession: IgSession | null = null;
+  /** Cached marketDetails for tab reload (skip redundant IG calls while stream stays up). */
+  const lastMarketDetailsByEpic: Record<string, { at: number; payload: Record<string, unknown> }> = {};
+  const MARKET_DETAILS_REUSE_MS = 120000;
+  let persistStreamSamplesWhileTrading = false;
+
+  async function executeRulesForcedCloseSweep(epic: string): Promise<void> {
+    if (!currentSession) return;
+    const cfg = loadConfig();
+    const epicTrim = (epic?.trim() || cfg.epic || '').trim();
+    if (!epicTrim) return;
+    try {
+      const positions = await getPositions(currentSession);
+      const forEpic = positions.filter((p) => p.epic === epicTrim);
+      if (forEpic.length === 0) return;
+      const now = Date.now();
+      const scheduledDealIds = new Set(
+        scheduledCloses.filter((s) => s.closeAt <= now + 60000).map((s) => s.dealId)
+      );
+      for (const pos of forEpic) {
+        if (scheduledDealIds.has(pos.dealId)) continue;
+        try {
+          const posBeforeClose = pos;
+          recentlyClosedByUs[pos.dealId] = Date.now();
+          const closeDirection = pos.direction === 'BUY' ? 'SELL' : 'BUY';
+          const closeResult = await closePosition(currentSession, {
+            dealId: pos.dealId,
+            direction: closeDirection,
+            size: pos.size,
+          });
+          let closeConf: CloseConfirmation | undefined;
+          try {
+            const conf = await pollDealConfirmation(currentSession, closeResult.dealReference, {
+              maxAttempts: 15,
+              intervalMs: 300,
+            });
+            if (conf?.dealStatus === 'ACCEPTED') {
+              closeConf = { level: conf.level, profit: conf.profit, profitCurrency: conf.profitCurrency };
+            }
+          } catch { /* ignore */ }
+          closeConf = await enrichCloseConfFromHistory(
+            currentSession,
+            posBeforeClose,
+            closeConf,
+            currentSession.currencyIsoCode
+          );
+          await recordTransactionFromPosition(
+            io,
+            currentSession,
+            posBeforeClose,
+            pos.size,
+            closeConf,
+            currentSession.currencyIsoCode
+          );
+          scheduledCloses = scheduledCloses.filter((s) => s.dealId !== pos.dealId);
+          saveScheduledCloses(scheduledCloses);
+          emitScheduledCloses(io);
+          io.emit('log', 'Rules forced close: position closed ' + pos.dealId);
+          io.emit('position_closed', { dealId: pos.dealId });
+        } catch (err) {
+          delete recentlyClosedByUs[pos.dealId];
+          const msg = err instanceof Error ? err.message : 'Close failed';
+          io.emit('log', 'Rules forced close error (' + pos.dealId + '): ' + msg);
+        }
+      }
+      await pollAndEmitPositions(currentSession, io);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Rules forced close sweep failed';
+      io.emit('log', msg);
+    }
+  }
+
+  /** Push probe stats ~1 Hz while streaming (backup if stream callback misses an emit). */
+  let liveProbeStatsTimer: ReturnType<typeof setInterval> | null = null;
+  function emitLiveProbeStatsIfReady(epic: string): void {
+    const probeSnap = getLiveProbeStatsSnapshot(epic);
+    if (!probeSnap) return;
+    io.emit('live_probe_stats', { epic, dayStart: probeSnap.dayStart, probes: probeSnap.probes });
+  }
+
+  function startLiveProbeStatsTimer(): void {
+    if (liveProbeStatsTimer) return;
+    liveProbeStatsTimer = setInterval(() => {
+      if (!isStreaming()) return;
+      const cfg = loadConfig();
+      const epic = (streamEpicCache || cfg.epic || '').trim();
+      if (epic) emitLiveProbeStatsIfReady(epic);
+    }, 1000);
+  }
+
+  function stopLiveProbeStatsTimer(): void {
+    if (liveProbeStatsTimer) {
+      clearInterval(liveProbeStatsTimer);
+      liveProbeStatsTimer = null;
+    }
+  }
+
+  function startLiveRulesMaintenanceTimer(): void {
+    if (liveRulesMaintenanceTimer) return;
+    liveRulesMaintenanceTimer = setInterval(() => {
+      const cfg = loadConfig();
+      const epic = (streamEpicCache || cfg.epic || '').trim();
+      const liveRulesDeps = getLiveRulesEngineDeps();
+      if (!epic || !liveRulesDeps) return;
+      void runLiveRulesScheduledTasks(liveRulesDeps, epic);
+    }, 30000);
+  }
+
+  function stopLiveRulesMaintenanceTimer(): void {
+    if (liveRulesMaintenanceTimer) {
+      clearInterval(liveRulesMaintenanceTimer);
+      liveRulesMaintenanceTimer = null;
+    }
+  }
   /** Lightstreamer can fire far faster than 1 Hz; throttling socket emits avoids starving the ping/pong and the browser main thread. */
   let lastPriceSocketEmitTs = 0;
   const PRICE_SOCKET_EMIT_MIN_MS = 100;
@@ -1048,6 +1200,12 @@ export function registerSocketHandlers(io: Server): void {
         dayStartBuy: dayStartBuy ?? null,
         clientSentiment: clientSentiment ?? null,
       };
+      liveMarketContextByEpic[epic] = {
+        is24_7: trading.is24_7,
+        dealingWeekLondon,
+        contractSize: market?.contractSize ?? 1,
+      };
+      lastMarketDetailsByEpic[epic] = { at: Date.now(), payload };
       if (target) target.emit('marketDetails', payload);
       else io.emit('marketDetails', payload);
     } catch (err) {
@@ -1118,6 +1276,8 @@ export function registerSocketHandlers(io: Server): void {
       ordersPollTimer = null;
     }
     clearDynamicStopLossTracking();
+    stopLiveRulesMaintenanceTimer();
+    stopLiveProbeStatsTimer();
     io.emit('price_update', null);
     io.emit('dynamic_stop_loss_status', []);
     if (recordingStatusTimer) {
@@ -1152,8 +1312,169 @@ export function registerSocketHandlers(io: Server): void {
     io.emit('log', logMsg || 'Stopped');
   }
 
+  /** IG deal placement for server-side rules (same path as socket placeDeal). */
+  async function executePlaceRulesDeal(params: PlaceRulesDealParams): Promise<boolean> {
+    const session = currentSession;
+    if (!session) return false;
+    const epic = params.epic?.trim();
+    const size = params.size?.trim();
+    if (!epic || !size) return false;
+    const direction = params.direction === 'SELL' ? 'SELL' : 'BUY';
+    const cfg = loadConfig();
+    let expiry = cfg.defaultExpiry || 'DFB';
+    let currencyCode = cfg.currencyCode || 'GBP';
+    let market: Awaited<ReturnType<typeof getMarketDetails>> = null;
+    try {
+      market = await getMarketDetails(session, epic);
+      if (market) {
+        expiry = market.expiry;
+        if (market.currencyCode) currencyCode = market.currencyCode;
+      } else {
+        expiry = inferExpiry(epic, cfg.defaultExpiry);
+      }
+    } catch {
+      expiry = inferExpiry(epic, cfg.defaultExpiry);
+    }
+    const dslScope = direction === 'SELL' ? 'rules-sell' : 'rules-buy';
+    const dslSettings = resolveDynamicStopLossSettings(epic, cfg, dslScope);
+    const omitTp = shouldOmitTakeProfitForDeal(epic, cfg, dslScope);
+    let takeProfit = params.takeProfit?.trim() ? parseFloat(params.takeProfit) : undefined;
+    const stopLoss = params.stopLoss?.trim() ? parseFloat(params.stopLoss) : undefined;
+    if (omitTp) takeProfit = undefined;
+    const bid = params.bid;
+    const offer = params.offer;
+    const entryPrice = direction === 'BUY' ? offer : bid;
+    const dealRef = 'TT-' + Date.now();
+    try {
+      const result = await createPosition(session, {
+        epic,
+        direction,
+        size,
+        expiry,
+        currencyCode,
+        dealReference: dealRef,
+        takeProfit: takeProfit && !isNaN(takeProfit) ? takeProfit : undefined,
+        stopLoss: stopLoss && !isNaN(stopLoss) ? stopLoss : undefined,
+        entryPrice: takeProfit != null || stopLoss != null ? entryPrice : undefined,
+      });
+      io.emit('log', 'Server rules deal submitted: ' + result.dealReference);
+      const conf = await pollDealConfirmation(session, result.dealReference);
+      if (conf.dealStatus === 'REJECTED') {
+        io.emit('log', 'Server rules deal rejected: ' + (conf.reason || 'Unknown'));
+        return false;
+      }
+      io.emit('deal_placed', {
+        dealReference: result.dealReference,
+        dealId: conf.dealId || undefined,
+        epic,
+        direction,
+        source: 'rules',
+      });
+      let placedPosition: Awaited<ReturnType<typeof getPositions>>[number] | undefined;
+      try {
+        const positions = await pollAndEmitPositions(session, io);
+        placedPosition = positions.find(
+          (p) => (conf.dealId && p.dealId === conf.dealId) || p.dealReference === dealRef
+        );
+      } catch { /* ignore */ }
+      const rulesRegDealId = placedPosition?.dealId ?? conf.dealId;
+      if (rulesRegDealId) registerServerRulesPlacedDeal(rulesRegDealId, direction);
+      if (placedPosition) {
+        emitTransactionOpenIfNew(io, placedPosition, epic, currencyCode);
+      }
+      if (dslSettings) {
+        const regId = placedPosition?.dealId ?? conf.dealId;
+        const entry = placedPosition?.level ?? entryPrice ?? 0;
+        const sizeNum = placedPosition?.size ?? parseFloat(size);
+        const cs = market?.contractSize ?? 1;
+        if (regId && entry > 0 && sizeNum > 0) {
+          registerDynamicStopLoss({
+            dealId: regId,
+            epic,
+            direction,
+            entryPrice: entry,
+            size: sizeNum,
+            contractSize: cs,
+            settings: dslSettings,
+            initialStopLevel: placedPosition?.stopLevel ?? null,
+            log: (msg) => io.emit('log', msg),
+          });
+          io.emit('dynamic_stop_loss_status', getDynamicStopLossStatuses());
+        }
+      }
+      if (params.closeAt?.trim()) {
+        const closeAtMs = new Date(params.closeAt).getTime();
+        if (!isNaN(closeAtMs) && closeAtMs > Date.now()) {
+          let dealId: string | undefined = conf.dealId;
+          let closeSize = parseFloat(size);
+          let closeDir = direction;
+          if (!dealId) {
+            await new Promise((r) => setTimeout(r, 2000));
+            const positions = await getPositions(session);
+            const pos = positions.find((p) => p.dealReference === dealRef);
+            if (pos) {
+              dealId = pos.dealId;
+              closeSize = pos.size;
+              closeDir = pos.direction;
+            }
+          }
+          if (dealId) {
+            scheduledCloses.push({
+              dealId,
+              direction: closeDir === 'BUY' ? 'SELL' : 'BUY',
+              size: closeSize,
+              closeAt: closeAtMs,
+              source: 'rules',
+            });
+            persistAndRunScheduler(session, io);
+          }
+        }
+      }
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Place deal failed';
+      io.emit('log', 'Server rules deal error: ' + msg);
+      return false;
+    }
+  }
+
+  const liveRulesDeps: LiveRulesEngineDeps = {
+    getSession: () => currentSession,
+    getStreamEpic: () => streamEpicCache,
+    getSentiment: (epic) => lastClientSentimentByEpic[epic] ?? null,
+    getProbeFilterOpts: (epic) => {
+      const ctx = liveMarketContextByEpic[epic];
+      return {
+        is24_7: ctx?.is24_7 ?? false,
+        dealingWeekLondon: ctx?.dealingWeekLondon ?? defaultDealingWeekLondonMonFri(),
+      };
+    },
+    getContractSize: (epic) => liveMarketContextByEpic[epic]?.contractSize ?? 1,
+    countOpenSlots: async (epic) => {
+      const session = currentSession;
+      if (!session) return 0;
+      try {
+        const [positions, orders] = await Promise.all([
+          getPositions(session),
+          getWorkingOrders(session),
+        ]);
+        const pos = positions.filter((p) => p.epic === epic).length;
+        const ord = orders.filter((o) => o.epic === epic).length;
+        return pos + ord;
+      } catch {
+        return 999;
+      }
+    },
+    placeRulesDeal: executePlaceRulesDeal,
+    runForcedCloseSweep: executeRulesForcedCloseSweep,
+    log: (msg) => io.emit('log', msg),
+    emitStatus: (payload) => io.emit('live_rules_status', payload),
+  };
+  setLiveRulesEngineDeps(liveRulesDeps);
+
   async function beginStreamingSession(session: IgSession, io: Server): Promise<void> {
     const cfg = loadConfig();
+    persistStreamSamplesWhileTrading = cfg.ui?.persistStreamSamplesWhileTrading === true;
     scheduledCloses = loadScheduledCloses();
     await runOverdueCloses(session, io);
     let positions: Awaited<ReturnType<typeof getPositions>> = [];
@@ -1193,6 +1514,14 @@ export function registerSocketHandlers(io: Server): void {
     streamEpicCache = epic;
     try {
       await fetchAndEmitMarketDetails(session, epic);
+      if (isStreaming() && streamEpicCache === epic) {
+        io.emit('log', 'Stream already active: ' + epic);
+        scheduleLiveDaySeed(session, epic, io);
+        startLiveRulesMaintenanceTimer();
+        startLiveProbeStatsTimer();
+        updateSleepPrevention(io, true);
+        return;
+      }
       startStream(
         session,
         epic,
@@ -1203,19 +1532,39 @@ export function registerSocketHandlers(io: Server): void {
             if (recordPrice(epicNow, data, sentiment)) {
               io.emit('recorded_sample', { epic: epicNow, ts: Date.now(), bid: data.bid, offer: data.offer, spread: data.spread });
             }
-          } else if (epicNow && loadConfig().ui?.persistStreamSamplesWhileTrading === true) {
+          } else if (epicNow && persistStreamSamplesWhileTrading) {
             recordStreamSample(epicNow, data, sentiment);
+          }
+          const prices = epicNow && data ? parseStreamBidOffer(data) : null;
+          if (currentSession && epicNow && prices) {
+            const spreadNum =
+              typeof data.spread === 'number' ? data.spread : parseFloat(String(data.spread));
+            const rulesTick = {
+              bid: prices.bid,
+              offer: prices.offer,
+              spread: isNaN(spreadNum) ? 0 : spreadNum,
+              updateTime: data.updateTime,
+              marketState: data.marketState,
+            };
+            const advanced = advanceLiveStreamProbes(liveRulesDeps, epicNow, rulesTick);
+            if (advanced) emitLiveProbeStatsIfReady(epicNow);
+            void onLiveRulesStreamTick(liveRulesDeps, epicNow, rulesTick, sentiment ?? null, advanced).catch(
+              (err) => {
+                const msg = err instanceof Error ? err.message : String(err);
+                io.emit('log', 'Rules stream tick: ' + msg);
+              }
+            );
           }
           const now = Date.now();
           if (now - lastPriceSocketEmitTs < PRICE_SOCKET_EMIT_MIN_MS) return;
           lastPriceSocketEmitTs = now;
           io.emit('price_update', data);
-          if (currentSession && epicNow && data && typeof data.bid === 'number' && typeof data.offer === 'number') {
+          if (currentSession && epicNow && prices) {
             onDynamicStopLossPriceTick(
               currentSession,
               epicNow,
-              data.bid,
-              data.offer,
+              prices.bid,
+              prices.offer,
               (msg) => io.emit('log', msg)
             );
             io.emit('dynamic_stop_loss_status', getDynamicStopLossStatuses());
@@ -1238,7 +1587,20 @@ export function registerSocketHandlers(io: Server): void {
       const msg = streamErr instanceof Error ? streamErr.message : 'Stream failed';
       io.emit('log', 'Stream: ' + msg);
     }
+    startLiveRulesMaintenanceTimer();
+    startLiveProbeStatsTimer();
     updateSleepPrevention(io, true);
+  }
+
+  /** One begin-stream at a time (tab reload + schedule + manual start must not overlap). */
+  let beginStreamingFlight: Promise<void> | null = null;
+  function runBeginStreamingSession(session: IgSession, io: Server): Promise<void> {
+    if (beginStreamingFlight) return beginStreamingFlight;
+    const flight = beginStreamingSession(session, io).finally(() => {
+      if (beginStreamingFlight === flight) beginStreamingFlight = null;
+    });
+    beginStreamingFlight = flight;
+    return flight;
   }
 
   let recordingScheduleWasInWindow = false;
@@ -1251,7 +1613,145 @@ export function registerSocketHandlers(io: Server): void {
     for (const running of rulesEngineRunningBySocket.values()) {
       if (running) return true;
     }
-    return !!(loadConfig().ui?.tradingRulesRunning);
+    const cfg = loadConfig();
+    if (cfg.ui?.tradingRulesRunning) return true;
+    const epic = (cfg.epic || '').trim();
+    if (epic) {
+      const inst = getInstrumentSettings(epic);
+      if (inst?.tradingRulesRunning) return true;
+    }
+    return false;
+  }
+
+  /** Push server probe buffer + chart seed to one client after reload (stream may already be running). */
+  async function syncClientWithLiveStream(socket: Socket, epic: string): Promise<void> {
+    if (!epic.trim() || !currentSession) return;
+
+    ensureRuntimeProbeState(epic);
+
+    const emitServerProbeSeed = (): void => {
+      const samples = getLiveProbeSeedForEpic(epic);
+      if (samples.length > 0) {
+        socket.emit('live_stream_probe_seed', { epic, samples, source: 'server' });
+        io.emit('log', `Probes: sent ${samples.length} in-memory samples to reconnecting client`);
+      } else if (isStreaming()) {
+        io.emit('log', 'Probes: stream active — lookbacks fill at ~1 sample/sec');
+      }
+      const stats = getLiveProbeStatsSnapshot(epic);
+      if (stats) {
+        socket.emit('live_probe_stats', { epic, dayStart: stats.dayStart, probes: stats.probes });
+        io.emit(
+          'log',
+          `Probes: reconnect stats short=${stats.probes.short.count} medium=${stats.probes.medium.count} long=${stats.probes.long.count}`
+        );
+      }
+    };
+
+    if (isStreaming()) {
+      if (engineStatus !== 'running') {
+        engineStatus = 'running';
+        io.emit('status', engineStatus);
+      }
+      emitServerProbeSeed();
+      if (lastDaySeedCache && lastDaySeedCache.epic === epic) {
+        socket.emit('live_chart_day_seed', {
+          epic,
+          londonDay: lastDaySeedCache.londonDay,
+          samples: lastDaySeedCache.samples,
+          cached: true,
+        });
+      } else {
+        scheduleLiveDaySeed(currentSession, epic, io);
+      }
+      emitLiveRulesHostStatus(io, epic, socket);
+      return;
+    }
+
+    const cfg = loadConfig();
+    const needStream =
+      isServerRulesEngineEnabled(cfg, epic) ||
+      anyRulesEngineActive() ||
+      engineStatus === 'running' ||
+      isStreaming();
+    if (!needStream) return;
+
+    io.emit('log', 'Reconnect: resuming price stream (rules or session expected stream)');
+    try {
+      await runBeginStreamingSession(currentSession, io);
+      engineStatus = 'running';
+      io.emit('status', engineStatus);
+      emitServerProbeSeed();
+      emitLiveRulesHostStatus(io, epic, socket);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      io.emit('log', 'Reconnect: stream resume failed — ' + msg);
+    }
+  }
+
+  /** IG + probe sync after tab reload — must not block socket handler registration. */
+  async function pushClientSessionState(socket: Socket, cfg: ReturnType<typeof loadConfig>): Promise<void> {
+    try {
+      if (!socket.connected) return;
+      if (currentSession) {
+        try {
+          const positions = await getPositions(currentSession);
+          if (!socket.connected) return;
+          socket.emit('positions', positions);
+        } catch {
+          if (socket.connected) socket.emit('positions', []);
+        }
+        try {
+          if (socket.connected) await pollAndEmitWorkingOrders(currentSession, io);
+        } catch {
+          if (socket.connected) socket.emit('working_orders', []);
+        }
+        const epic = cfg.epic || '';
+        if (epic && socket.connected) {
+          const cached = lastMarketDetailsByEpic[epic];
+          if (cached && Date.now() - cached.at < MARKET_DETAILS_REUSE_MS) {
+            socket.emit('marketDetails', cached.payload);
+          } else {
+            await fetchAndEmitMarketDetails(currentSession, epic, socket);
+          }
+        }
+      }
+      if (!socket.connected) return;
+      const epicNow = (cfg.epic || '').trim();
+      if (epicNow) {
+        await syncClientWithLiveStream(socket, epicNow);
+      } else {
+        emitLiveRulesHostStatus(io, '', socket);
+      }
+      emitRecordingStatus(io);
+      const schedCfg = getRecordingScheduleConfig();
+      if (schedCfg) {
+        const epicNow = (cfg.epic || '').trim();
+        if (!epicNow) {
+          socket.emit('recording_schedule_status', {
+            enabled: true,
+            inWindow: false,
+            note: 'No instrument selected',
+            mode: schedCfg.mode,
+          });
+        } else {
+          const { inWindow, note } = await evaluateRecordingScheduleWindow(Date.now(), epicNow, schedCfg);
+          if (socket.connected) {
+            socket.emit('recording_schedule_status', {
+              enabled: true,
+              inWindow,
+              note: note || null,
+              mode: schedCfg.mode,
+            });
+          }
+        }
+      } else if (socket.connected) {
+        socket.emit('recording_schedule_status', { enabled: false, inWindow: false, note: null, mode: null });
+      }
+      updateSleepPrevention(io, currentSession !== null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      io.emit('log', 'Client session sync: ' + msg);
+    }
   }
 
   type RecordingScheduleRuntime = ScheduleWindowConfig & {
@@ -1413,7 +1913,7 @@ export function registerSocketHandlers(io: Server): void {
         io.emit('watchlistId', cfg.watchlistId || '');
         io.emit('log', 'Recording schedule: logged in as ' + session.accountId);
       }
-      await beginStreamingSession(session, io);
+      await runBeginStreamingSession(session, io);
       engineStatus = 'running';
       io.emit('status', engineStatus);
       return isStreaming();
@@ -1492,56 +1992,16 @@ export function registerSocketHandlers(io: Server): void {
 
   setOnProfileChangeListener(() => doStop('Account switched – use Connect to log in with new credentials'));
 
-  io.on('connection', async (socket: Socket) => {
+  io.on('connection', (socket: Socket) => {
     io.emit('log', 'Client connected: ' + socket.id);
     const cfg = loadConfig();
     socket.emit('status', engineStatus);
-    if (currentSession) {
-      socket.emit('account', accountToClient(currentSession));
-      try {
-        const positions = await getPositions(currentSession);
-        socket.emit('positions', positions);
-      } catch {
-        socket.emit('positions', []);
-      }
-      try {
-        await pollAndEmitWorkingOrders(currentSession, io);
-      } catch {
-        socket.emit('working_orders', []);
-      }
-      socket.emit('scheduled_closes', scheduledCloses);
-      const epic = cfg.epic || '';
-      if (epic) {
-        await fetchAndEmitMarketDetails(currentSession, epic, socket);
-      }
-    }
     socket.emit('epic', cfg.epic || '');
     socket.emit('watchlistId', cfg.watchlistId || '');
-    emitRecordingStatus(io);
-    const schedCfg = getRecordingScheduleConfig();
-    if (schedCfg) {
-      const epicNow = (cfg.epic || '').trim();
-      if (!epicNow) {
-        socket.emit('recording_schedule_status', {
-          enabled: true,
-          inWindow: false,
-          note: 'No instrument selected',
-          mode: schedCfg.mode,
-        });
-      } else {
-        void evaluateRecordingScheduleWindow(Date.now(), epicNow, schedCfg).then(({ inWindow, note }) => {
-          socket.emit('recording_schedule_status', {
-            enabled: true,
-            inWindow,
-            note: note || null,
-            mode: schedCfg.mode,
-          });
-        });
-      }
-    } else {
-      socket.emit('recording_schedule_status', { enabled: false, inWindow: false, note: null, mode: null });
+    if (currentSession) {
+      socket.emit('account', accountToClient(currentSession));
+      socket.emit('scheduled_closes', scheduledCloses);
     }
-    updateSleepPrevention(io, currentSession !== null);
 
     socket.on('rules_engine_running', (running: boolean) => {
       rulesEngineRunningBySocket.set(socket.id, !!running);
@@ -1590,10 +2050,18 @@ export function registerSocketHandlers(io: Server): void {
 
     socket.on('start', async () => {
       if (engineStatus === 'running') return;
+      if (beginStreamingFlight) {
+        await beginStreamingFlight;
+        if (isStreaming()) {
+          engineStatus = 'running';
+          io.emit('status', engineStatus);
+        }
+        return;
+      }
       try {
         if (engineStatus === 'connected' && currentSession) {
           io.emit('log', 'Starting price stream and session...');
-          await beginStreamingSession(currentSession, io);
+          await runBeginStreamingSession(currentSession, io);
           engineStatus = 'running';
           io.emit('status', engineStatus);
           return;
@@ -1607,7 +2075,7 @@ export function registerSocketHandlers(io: Server): void {
         io.emit('epic', cfg.epic || '');
         io.emit('watchlistId', cfg.watchlistId || '');
         io.emit('log', 'Logged in: ' + session.accountId + ' (' + session.accountType + ')');
-        await beginStreamingSession(session, io);
+        await runBeginStreamingSession(session, io);
         engineStatus = 'running';
         io.emit('status', engineStatus);
       } catch (err) {
@@ -1657,17 +2125,37 @@ export function registerSocketHandlers(io: Server): void {
     });
 
     socket.on('setEpic', async (epic: string) => {
-      updateConfig({ epic: epic || undefined });
-      streamEpicCache = epic || null;
+      const cfg = loadConfig();
+      const prevEpic = (cfg.epic || '').trim();
+      const nextEpic = (epic || '').trim();
       invalidateRecordedCountCache();
-      io.emit('epic', epic);
-      io.emit('log', 'Epic set: ' + (epic || '—'));
-      if (currentSession && epic) {
-        await fetchAndEmitMarketDetails(currentSession, epic);
+      io.emit('epic', nextEpic || epic);
+
+      if (nextEpic && nextEpic === prevEpic) {
+        if (!liveMarketContextByEpic[nextEpic] && currentSession) {
+          await fetchAndEmitMarketDetails(currentSession, nextEpic);
+        }
+        if (isStreaming() && streamEpicCache !== nextEpic) {
+          streamEpicCache = nextEpic;
+          try {
+            switchEpic(nextEpic);
+          } catch (err) {
+            io.emit('log', 'Stream switch failed: ' + (err instanceof Error ? err.message : ''));
+          }
+        }
+        emitRecordingStatus(io, true);
+        return;
       }
-      if (isStreaming() && epic) {
+
+      updateConfig({ epic: nextEpic || undefined });
+      streamEpicCache = nextEpic || null;
+      io.emit('log', 'Epic set: ' + (nextEpic || '—'));
+      if (currentSession && nextEpic) {
+        await fetchAndEmitMarketDetails(currentSession, nextEpic);
+      }
+      if (isStreaming() && nextEpic) {
         try {
-          switchEpic(epic);
+          switchEpic(nextEpic);
         } catch (err) {
           io.emit('log', 'Stream switch failed: ' + (err instanceof Error ? err.message : ''));
         }
@@ -2670,48 +3158,7 @@ export function registerSocketHandlers(io: Server): void {
       const cfg = loadConfig();
       const epic = (params.epic?.trim() || cfg.epic || '').trim();
       if (!epic) return;
-      try {
-        const positions = await getPositions(currentSession);
-        const forEpic = positions.filter((p) => p.epic === epic);
-        if (forEpic.length === 0) return;
-        const now = Date.now();
-        const scheduledDealIds = new Set(
-          scheduledCloses.filter((s) => s.closeAt <= now + 60000).map((s) => s.dealId)
-        );
-        for (const pos of forEpic) {
-          if (scheduledDealIds.has(pos.dealId)) continue;
-          try {
-            let posBeforeClose = pos;
-            recentlyClosedByUs[pos.dealId] = Date.now();
-            const closeDirection = pos.direction === 'BUY' ? 'SELL' : 'BUY';
-            const closeResult = await closePosition(currentSession, {
-              dealId: pos.dealId,
-              direction: closeDirection,
-              size: pos.size,
-            });
-            let closeConf: CloseConfirmation | undefined;
-            try {
-              const conf = await pollDealConfirmation(currentSession, closeResult.dealReference, { maxAttempts: 15, intervalMs: 300 });
-              if (conf?.dealStatus === 'ACCEPTED') closeConf = { level: conf.level, profit: conf.profit, profitCurrency: conf.profitCurrency };
-            } catch { /* ignore */ }
-            closeConf = await enrichCloseConfFromHistory(currentSession, posBeforeClose, closeConf, currentSession.currencyIsoCode);
-            await recordTransactionFromPosition(io, currentSession, posBeforeClose, pos.size, closeConf, currentSession.currencyIsoCode);
-            scheduledCloses = scheduledCloses.filter((s) => s.dealId !== pos.dealId);
-            saveScheduledCloses(scheduledCloses);
-            emitScheduledCloses(io);
-            io.emit('log', 'Rules forced close: position closed ' + pos.dealId);
-            io.emit('position_closed', { dealId: pos.dealId });
-          } catch (err) {
-            delete recentlyClosedByUs[pos.dealId];
-            const msg = err instanceof Error ? err.message : 'Close failed';
-            io.emit('log', 'Rules forced close error (' + pos.dealId + '): ' + msg);
-          }
-        }
-        await pollAndEmitPositions(currentSession, io);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Rules forced close sweep failed';
-        io.emit('log', msg);
-      }
+      await executeRulesForcedCloseSweep(epic);
     });
 
     socket.on('placeDeal', async (params: { epic: string; direction: string; size: string; takeProfit?: string; stopLoss?: string; closeAt?: string; bid?: number; offer?: number; source?: string }) => {
@@ -2990,6 +3437,8 @@ export function registerSocketHandlers(io: Server): void {
         socket.emit('order_error', msg);
       }
     });
+
+    void pushClientSessionState(socket, cfg);
   });
 
   if (!recordingScheduleTimer) {

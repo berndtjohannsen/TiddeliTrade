@@ -87,6 +87,8 @@ export interface UserConfig {
     tradingRulesEngineStartedDate?: string;
     /** Max open positions + working orders before rules stops placing new deals (default 1). */
     tradingRulesMaxParallelDeals?: number;
+    /** When true (default), block deals until probe lookbacks used by rules meet coverage. */
+    tradingRulesRequireProbeWarmup?: boolean;
     /** Rules to evaluate: left (live value) op right (reference). All enabled must pass. No deal if position/order exists. @deprecated Use ruleSets instead. */
     tradingRules?: Array<{ left: string; op: string; right: string; enabled?: boolean }>;
     /** Per-direction rule sets: BUY rules + deal params, SELL rules + deal params. Evaluation order: BUY first, then SELL. */
@@ -210,6 +212,8 @@ export interface InstrumentSettings {
   tradingRulesPauseOnLossSecondsBuy?: number;
   tradingRulesPauseOnLossSecondsSell?: number;
   tradingRulesMaxParallelDeals?: number;
+  tradingRulesRequireProbeWarmup?: boolean;
+  tradingRulesScheduleTimezone?: string;
   /** When true, a rules deal that closes at a loss stops that direction’s engine until restarted. */
   tradingRulesStopAfterLoss?: boolean;
   tradingRulesStopAfterLossBuy?: boolean;
@@ -473,15 +477,53 @@ const DEFAULT_CONFIG: UserConfig = {
   },
 };
 
+/** Removed options — stripped on load/save so old config.json stays valid. */
+const DEPRECATED_UI_KEYS = ['tradingRulesServerEngine'] as const;
+
+function stripDeprecatedConfigFields(cfg: UserConfig): boolean {
+  let changed = false;
+  const ui = cfg.ui as Record<string, unknown> | undefined;
+  if (ui) {
+    for (const key of DEPRECATED_UI_KEYS) {
+      if (key in ui) {
+        delete ui[key];
+        changed = true;
+      }
+    }
+  }
+  const instruments = cfg.ui?.instruments;
+  if (instruments) {
+    for (const epic of Object.keys(instruments)) {
+      const row = instruments[epic] as Record<string, unknown> | undefined;
+      if (!row) continue;
+      for (const key of DEPRECATED_UI_KEYS) {
+        if (key in row) {
+          delete row[key];
+          changed = true;
+        }
+      }
+    }
+  }
+  return changed;
+}
+
+/** In-process config (stream ticks call loadConfig often — avoid re-reading the file every time). */
+let memoryConfig: UserConfig | null = null;
+
 /**
  * Load user config from config.json. Returns defaults if file missing or invalid.
  * Migrates legacy flat credentials to igProfiles.demo when present.
  */
 export function loadConfig(): UserConfig {
+  if (memoryConfig) return memoryConfig;
   try {
     const raw = fs.readFileSync(CONFIG_PATH, 'utf-8');
     const parsed = JSON.parse(raw) as Partial<UserConfig>;
-    let cfg: UserConfig = { ...DEFAULT_CONFIG, ...parsed };
+    let cfg: UserConfig = {
+      ...DEFAULT_CONFIG,
+      ...parsed,
+      ui: { ...DEFAULT_CONFIG.ui, ...(parsed.ui || {}) },
+    };
 
     if (!cfg.igProfiles && (cfg.igApiKey || cfg.igUsername || cfg.igPassword)) {
       const baseUrl = (parsed as Record<string, unknown>).igBaseUrl as string | undefined || DEFAULT_BASE_URL_DEMO;
@@ -513,9 +555,11 @@ export function loadConfig(): UserConfig {
       };
     }
     if (!cfg.activeProfile) cfg.activeProfile = 'demo';
+    if (stripDeprecatedConfigFields(cfg)) saveConfig(cfg);
+    memoryConfig = cfg;
     return cfg;
   } catch {
-    return {
+    memoryConfig = {
       ...DEFAULT_CONFIG,
       igProfiles: {
         demo: { igBaseUrl: DEFAULT_BASE_URL_DEMO },
@@ -523,6 +567,7 @@ export function loadConfig(): UserConfig {
       },
       activeProfile: 'demo',
     };
+    return memoryConfig;
   }
 }
 
@@ -537,9 +582,22 @@ export function saveConfig(config: UserConfig): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  const cleaned = { ...config } as Record<string, unknown>;
+  const copy: UserConfig = {
+    ...config,
+    ui: config.ui ? { ...config.ui } : undefined,
+  };
+  if (copy.ui?.instruments) {
+    copy.ui.instruments = { ...copy.ui.instruments };
+    for (const epic of Object.keys(copy.ui.instruments)) {
+      const row = copy.ui.instruments[epic];
+      if (row) copy.ui.instruments[epic] = { ...row };
+    }
+  }
+  stripDeprecatedConfigFields(copy);
+  const cleaned = { ...copy } as Record<string, unknown>;
   for (const k of LEGACY_KEYS) delete cleaned[k];
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(cleaned, null, 2), 'utf-8');
+  memoryConfig = copy;
 }
 
 /**

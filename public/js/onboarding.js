@@ -450,9 +450,15 @@ export function initOnboarding(socket, state, appView, log, opts) {
   if (chooseTrade) chooseTrade.addEventListener('click', function () { enterWorkspace('trade'); });
   if (chooseResearch) chooseResearch.addEventListener('click', function () { enterWorkspace('research'); });
 
-  fetch('/api/config')
+  var configCtrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  var configTimer = setTimeout(function () {
+    if (configCtrl) configCtrl.abort();
+    showMode();
+  }, 8000);
+  fetch('/api/config', configCtrl ? { signal: configCtrl.signal } : {})
     .then(function (r) { return r.json(); })
     .then(function (cfg) {
+      clearTimeout(configTimer);
       clientConfig = cfg;
       state.activeProfile = cfg.activeProfile || 'demo';
       state.savedEpic = cfg.epic || '';
@@ -468,6 +474,7 @@ export function initOnboarding(socket, state, appView, log, opts) {
       showMode();
     })
     .catch(function () {
+      clearTimeout(configTimer);
       showMode();
     });
 
