@@ -1943,10 +1943,13 @@ export function registerSocketHandlers(io: Server): void {
       }
       const now = Date.now();
       let { inWindow, note, deferStop } = await evaluateRecordingScheduleWindow(now, epic, sched);
+      /** True only when this tick started the stream for the schedule (not Trade/rules stream already up). */
+      let scheduleStartedStreamThisTick = false;
 
       if (inWindow && !isStreaming() && !recordingScheduleStreamInProgress) {
         const ok = await ensureStreamForScheduler(io);
         if (ok && isStreaming()) {
+          scheduleStartedStreamThisTick = true;
           const fresh = await evaluateRecordingScheduleWindow(Date.now(), epic, sched);
           inWindow = fresh.inWindow;
           note = fresh.note;
@@ -1957,7 +1960,8 @@ export function registerSocketHandlers(io: Server): void {
       emitRecordingScheduleStatus(io, true, inWindow, note, sched.mode);
 
       if (inWindow) {
-        if (isStreaming() && !isRecording()) {
+        // Do not auto-record on an existing Trade/rules stream — only when the schedule started the stream.
+        if (scheduleStartedStreamThisTick && !isRecording()) {
           startRecordingInternal(io, true);
         }
         if (!recordingScheduleWasInWindow) {

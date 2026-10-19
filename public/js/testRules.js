@@ -2983,7 +2983,8 @@ export function initTestRules(socket, state, log, profileOpts) {
       return;
     }
     if (msg.inWindow) {
-      scheduleStatusEl.textContent = msg.mode === 'tradeHours' ? 'Market open' : 'Recording window open';
+      var base = msg.mode === 'tradeHours' ? 'Market open' : 'Window open';
+      scheduleStatusEl.textContent = recordingActive ? base + ' · recording' : base + ' (not recording)';
       scheduleStatusEl.className = 'text-xs font-mono text-emerald-400 ml-auto';
     } else {
       scheduleStatusEl.textContent = msg.mode === 'tradeHours' ? 'Market closed' : 'Outside window';

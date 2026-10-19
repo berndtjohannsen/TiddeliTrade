@@ -1742,12 +1742,6 @@ export function initTradingRules(
       if (!leftEl || !opEl || !statusEl) continue;
       var enabled = enabledEl ? enabledEl.checked : true;
       el.classList.toggle('opacity-60', !enabled);
-      if (!enabled) {
-        statusEl.textContent = 'off';
-        statusEl.className = 'text-center text-xs shrink-0 font-mono text-slate-500';
-        statusEl.title = 'Rule disabled';
-        continue;
-      }
       var right;
       if (rightEl && rightEl.tagName === 'SELECT' && rightEl.value === '__fixed__') {
         right = rightFixed ? rightFixed.value : '';
@@ -1766,9 +1760,16 @@ export function initTradingRules(
       var rightStr = formatRuleValue(rightVal, rule, false);
       var opSym = getOpSymbol(rule.op);
       var liveText = leftStr + ' ' + opSym + ' ' + rightStr + ' ' + (pass ? '\u2713' : '\u2717');
-      statusEl.textContent = liveText;
-      statusEl.className = 'text-center text-xs shrink-0 font-mono' + (pass ? ' text-emerald-500' : ' text-red-500');
-      statusEl.title = pass ? 'Condition met' : 'Condition not met';
+      if (!enabled) {
+        statusEl.textContent = liveText;
+        statusEl.className =
+          'text-center text-xs shrink-0 font-mono opacity-75' + (pass ? ' text-emerald-500' : ' text-red-400');
+        statusEl.title = pass ? 'Rule off — condition would pass' : 'Rule off — condition would fail';
+      } else {
+        statusEl.textContent = liveText;
+        statusEl.className = 'text-center text-xs shrink-0 font-mono' + (pass ? ' text-emerald-500' : ' text-red-500');
+        statusEl.title = pass ? 'Condition met' : 'Condition not met';
+      }
     }
     }
   }
