@@ -317,8 +317,10 @@ export function initBacktestProfiles(opts) {
 
   var listEl = document.getElementById('backtestProfilesList');
   var tradeSelectEl = document.getElementById('tradeProfileSelect');
+  var tradeSaveBtn = document.getElementById('tradeProfileSaveBtn');
   var tradeExportBtn = document.getElementById('tradeProfileExportBtn');
   var saveBtn = document.getElementById('backtestProfileSaveBtn');
+  var profilesLog = opts && opts.log ? opts.log : null;
   var exportToolbarBtn = document.getElementById('backtestProfileExportBtn');
   var importBtn = document.getElementById('backtestProfileImportBtn');
   var importFileInput = document.getElementById('backtestProfileImportFile');
@@ -542,8 +544,9 @@ export function initBacktestProfiles(opts) {
     var name = saveNameInput ? saveNameInput.value : '';
     if (saveOkBtn) saveOkBtn.disabled = true;
     saveCurrentProfile(name, pendingSavePayload)
-      .then(function () {
+      .then(function (profile) {
         hideSaveModal();
+        if (profile && profilesLog) profilesLog('Saved profile: ' + profile.name);
       })
       .catch(function (err) {
         setSaveError(err && err.message ? err.message : 'Could not save profile');
@@ -718,6 +721,12 @@ export function initBacktestProfiles(opts) {
       });
   }
 
+  function syncTradeSaveButton(epic) {
+    if (!tradeSaveBtn) return;
+    var hasEpic = !!(epic && String(epic).trim());
+    tradeSaveBtn.disabled = !hasEpic;
+  }
+
   function renderTradeSelect(epic) {
     if (!tradeSelectEl) return;
     var profiles = getProfilesForEpic(epic);
@@ -748,6 +757,7 @@ export function initBacktestProfiles(opts) {
       ? PROFILE_APPLY_BLOCKED_MSG
       : 'Load a saved strategy profile onto Trade (and Research backtests)';
     syncTradeExportButton(epic);
+    syncTradeSaveButton(epic);
   }
 
   function activateTradeProfile(profile, epic, options) {
@@ -1372,18 +1382,21 @@ export function initBacktestProfiles(opts) {
     return outcome;
   }
 
-  if (saveBtn) {
-    saveBtn.addEventListener('click', function () {
-      if (!getEpic()) {
-        if (activeLabel) {
-          activeLabel.textContent = 'Select an instrument first';
-          activeLabel.classList.remove('hidden');
-        }
-        return;
+  /** Open save modal for a new profile (config only unless payload includes a backtest report). */
+  function openSaveCurrentProfileModal() {
+    if (!getEpic()) {
+      if (profilesLog) profilesLog('Select an instrument first');
+      else if (activeLabel) {
+        activeLabel.textContent = 'Select an instrument first';
+        activeLabel.classList.remove('hidden');
       }
-      showSaveModal({ suggestedName: '' });
-    });
+      return;
+    }
+    showSaveModal({ suggestedName: '' });
   }
+
+  if (saveBtn) saveBtn.addEventListener('click', openSaveCurrentProfileModal);
+  if (tradeSaveBtn) tradeSaveBtn.addEventListener('click', openSaveCurrentProfileModal);
 
   if (exportToolbarBtn) {
     exportToolbarBtn.addEventListener('click', function () {

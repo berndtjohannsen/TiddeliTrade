@@ -222,6 +222,7 @@ export function initTestRules(socket, state, log, profileOpts) {
   var lastBacktestReport = null;
   var profilesApi = initBacktestProfiles(
     Object.assign({}, profileOpts || {}, {
+      log: log,
       getEpic: function () {
         return lastAnalyseEpic || (epicSelect && epicSelect.value) || state.savedEpic || '';
       },

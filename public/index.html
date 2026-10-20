@@ -566,6 +566,7 @@
           <select id="tradeProfileSelect" class="flex-1 min-w-[140px] max-w-xs px-2 py-1 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 text-xs focus:ring-2 focus:ring-emerald-500 outline-none disabled:opacity-50" title="Trade profile">
             <option value="">Custom (manual edits)</option>
           </select>
+          <button type="button" id="tradeProfileSaveBtn" class="shrink-0 px-2 py-1 rounded-lg bg-slate-800 border border-slate-700 text-slate-300 hover:text-slate-100 text-xs disabled:opacity-40 disabled:cursor-not-allowed" disabled data-tooltip="Save current rules, probes, and engine settings as a new named profile (no backtest required)">Save as new…</button>
           <button type="button" id="tradeProfileExportBtn" class="shrink-0 px-2 py-1 rounded-lg bg-slate-800 border border-slate-700 text-slate-400 hover:text-slate-200 text-xs disabled:opacity-40 disabled:cursor-not-allowed" disabled data-tooltip="Download the selected profile as a file (no recordings)">Export</button>
         </div>
         <p id="tradingRulesLockedMsg" class="text-xs text-amber-400 mb-2 hidden" data-tooltip="Engine settings cannot be edited while BUY or SELL engine is running">Settings locked – stop all engines to edit</p>
@@ -1005,7 +1006,7 @@
         <div id="backtestProfilesSection" class="mb-2 flex flex-col gap-1.5 text-xs border border-slate-700/80 rounded-lg p-2 bg-slate-900/60">
           <div class="flex flex-wrap items-center gap-2">
             <span class="text-slate-400 font-medium">Saved profiles</span>
-            <button type="button" id="backtestProfileSaveBtn" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-[11px]" data-tooltip="Save current Trade profile (rules, probes, engine controls) and analyse options">Save current…</button>
+            <button type="button" id="backtestProfileSaveBtn" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-[11px]" data-tooltip="Save current rules, probes, engine controls, and analyse options as a new named profile">Save as new…</button>
             <button type="button" id="backtestProfileExportBtn" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-[11px]" data-tooltip="Download the active profile as a file (.tiddeli-profile.json) — no recordings">Export…</button>
             <button type="button" id="backtestProfileImportBtn" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-[11px]" data-tooltip="Import a profile file (.tiddeli-profile.json) onto this instrument — recordings are not included">Import…</button>
             <span id="backtestProfileActiveLabel" class="text-violet-400/90 text-[11px] hidden"></span>
