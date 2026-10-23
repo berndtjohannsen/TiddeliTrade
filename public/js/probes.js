@@ -4,6 +4,7 @@
  */
 import {
   analyzeProbeCoverage,
+  formatProbeLookbackStatus,
   formatProbeSampleCount,
   isProbeEligibleSample,
   probeFilterOptsFromState
@@ -27,7 +28,9 @@ export function initProbes(socket, state, log) {
   var longInput = document.getElementById('probeLongPeriod');
   var periodInputsWrap = document.getElementById('probesPeriodInputs');
   var sessionStopBtn = null;
-  var coverageWarningEl = document.getElementById('probesCoverageWarning');
+  var longStatusEl = document.getElementById('probeLongStatus');
+  var mediumStatusEl = document.getElementById('probeMediumStatus');
+  var shortStatusEl = document.getElementById('probeShortStatus');
   var STOP_PROBE_TOOLTIP_DEFAULT = 'Stop price stream and probes';
   var STOP_PROBE_TOOLTIP_LOCKED = 'Stop rules trading first — probing cannot be stopped while rules are active';
   var shortTrend = document.getElementById('probeShortTrend');
@@ -239,6 +242,54 @@ export function initProbes(socket, state, log) {
     return { w: Math.max(0, Math.floor(rect.width)), h: Math.max(0, Math.floor(rect.height)) };
   }
 
+  /** Last server seed merged — chart fallback when priceHistory lags probe stats after reconnect. */
+  var chartSeedCache = [];
+
+  var chartRepaintScheduled = false;
+  /** Repaint after layout (panel shown, reconnect) — avoids 0×0 canvas when Trade was hidden. */
+  function scheduleChartRepaint() {
+    if (chartRepaintScheduled) return;
+    chartRepaintScheduled = true;
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        chartRepaintScheduled = false;
+        render();
+      });
+    });
+  }
+
+  function activeProbeEpic() {
+    return (state.savedEpic || state.currentEpic || '').trim();
+  }
+
+  function probePayloadEpicMatches(payloadEpic) {
+    if (!payloadEpic) return true;
+    var active = activeProbeEpic();
+    return !active || payloadEpic === active;
+  }
+
+  /** Chart line samples (probe panels may use server stats while history catches up). */
+  function selectChartLongSamples(history, now, longMs, filterOpts) {
+    function inLongWindow(s) {
+      return s && s.ts >= now - longMs && s.ts <= now;
+    }
+    var strict = history.filter(function (s) {
+      return inLongWindow(s) && isProbeEligibleSample(s, filterOpts);
+    });
+    if (strict.length >= 2) return strict;
+    var relaxed = history.filter(function (s) {
+      return inLongWindow(s) && s.mid != null && !isNaN(Number(s.mid));
+    });
+    if (relaxed.length >= 2) return relaxed;
+    if (chartSeedCache.length >= 2) {
+      var fromSeed = chartSeedCache.filter(function (s) {
+        return inLongWindow(s) && s.mid != null && !isNaN(Number(s.mid));
+      });
+      if (fromSeed.length >= 2) return fromSeed;
+    }
+    return strict;
+  }
+
   function formatProbePeriodMinutes(minutes) {
     if (minutes >= 1440 && minutes % 1440 === 0) return minutes / 1440 + 'd';
     if (minutes >= 60 && minutes % 60 === 0) return minutes / 60 + 'h';
@@ -337,11 +388,7 @@ export function initProbes(socket, state, log) {
         ' &nbsp;|&nbsp; <span class="text-emerald-500" title="Deal opened (BUY)">▲</span>/<span class="text-red-500" title="Deal opened (SELL)">▼</span> open' +
         ' &nbsp; <span class="text-amber-400" title="Deal closed">◆</span> close';
       streamMeta.innerHTML =
-        '<span class="text-slate-500">Buy / Sell</span> ' + offerStr + ' / ' + bidStr +
-        ' &nbsp;|&nbsp; <span class="text-slate-500">S</span> ' + (shortT.text || '—') +
-        ' &nbsp;|&nbsp; <span class="text-slate-500">M</span> ' + (mediumT.text || '—') +
-        ' &nbsp;|&nbsp; <span class="text-slate-500">L</span> ' + (longT.text || '—') +
-        tradeLegend;
+        '<span class="text-slate-500">Buy / Sell</span> ' + offerStr + ' / ' + bidStr + tradeLegend;
     }
 
     var size = streamWrapSize();
@@ -393,9 +440,18 @@ export function initProbes(socket, state, log) {
   }
   if (streamCanvasWrap && typeof ResizeObserver !== 'undefined') {
     streamResizeObserver = new ResizeObserver(function () {
-      render();
+      scheduleChartRepaint();
     });
     streamResizeObserver.observe(streamCanvasWrap);
+  }
+
+  function setProbeLookbackStatusEl(el, row) {
+    if (!el) return;
+    var st = formatProbeLookbackStatus(row);
+    el.textContent = st.text;
+    el.title = st.title || '';
+    el.className = 'text-[10px] leading-snug font-mono mb-1 min-h-[1.25rem] ' +
+      (st.warn ? 'text-amber-400' : 'text-emerald-500/90');
   }
 
   function setSampleCountEl(el, row) {
@@ -438,10 +494,10 @@ export function initProbes(socket, state, log) {
 
   function applyServerProbeSnapshot(msg) {
     if (!msg || !msg.probes) return;
-    if (msg.epic && state.savedEpic && msg.epic !== state.savedEpic) return;
+    if (!probePayloadEpicMatches(msg.epic)) return;
     state.serverProbeSnapshot = { dayStart: msg.dayStart != null ? msg.dayStart : null, probes: msg.probes };
     if (state.serverProbeSnapshot.dayStart != null) state.dayStartBuy = state.serverProbeSnapshot.dayStart;
-    render();
+    scheduleChartRepaint();
   }
 
   function render() {
@@ -548,26 +604,25 @@ export function initProbes(socket, state, log) {
     if (longStdDev) longStdDev.textContent = formatVal(longStats.stdDev);
     if (longSpread) longSpread.textContent = formatVal(longStats.avgSpread);
     setSampleCountEl(longSamples, coverageByProbe.long);
-    if (coverageWarningEl) {
-      if (coverage.hasWarnings) {
-        coverageWarningEl.textContent = coverage.warnings.join(' ');
-        coverageWarningEl.classList.remove('hidden');
-      } else {
-        coverageWarningEl.textContent = '';
-        coverageWarningEl.classList.add('hidden');
-      }
-    }
+    setProbeLookbackStatusEl(longStatusEl, coverageByProbe.long);
+    setProbeLookbackStatusEl(mediumStatusEl, coverageByProbe.medium);
+    setProbeLookbackStatusEl(shortStatusEl, coverageByProbe.short);
     var shortT = shortTrendVal || lastShortTrend;
     var mediumT = mediumTrendVal || lastMediumTrend;
     var longT = longTrendVal || lastLongTrend;
+    var chartLongSamp = selectChartLongSamples(history, now, longMs, filterOpts);
     lastProbeValues = {
       short: { min: shortStats.min, max: shortStats.max, avg: shortStats.avg, range: shortStats.range, stdDev: shortStats.stdDev, avgSpread: shortStats.avgSpread, count: shortStats.count, trendDir: shortT.dir, trendPct: shortT.pct, periodStartBuy: shortPeriodStart.periodStartBuy, periodStartSell: shortPeriodStart.periodStartSell },
       medium: { min: mediumStats.min, max: mediumStats.max, avg: mediumStats.avg, range: mediumStats.range, stdDev: mediumStats.stdDev, avgSpread: mediumStats.avgSpread, count: mediumStats.count, trendDir: mediumT.dir, trendPct: mediumT.pct, periodStartBuy: mediumPeriodStart.periodStartBuy, periodStartSell: mediumPeriodStart.periodStartSell },
       long: { min: longStats.min, max: longStats.max, avg: longStats.avg, range: longStats.range, stdDev: longStats.stdDev, avgSpread: longStats.avgSpread, count: longStats.count, trendDir: longT.dir, trendPct: longT.pct, periodStartBuy: longPeriodStart.periodStartBuy, periodStartSell: longPeriodStart.periodStartSell }
     };
-    updateStreamDiagram(p, shortSamp, mediumSamp, longSamp, shortStats, mediumStats, longStats, shortT, mediumT, longT);
+    updateStreamDiagram(p, shortSamp, mediumSamp, chartLongSamp, shortStats, mediumStats, longStats, shortT, mediumT, longT);
     if (onProbeUpdateCallback) onProbeUpdateCallback();
   }
+
+  socket.on('connect', function () {
+    scheduleChartRepaint();
+  });
 
   socket.on('disconnect', function () {
     state.serverProbeSnapshot = null;
@@ -611,7 +666,8 @@ export function initProbes(socket, state, log) {
     merged.sort(function (a, b) { return (a.ts || 0) - (b.ts || 0); });
     if (merged.length > MAX_SAMPLES) merged = merged.slice(-MAX_SAMPLES);
     state.priceHistory = merged;
-    render();
+    chartSeedCache = merged.slice(-MAX_SAMPLES);
+    scheduleChartRepaint();
   }
 
   function addSample(bid, offer, spread, marketState) {
@@ -648,14 +704,14 @@ export function initProbes(socket, state, log) {
 
   socket.on('live_chart_day_seed', function (payload) {
     if (!payload || !Array.isArray(payload.samples)) return;
-    if (payload.epic && state.currentEpic && payload.epic !== state.currentEpic) return;
+    if (!probePayloadEpicMatches(payload.epic)) return;
     mergePriceHistoryFromSeed(payload.samples);
   });
 
   /** Server in-memory probe buffer after tab reload (stream kept running). */
   socket.on('live_stream_probe_seed', function (payload) {
     if (!payload || !Array.isArray(payload.samples)) return;
-    if (payload.epic && state.currentEpic && payload.epic !== state.currentEpic) return;
+    if (!probePayloadEpicMatches(payload.epic)) return;
     mergePriceHistoryFromSeed(payload.samples);
   });
 
@@ -724,11 +780,13 @@ export function initProbes(socket, state, log) {
     // Only clear live buffers on a real instrument change — not first epic sync after reload.
     if (wasSwitching) {
       state.priceHistory = [];
+      chartSeedCache = [];
       lastShortTrend = lastMediumTrend = lastLongTrend = { dir: 'flat', pct: null, text: '—' };
       setBackfillStatus('Probes cleared (instrument changed). Use Backfill for historical data.', false);
       loadChartMarkersFromTransactions();
     }
-    render();
+    if (newEpic) state.savedEpic = newEpic;
+    scheduleChartRepaint();
   });
 
   function savePeriods() {
@@ -771,6 +829,7 @@ export function initProbes(socket, state, log) {
     setProbesPanelEnabled: function (enabled) {
       var panel = document.getElementById('probesPanel');
       if (panel) panel.classList.toggle('hidden', !enabled);
+      if (enabled) scheduleChartRepaint();
     },
     setBackfillEnabled: setBackfillEnabled,
     setProbesSettingsLocked: function (locked) {
@@ -817,6 +876,6 @@ export function initProbes(socket, state, log) {
         probeFilterOptsFromState(state)
       );
     },
-    refreshProbes: function () { render(); }
+    refreshProbes: scheduleChartRepaint
   };
 }

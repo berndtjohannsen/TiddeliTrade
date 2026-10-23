@@ -3,6 +3,7 @@
  * Samples at 1/sec per epic. Schema: epic, ts, bid, offer, spread, long_pct, short_pct.
  */
 
+import fs from 'fs';
 import path from 'path';
 import Database from 'better-sqlite3';
 import { getDealingFilterOptsForEpic } from './backtestMarketSnapshot';
@@ -127,6 +128,41 @@ export function startRecording(): void {
 
 export function stopRecording(): void {
   recording = false;
+}
+
+export type RecordingCheckpointResult = {
+  ok: boolean;
+  /** Human-readable outcome for logs. */
+  detail: string;
+};
+
+/**
+ * Merge WAL into price_records.db so the main file can be copied safely (e.g. after Home / stop stream).
+ * No-op if the database file does not exist yet.
+ */
+export function checkpointRecordingDbForCopy(): RecordingCheckpointResult {
+  try {
+    if (!fs.existsSync(DB_PATH)) {
+      return { ok: true, detail: 'no recordings database file yet' };
+    }
+    const database = getDb();
+    const rows = database.pragma('wal_checkpoint(TRUNCATE)') as Array<{
+      busy: number;
+      log: number;
+      checkpointed: number;
+    }>;
+    const row = rows[0];
+    if (row && row.busy > 0) {
+      return {
+        ok: false,
+        detail: 'checkpoint busy (another writer active) — retry in a moment or copy .db + -wal + -shm',
+      };
+    }
+    return { ok: true, detail: 'WAL merged into main database file' };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, detail: msg };
+  }
 }
 
 export function getRecordingStatus(): RecordingStatus {

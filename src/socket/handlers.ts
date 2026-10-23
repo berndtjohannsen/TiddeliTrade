@@ -35,6 +35,7 @@ import {
   recordStreamSample,
   startRecording,
   stopRecording,
+  checkpointRecordingDbForCopy,
   isRecording,
   getRecordingStatus,
   getRecordedSamples,
@@ -1286,11 +1287,21 @@ export function registerSocketHandlers(io: Server): void {
     }
     recordingStartedBySchedule = false;
     stopRecording();
+    const checkpoint = checkpointRecordingDbForCopy();
     emitRecordingStatus(io);
     engineStatus = currentSession ? 'connected' : 'ready';
     io.emit('status', engineStatus);
     updateSleepPrevention(io, currentSession !== null);
     if (logMsg) io.emit('log', logMsg);
+    if (checkpoint.ok && checkpoint.detail !== 'no recordings database file yet') {
+      const dbInfo = getRecordingDbInfo();
+      io.emit(
+        'log',
+        `Recordings: ${checkpoint.detail} — safe to copy price_records.db from your data folder (${dbInfo.dbPath})`
+      );
+    } else if (!checkpoint.ok) {
+      io.emit('log', `Recordings: checkpoint failed — ${checkpoint.detail}`);
+    }
   }
 
   function doStop(logMsg?: string): void {

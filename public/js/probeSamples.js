@@ -127,6 +127,38 @@ export function formatProbeSampleCount(count, expectedCount, coveragePct) {
   return String(count);
 }
 
+/** Short lookback fill status for each probe column (full detail in title). */
+export function formatProbeLookbackStatus(row) {
+  if (!row) return { text: '—', warn: false, title: '' };
+  var fullTitle = warningForRow(row) || '';
+  if (row.fromServer) {
+    var serverText = row.count > 0 ? 'Server buffer · ' + row.count + ' samples' : 'Collecting on server…';
+    return {
+      text: serverText,
+      warn: row.count === 0,
+      title: fullTitle || 'In-market samples on server stream buffer (matches rules engine)'
+    };
+  }
+  if (row.expectedCount === 0 && row.count === 0) {
+    return { text: 'Closed — no samples', warn: true, title: fullTitle };
+  }
+  if (row.count === 0 && row.expectedCount > 0) {
+    return { text: 'Filling… 0%', warn: true, title: fullTitle };
+  }
+  if (row.lowCoverage && row.coveragePct != null) {
+    return {
+      text: 'Filling… ' + row.coveragePct + '% (need ≥' + PROBE_LOW_COVERAGE_PCT + '%)',
+      warn: true,
+      title: fullTitle
+    };
+  }
+  return {
+    text: 'Lookback ready',
+    warn: false,
+    title: fullTitle || ('In-market coverage ≥' + PROBE_LOW_COVERAGE_PCT + '% for this window')
+  };
+}
+
 export function probeFilterOptsFromState(state) {
   return {
     is24_7: !!state.is24_7Market,

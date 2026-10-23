@@ -1554,11 +1554,16 @@ export function initTradingRules(
     return { ready: true, detail: '' };
   }
 
-  /** Reset one-shot deal edge detection; probe warmup is separate (server keeps probes on reconnect). */
+  /** Reset deal edge + client warmup flag until server sends fresh live_rules_status. */
   function resetRulesPassMemoryForWarmup() {
     prevRulesPass = false;
     prevBlocked = true;
-    if (!rulesEngineRunning) lastProbesReadyForRules = false;
+    if (rulesEngineRunning) {
+      lastProbesReadyForRules = false;
+      lastProbesWarmupDetail = 'syncing probe status…';
+    } else {
+      lastProbesReadyForRules = false;
+    }
   }
 
   function getContext() {

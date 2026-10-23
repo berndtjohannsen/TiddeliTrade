@@ -144,7 +144,10 @@ function refreshWorkspacePanels() {
   var onTrade = appView.getView() === 'trade';
   setTradePanelsVisible(onTrade);
   testRulesApi.setTestRulesPanelEnabled(!onTrade);
-  if (onTrade) ensureTradePriceStream();
+  if (onTrade) {
+    ensureTradePriceStream();
+    if (probesApi.refreshProbes) probesApi.refreshProbes();
+  }
 }
 
 function onWorkspaceViewChange(view) {

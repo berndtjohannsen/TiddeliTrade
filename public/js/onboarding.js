@@ -289,6 +289,9 @@ export function initOnboarding(socket, state, appView, log, opts) {
     if (rulesActive) parts.push('stop rules trading');
     if (streaming) parts.push('stop the price stream');
     var msg = 'Return to Home? This will ' + parts.join(' and ') + '. You stay logged in to IG.';
+    if (streaming) {
+      msg += ' Recordings are checkpointed so price_records.db is safe to copy (see log for path).';
+    }
     var confirmFn = showConfirm || function (opts) {
       return Promise.resolve(window.confirm((opts && opts.message) || ''));
     };

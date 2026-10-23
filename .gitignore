@@ -6,6 +6,7 @@ scheduled-closes.json
 transactions.json
 price_records.*
 oldrecords/
+scripts/
 *.log
 .DS_Store
 ignore.txt

@@ -32,6 +32,8 @@ import type { ClientSentiment } from './priceRecorder';
 const RULE_GROUP_ORDER = ['long', 'medium', 'short', 'other'] as const;
 const DEAL_ATTEMPT_COOLDOWN_MS = 8000;
 const MAX_STREAM_SAMPLES = 120000;
+/** Stream pause longer than this resets probe buffers when full lookback is required. */
+const PROBE_STREAM_GAP_RESET_MS = 5000;
 
 export type LiveRulesStreamTick = {
   bid: number;
@@ -490,6 +492,23 @@ function requiredProbeHorizons(rules: Rule[]): { short: boolean; medium: boolean
   return need;
 }
 
+function isProbeWarmupRequired(cfg: UserConfig, inst: InstrumentSettings | null): boolean {
+  const requireWarmup = inst?.tradingRulesRequireProbeWarmup ?? cfg.ui?.tradingRulesRequireProbeWarmup;
+  return requireWarmup !== false;
+}
+
+/** Drop stale probe history after a stream outage so coverage must refill. */
+function resetProbeBuffersAfterStreamGap(rt: EpicRuntime): void {
+  rt.streamSamples = [];
+  rt.samplesForCoverage = [];
+  rt.tracker = null;
+  rt.configKey = '';
+  rt.prevMid = null;
+  rt.prevRulesPass = false;
+  rt.prevBlocked = true;
+  rt.dayStartBuy = null;
+}
+
 function probesReadyForRules(
   cfg: UserConfig,
   inst: InstrumentSettings | null,
@@ -498,8 +517,7 @@ function probesReadyForRules(
   filterOpts: ProbeSampleFilterOpts,
   pm: { short: number; medium: number; long: number }
 ): { ready: boolean; detail: string } {
-  const requireWarmup = inst?.tradingRulesRequireProbeWarmup ?? cfg.ui?.tradingRulesRequireProbeWarmup;
-  if (requireWarmup === false) return { ready: true, detail: '' };
+  if (!isProbeWarmupRequired(cfg, inst)) return { ready: true, detail: '' };
   if (!ruleNeedsProbeStats(allRules)) return { ready: true, detail: '' };
   const need = requiredProbeHorizons(allRules);
   const now = Date.now();
@@ -551,6 +569,19 @@ function advanceServerProbesFromTick(
   now: number
 ): { rt: EpicRuntime; probes: ReturnType<ProbeWindowTracker['advance']>; trend: string | null } | null {
   const rt = getRuntime(epic);
+  const inst = getInstrumentSettings(epic);
+  const lastBufTs = rt.streamSamples.length > 0 ? rt.streamSamples[rt.streamSamples.length - 1].ts : 0;
+  if (
+    lastBufTs > 0 &&
+    now - lastBufTs > PROBE_STREAM_GAP_RESET_MS &&
+    isProbeWarmupRequired(cfg, inst) &&
+    isServerRulesEngineEnabled(cfg, epic)
+  ) {
+    resetProbeBuffersAfterStreamGap(rt);
+    deps.log(
+      `Rules: stream gap ${Math.round((now - lastBufTs) / 1000)}s — probe lookbacks reset (warmup required)`
+    );
+  }
   if (now - rt.lastSampleTs < PROBE_SAMPLE_INTERVAL_MS) return null;
   rt.lastSampleTs = now;
 
