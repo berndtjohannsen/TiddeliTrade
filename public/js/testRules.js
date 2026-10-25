@@ -219,6 +219,7 @@ export function initTestRules(socket, state, log, profileOpts) {
   var lastAnalyseDayKeys = [];
   /** Probe windows used for the most recent backtest (for trade chart markers). */
   var lastAnalyseProbeMs = null;
+  var lastAnalyseStopAfterConsecutiveLosses = 0;
   var lastBacktestReport = null;
   var profilesApi = initBacktestProfiles(
     Object.assign({}, profileOpts || {}, {
@@ -1498,7 +1499,12 @@ export function initTestRules(socket, state, log, profileOpts) {
       ' &nbsp;|&nbsp; <span class="text-slate-500">Exit</span> ' + formatTimeWithTz(new Date(trade.exitTs).toISOString()) + ' @ ' + (trade.exitPrice != null ? Number(trade.exitPrice).toFixed(2) : '—') + '</div>' +
       '<div><span class="text-slate-500">P/L</span> <span class="' + pnlClass + '">' + pnlStr + '</span>' +
       ' &nbsp;|&nbsp; <span class="text-slate-500">Duration</span> ' + dur +
-      ' &nbsp;|&nbsp; <span class="text-slate-500">Close</span> ' + exitReasonLabel(trade.exitReason) + '</div>';
+      ' &nbsp;|&nbsp; <span class="text-slate-500">Close</span> ' + exitReasonLabel(trade.exitReason) + '</div>' +
+      (trade.lossInsight && (trade.profitLoss || 0) < 0
+        ? '<div class="mt-1 text-[11px] text-slate-500 leading-snug"><span class="text-slate-600">Risk note (this recording):</span> ' +
+          escapeHtml(trade.lossInsight) +
+          '</div>'
+        : '');
     if (tradeChartModalRules) {
       tradeChartModalRules.classList.remove('hidden');
       if (trade.entryRules && trade.entryRules.length > 0) {
@@ -1725,9 +1731,80 @@ export function initTestRules(socket, state, log, profileOpts) {
     });
   }
 
+  /** Europe/London trade day (matches server recording / backtest). */
   function dayKeyFromTs(ts) {
-    var d = new Date(ts);
-    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    return recordingDayKeyFromTs(ts);
+  }
+
+  function medianOfValues(values) {
+    if (!values.length) return 0;
+    var sorted = values.slice().sort(function (a, b) { return a - b; });
+    var mid = Math.floor(sorted.length / 2);
+    if (sorted.length % 2 === 1) return sorted[mid];
+    return (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+
+  /** Recompute daily stats from analysedDays when loading an older saved profile. */
+  function deriveDailyStatsFromAnalysedDays(analysedDays, stopAfterConsecutiveLosses, consecutiveLossHaltDays) {
+    if (!analysedDays || analysedDays.length === 0) return null;
+    var totalDays = analysedDays.length;
+    var winningDays = 0;
+    var losingDays = 0;
+    var breakevenDays = 0;
+    var noTradeDays = 0;
+    var pls = [];
+    var bestDay = { day: '—', totalGainLoss: 0 };
+    var worstDay = { day: '—', totalGainLoss: 0 };
+    var bestSet = false;
+    var worstSet = false;
+    for (var i = 0; i < analysedDays.length; i++) {
+      var d = analysedDays[i];
+      var pl = d.totalGainLoss || 0;
+      pls.push(pl);
+      if (!d.tradeCount) noTradeDays += 1;
+      else if (pl > 0) winningDays += 1;
+      else if (pl < 0) losingDays += 1;
+      else breakevenDays += 1;
+      if (!bestSet || pl > bestDay.totalGainLoss) {
+        bestDay = { day: d.day, totalGainLoss: pl, totalGainLossPounds: d.totalGainLossPounds };
+        bestSet = true;
+      }
+      if (!worstSet || pl < worstDay.totalGainLoss) {
+        worstDay = { day: d.day, totalGainLoss: pl, totalGainLossPounds: d.totalGainLossPounds };
+        worstSet = true;
+      }
+    }
+    var totalPl = pls.reduce(function (s, v) { return s + v; }, 0);
+    var avgPnlPerDay = totalDays > 0 ? totalPl / totalDays : 0;
+    var medianDayPnl = medianOfValues(pls);
+    var streak = stopAfterConsecutiveLosses != null ? stopAfterConsecutiveLosses : 0;
+    return {
+      winningDays: winningDays,
+      losingDays: losingDays,
+      breakevenDays: breakevenDays,
+      noTradeDays: noTradeDays,
+      totalDays: totalDays,
+      avgPnlPerDay: avgPnlPerDay,
+      pctLosingDays: totalDays > 0 ? (losingDays / totalDays) * 100 : 0,
+      medianDayPnl: medianDayPnl,
+      bestDay: bestDay,
+      worstDay: worstDay,
+      consecutiveLossHaltDays: streak > 0 ? (consecutiveLossHaltDays != null ? consecutiveLossHaltDays : null) : null
+    };
+  }
+
+  function formatReportPnlValue(val, usePounds, mult) {
+    if (val == null || isNaN(val)) return '—';
+    if (usePounds) {
+      var v = val * mult;
+      return (v >= 0 ? '+' : '') + v.toFixed(2) + ' $';
+    }
+    return (val >= 0 ? '+' : '') + val.toFixed(2) + ' pts';
+  }
+
+  function formatDayHighlight(h, usePounds, mult) {
+    if (!h || !h.day || h.day === '—') return '—';
+    return h.day + ' · ' + formatReportPnlValue(h.totalGainLoss, usePounds, mult);
   }
 
   function renderTradeRowHtml(t, idx, dayPrefix) {
@@ -1743,10 +1820,18 @@ export function initTestRules(socket, state, log, profileOpts) {
     var tag = er === 'tp' ? 'TP' : er === 'sl' ? 'SL' : er === 'dsl' ? 'DynSL' : er === 'rules' ? 'Rules' : er === 'forcedClose' ? 'Forced' : er === 'endOfPeriod' ? 'EOD' : '';
     var tagHtml = tag ? ' <span class="text-slate-500" title="Close reason">' + tag + '</span>' : '';
     var dayStr = dayPrefix ? '<span class="text-slate-500">' + escapeHtml(dayPrefix) + '</span> ' : '';
+    var insightHtml = '';
+    if (t.lossInsight && (t.profitLoss || 0) < 0) {
+      insightHtml =
+        '<div class="text-[10px] text-slate-500 leading-snug pl-0.5 mt-0.5" data-tooltip="Path on this recording only — not a parameter recommendation">' +
+        escapeHtml(t.lossInsight) +
+        '</div>';
+    }
     return (
       '<li class="cursor-pointer rounded px-1 -mx-1 py-0.5 hover:bg-slate-800/60 focus:outline-none focus:ring-1 focus:ring-sky-500/50" data-trade-index="' +
       idx +
       '" role="button" tabindex="0" title="Click for entry/exit chart">' +
+      '<div>' +
       dayStr +
       entryTime +
       ' \u2192 ' +
@@ -1760,6 +1845,8 @@ export function initTestRules(socket, state, log, profileOpts) {
       unit +
       '</span>' +
       tagHtml +
+      '</div>' +
+      insightHtml +
       '</li>'
     );
   }
@@ -1796,7 +1883,7 @@ export function initTestRules(socket, state, log, profileOpts) {
     var trades = Array.isArray(report.trades) ? report.trades : [];
     var byDay = Object.create(null);
     for (var i = 0; i < trades.length; i++) {
-      var dk = dayKeyFromTs(trades[i].entryTs);
+      var dk = dayKeyFromTs(trades[i].exitTs);
       if (!byDay[dk]) byDay[dk] = [];
       byDay[dk].push(trades[i]);
     }
@@ -1887,7 +1974,7 @@ export function initTestRules(socket, state, log, profileOpts) {
     } else if (lastAnalysedDays.length > 0) {
       var byDay = Object.create(null);
       for (var i = 0; i < trades.length; i++) {
-        var dk = dayKeyFromTs(trades[i].entryTs);
+        var dk = dayKeyFromTs(trades[i].exitTs);
         if (!byDay[dk]) byDay[dk] = [];
         byDay[dk].push({ trade: trades[i], idx: i });
       }
@@ -1955,6 +2042,41 @@ export function initTestRules(socket, state, log, profileOpts) {
     ];
     if (r.daysAnalysed != null && r.daysAnalysed > 0) {
       rows.push(['Days', String(r.daysAnalysed)]);
+    }
+    var usePoundsReport = r.totalGainLossPounds != null;
+    var plMultReport =
+      usePoundsReport && r.totalGainLoss != null && r.totalGainLoss !== 0
+        ? r.totalGainLossPounds / r.totalGainLoss
+        : 1;
+    var dailyStats = r.dailyStats;
+    if (!dailyStats && r.analysedDays && r.analysedDays.length > 0) {
+      dailyStats = deriveDailyStatsFromAnalysedDays(
+        r.analysedDays,
+        lastAnalyseStopAfterConsecutiveLosses,
+        r.consecutiveLossHaltDays
+      );
+    }
+    if (dailyStats) {
+      rows.push(['Winning days', String(dailyStats.winningDays)]);
+      rows.push(['Losing days', String(dailyStats.losingDays)]);
+      rows.push(['Breakeven days', String(dailyStats.breakevenDays)]);
+      rows.push(['No-trade days', String(dailyStats.noTradeDays)]);
+      rows.push(['Losing days %', dailyStats.pctLosingDays != null ? dailyStats.pctLosingDays.toFixed(1) + '%' : '—']);
+      rows.push([
+        'Avg P/L / day',
+        formatReportPnlValue(dailyStats.avgPnlPerDay, usePoundsReport, plMultReport)
+      ]);
+      rows.push([
+        'Median P/L / day',
+        formatReportPnlValue(dailyStats.medianDayPnl, usePoundsReport, plMultReport)
+      ]);
+      rows.push(['Best day', formatDayHighlight(dailyStats.bestDay, usePoundsReport, plMultReport)]);
+      rows.push(['Worst day', formatDayHighlight(dailyStats.worstDay, usePoundsReport, plMultReport)]);
+      var haltTxt =
+        dailyStats.consecutiveLossHaltDays == null
+          ? '—'
+          : String(dailyStats.consecutiveLossHaltDays);
+      rows.push(['Days halted (loss streak)', haltTxt]);
     }
     if (r.closeReasonCounts) {
       var c = r.closeReasonCounts;
@@ -2478,6 +2600,15 @@ export function initTestRules(socket, state, log, profileOpts) {
 
   var deleteDaysPending = false;
 
+  function setDeleteDaysUiBusy(busy) {
+    if (deleteSelectedDaysBtn) deleteSelectedDaysBtn.disabled = busy;
+    if (loadDaysBtn) loadDaysBtn.disabled = busy;
+    if (selectAllDaysBtn) selectAllDaysBtn.disabled = busy;
+    if (clearDaysBtn) clearDaysBtn.disabled = busy;
+    if (pruneBtn) pruneBtn.disabled = busy;
+    if (pruneGapBtn) pruneGapBtn.disabled = busy;
+  }
+
   function showDeleteDaysProgress(message) {
     deleteDaysPending = true;
     if (deleteDaysProgressModal) {
@@ -2487,7 +2618,7 @@ export function initTestRules(socket, state, log, profileOpts) {
     if (deleteDaysProgressText) {
       deleteDaysProgressText.textContent = message || 'Removing selected days…';
     }
-    if (deleteSelectedDaysBtn) deleteSelectedDaysBtn.disabled = true;
+    setDeleteDaysUiBusy(true);
   }
 
   function hideDeleteDaysProgress() {
@@ -2496,7 +2627,7 @@ export function initTestRules(socket, state, log, profileOpts) {
       deleteDaysProgressModal.classList.add('hidden');
       deleteDaysProgressModal.setAttribute('aria-hidden', 'true');
     }
-    if (deleteSelectedDaysBtn) deleteSelectedDaysBtn.disabled = false;
+    setDeleteDaysUiBusy(false);
   }
 
   function getEpicDisplayName(epic) {
@@ -2639,6 +2770,7 @@ export function initTestRules(socket, state, log, profileOpts) {
   }
 
   socket.on('recorded_days', function (data) {
+    if (deleteDaysPending) hideDeleteDaysProgress();
     if (loadDaysPending) hideLoadDaysProgress();
     if (data && (data.dayStats || data.days)) {
       var stats = data.dayStats || (data.days || []).map(function (d) { return { day: d }; });
@@ -2705,9 +2837,21 @@ export function initTestRules(socket, state, log, profileOpts) {
       }
       appendLog('Deleting ' + selected.length + ' day(s)…');
       showDeleteDaysProgress('Deleting ' + selected.length + ' day(s)…');
-      socket.emit('delete_recorded_days', { items: selected });
+      // Paint modal before socket work (large deletes can block server for several seconds).
+      requestAnimationFrame(function () {
+        socket.emit('delete_recorded_days', { items: selected });
+      });
     });
   }
+
+  socket.on('delete_recorded_days_started', function (data) {
+    if (!deleteDaysPending) return;
+    var n = data && data.itemCount != null ? data.itemCount : '';
+    if (deleteDaysProgressText) {
+      deleteDaysProgressText.textContent =
+        n !== '' ? 'Removing ' + n + ' day(s) from database…' : 'Removing selected days from database…';
+    }
+  });
 
   if (pruneBtn) {
     pruneBtn.addEventListener('click', function () {
@@ -2756,12 +2900,17 @@ export function initTestRules(socket, state, log, profileOpts) {
   });
 
   socket.on('delete_recorded_days_result', function (data) {
-    hideDeleteDaysProgress();
     if (data && data.error) {
+      hideDeleteDaysProgress();
       appendLog('Delete failed: ' + data.error);
-    } else if (data) {
+      return;
+    }
+    if (data) {
       appendLog('Deleted ' + (data.deleted || 0).toLocaleString() + ' samples from ' + (data.daysRemoved || []).length + ' day(s)');
       if (data.recordedCount != null) updateRecordedCount(data.recordedCount);
+      if (deleteDaysProgressText) {
+        deleteDaysProgressText.textContent = 'Refreshing day list…';
+      }
       socket.emit('get_recorded_days', '');
     }
   });
@@ -2855,6 +3004,8 @@ export function initTestRules(socket, state, log, profileOpts) {
       lastAnalyseEpic = epic;
       lastAnalyseSelectedDays = selectedDays.slice().sort();
       lastAnalyseProbeMs = probeMsFromCfg(cfg);
+      lastAnalyseStopAfterConsecutiveLosses =
+        resolveStopAfterConsecutiveLossesFromEngineControls(cfg.engineControls) || 0;
       var marketSnap =
         profilesApi.getActiveBacktestMarketSnapshot && profilesApi.getActiveBacktestMarketSnapshot(epic);
       socket.emit('analyse_recording', {

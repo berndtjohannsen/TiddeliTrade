@@ -34,6 +34,7 @@ import {
   advanceTrailingStopSim,
   createTrailingStopSimState,
   isTrailingStopHit,
+  unrealizedProfit,
   type TrailingStopSimState,
 } from './dynamicStopLoss';
 
@@ -610,6 +611,104 @@ export interface BacktestTrade {
   exitReason?: ExitReason;
   /** Rules that had to pass for this entry (snapshot at open). Omitted when empty/legacy edge cases. */
   entryRules?: BacktestTradeRuleLine[];
+  /** Per-trade SL/DSL path note (losing trades only; simulated recording). */
+  lossInsight?: string;
+}
+
+/** Excursion while a position was open (deal currency for peaks; used for loss insight). */
+export interface TradeExcursionSnapshot {
+  maxUnrealizedDeal: number;
+  minUnrealizedDeal: number;
+  dslEnabled: boolean;
+  dslTriggerReached: boolean;
+  dslTriggerProfit: number | null;
+  dslLockProfit: number | null;
+  hadFixedSl: boolean;
+}
+
+function fmtDealCurrency(v: number): string {
+  return (v >= 0 ? '+' : '') + v.toFixed(2);
+}
+
+/** One short hint for a losing trade — SL/DSL only, no counterfactual parameter search. */
+export function buildLossRiskInsight(
+  trade: Pick<BacktestTrade, 'profitLoss' | 'exitReason'>,
+  ex: TradeExcursionSnapshot
+): string {
+  if (trade.profitLoss >= 0) return '';
+  const peak = fmtDealCurrency(ex.maxUnrealizedDeal);
+  const worst = fmtDealCurrency(ex.minUnrealizedDeal);
+  const reason = trade.exitReason ?? 'unknown';
+
+  if (reason === 'sl') {
+    if (!ex.dslEnabled) {
+      return `Fixed stop loss hit. Dynamic stop loss was off. Peak unrealized ${peak} (deal currency, this recording).`;
+    }
+    if (!ex.dslTriggerReached) {
+      const trig = ex.dslTriggerProfit != null ? ex.dslTriggerProfit.toFixed(2) : '?';
+      return `Fixed stop hit before trailing armed (peak ${peak} was below DSL trigger ${trig}).`;
+    }
+    return `Stop loss hit (trailing had armed; peak ${peak}).`;
+  }
+
+  if (reason === 'dsl') {
+    const trig = ex.dslTriggerProfit != null ? ex.dslTriggerProfit.toFixed(2) : '?';
+    return `Dynamic trailing stop closed the trade (peak ${peak}, trigger ${trig}).`;
+  }
+
+  if (reason === 'rules' || reason === 'forcedClose' || reason === 'endOfPeriod') {
+    const closeLabel =
+      reason === 'rules' ? 'Rules no longer passed' : reason === 'forcedClose' ? 'Forced close time' : 'End of period';
+    if (ex.hadFixedSl || ex.dslEnabled) {
+      const parts = [`${closeLabel} with loss — stop not hit on this path. Peak ${peak}, worst ${worst}.`];
+      if (ex.dslEnabled && !ex.dslTriggerReached && ex.dslTriggerProfit != null) {
+        parts.push(`Trailing never armed (trigger ${ex.dslTriggerProfit.toFixed(2)}).`);
+      }
+      return parts.join(' ');
+    }
+    return `${closeLabel} with loss. Peak ${peak}, worst ${worst} (no SL/DSL on this side).`;
+  }
+
+  return `Loss on close (${reason}). Peak ${peak}, worst ${worst}.`;
+}
+
+function excursionSnapshotFromPosition(pos: {
+  direction: 'BUY' | 'SELL';
+  entryPrice: number;
+  size: number;
+  contractSize: number;
+  maxUnrealizedDeal: number;
+  minUnrealizedDeal: number;
+  dslSettings: DynamicStopLossSettings | null;
+  hadFixedSl: boolean;
+  trailing: TrailingStopSimState | null;
+}): TradeExcursionSnapshot {
+  return {
+    maxUnrealizedDeal: pos.maxUnrealizedDeal,
+    minUnrealizedDeal: pos.minUnrealizedDeal,
+    dslEnabled: pos.dslSettings != null,
+    dslTriggerReached: pos.trailing?.triggerReached ?? false,
+    dslTriggerProfit: pos.dslSettings?.triggerProfit ?? null,
+    dslLockProfit: pos.dslSettings?.lockProfit ?? null,
+    hadFixedSl: pos.hadFixedSl,
+  };
+}
+
+function updatePositionExcursion(
+  pos: {
+    direction: 'BUY' | 'SELL';
+    entryPrice: number;
+    size: number;
+    contractSize: number;
+    maxUnrealizedDeal: number;
+    minUnrealizedDeal: number;
+  },
+  bid: number,
+  offer: number
+): void {
+  const u = unrealizedProfit(pos.direction, pos.entryPrice, pos.size, pos.contractSize, bid, offer);
+  if (u > pos.maxUnrealizedDeal) pos.maxUnrealizedDeal = u;
+  if (u < pos.minUnrealizedDeal) pos.minUnrealizedDeal = u;
 }
 
 export interface CloseReasonCounts {
@@ -629,6 +728,30 @@ export interface BacktestDaySummary {
   totalGainLossPounds?: number;
   /** Present when the day was in the selection but had no recorded samples. */
   status?: 'noSamples';
+}
+
+export interface BacktestDayHighlight {
+  day: string;
+  totalGainLoss: number;
+  totalGainLossPounds?: number;
+}
+
+/** Aggregated calendar-day metrics (Europe/London trade days in the selection). */
+export interface BacktestDailyStats {
+  winningDays: number;
+  losingDays: number;
+  breakevenDays: number;
+  noTradeDays: number;
+  totalDays: number;
+  avgPnlPerDay: number;
+  avgPnlPerDayPounds?: number;
+  pctLosingDays: number;
+  medianDayPnl: number;
+  medianDayPnlPounds?: number;
+  bestDay: BacktestDayHighlight;
+  worstDay: BacktestDayHighlight;
+  /** null when stopAfterConsecutiveLosses is 0 (UI shows "—"). */
+  consecutiveLossHaltDays: number | null;
 }
 
 export interface BacktestReport {
@@ -661,6 +784,10 @@ export interface BacktestReport {
   dynamicStopLossNote?: string;
   /** One row per calendar day included in this analysis run. */
   analysedDays?: BacktestDaySummary[];
+  /** Win/loss/breakeven days, avg/median day P/L, best/worst day, loss-streak halts. */
+  dailyStats?: BacktestDailyStats;
+  /** Days where consecutive-loss rule halted trading (sum across per-day runs). */
+  consecutiveLossHaltDays?: number;
   /** Warnings when in-market probe windows are empty or sparse (end-of-run snapshot). */
   probeCoverageWarnings?: string[];
 }
@@ -737,6 +864,128 @@ export function dayKeyFromTimestamp(ts: number): string {
   return getDayKey(ts);
 }
 
+/** Per-day P/L from closed trades attributed to Europe/London day of exit (trade day). */
+export function buildAnalysedDaySummariesFromTrades(
+  days: string[],
+  trades: BacktestTrade[],
+  pnlDenom: number,
+  sampleCountForDay?: (day: string) => number
+): BacktestDaySummary[] {
+  const tradesByDay = new Map<string, BacktestTrade[]>();
+  for (const t of trades) {
+    const day = dayKeyFromTimestamp(t.exitTs);
+    const list = tradesByDay.get(day);
+    if (list) list.push(t);
+    else tradesByDay.set(day, [t]);
+  }
+  return days.map((day) => {
+    const sampleCount = sampleCountForDay ? sampleCountForDay(day) : 0;
+    const dayTrades = tradesByDay.get(day) ?? [];
+    const totalGainLoss = dayTrades.reduce((sum, tr) => sum + tr.profitLoss, 0);
+    return {
+      day,
+      sampleCount,
+      tradeCount: dayTrades.length,
+      totalGainLoss,
+      totalGainLossPounds: pnlDenom > 0 ? totalGainLoss * pnlDenom : undefined,
+      ...(sampleCount === 0 ? { status: 'noSamples' as const } : {}),
+    };
+  });
+}
+
+function medianOf(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = values.slice().sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 1) return sorted[mid];
+  return (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+export function computeDailyStats(
+  analysedDays: BacktestDaySummary[],
+  consecutiveLossHaltDays: number,
+  stopAfterConsecutiveLosses: number,
+  pnlDenom: number
+): BacktestDailyStats {
+  const totalDays = analysedDays.length;
+  let winningDays = 0;
+  let losingDays = 0;
+  let breakevenDays = 0;
+  let noTradeDays = 0;
+  const pls: number[] = [];
+  let bestDay: BacktestDayHighlight = { day: '—', totalGainLoss: 0 };
+  let worstDay: BacktestDayHighlight = { day: '—', totalGainLoss: 0 };
+  let bestSet = false;
+  let worstSet = false;
+
+  for (const d of analysedDays) {
+    const pl = d.totalGainLoss;
+    pls.push(pl);
+    if (d.tradeCount === 0) noTradeDays += 1;
+    else if (pl > 0) winningDays += 1;
+    else if (pl < 0) losingDays += 1;
+    else breakevenDays += 1;
+
+    const highlight: BacktestDayHighlight = {
+      day: d.day,
+      totalGainLoss: pl,
+      totalGainLossPounds: pnlDenom > 0 ? pl * pnlDenom : undefined,
+    };
+    if (!bestSet || pl > bestDay.totalGainLoss) {
+      bestDay = highlight;
+      bestSet = true;
+    }
+    if (!worstSet || pl < worstDay.totalGainLoss) {
+      worstDay = highlight;
+      worstSet = true;
+    }
+  }
+
+  const totalPl = pls.reduce((sum, v) => sum + v, 0);
+  const avgPnlPerDay = totalDays > 0 ? totalPl / totalDays : 0;
+  const medianDayPnl = medianOf(pls);
+  const pctLosingDays = totalDays > 0 ? (losingDays / totalDays) * 100 : 0;
+
+  return {
+    winningDays,
+    losingDays,
+    breakevenDays,
+    noTradeDays,
+    totalDays,
+    avgPnlPerDay,
+    avgPnlPerDayPounds: pnlDenom > 0 ? avgPnlPerDay * pnlDenom : undefined,
+    pctLosingDays,
+    medianDayPnl,
+    medianDayPnlPounds: pnlDenom > 0 ? medianDayPnl * pnlDenom : undefined,
+    bestDay,
+    worstDay,
+    consecutiveLossHaltDays: stopAfterConsecutiveLosses > 0 ? consecutiveLossHaltDays : null,
+  };
+}
+
+function attachDayAnalytics(
+  report: BacktestReport,
+  config: BacktestConfig,
+  selectedDays: string[],
+  consecutiveLossHaltDays: number,
+  sampleCountForDay?: (day: string) => number
+): BacktestReport {
+  const size = parseFloat(config.dealSize || '1') || 1;
+  const contractSize = config.contractSize != null && config.contractSize > 0 ? config.contractSize : 1;
+  const pnlDenom = size * contractSize;
+  const analysedDays =
+    report.analysedDays ??
+    buildAnalysedDaySummariesFromTrades(selectedDays, report.trades, pnlDenom, sampleCountForDay);
+  const streak = config.stopAfterConsecutiveLosses ?? 0;
+  const dailyStats = computeDailyStats(analysedDays, consecutiveLossHaltDays, streak, pnlDenom);
+  return {
+    ...report,
+    analysedDays,
+    consecutiveLossHaltDays,
+    dailyStats,
+  };
+}
+
 /** Run backtest per day (no interday positions), then aggregate. Each day is independent. */
 export function runBacktestPerDay(
   samples: RecordedSample[],
@@ -758,6 +1007,7 @@ export function runBacktestPerDay(
   let startTs = 0;
   let endTs = 0;
   const blockerAggregate = new Map<string, number>();
+  let consecutiveLossHaltDays = 0;
 
   for (let i = 0; i < days.length; i++) {
     const day = days[i];
@@ -768,6 +1018,7 @@ export function runBacktestPerDay(
       totalGainLoss += report.totalGainLoss;
       totalSamples += report.sampleCount;
       openAtEndTotal += report.openAtEnd ?? 0;
+      consecutiveLossHaltDays += report.consecutiveLossHaltDays ?? 0;
       if (report.ruleBlockerCounts) {
         for (const b of report.ruleBlockerCounts) {
           const k = blockerRowKey(b);
@@ -821,10 +1072,12 @@ export function runBacktestPerDay(
     daysAnalysed: days.length,
     closeReasonCounts,
     ruleBlockerCounts: ruleBlockerCounts.length > 0 ? ruleBlockerCounts : undefined,
+    consecutiveLossHaltDays,
     ...dslMeta,
   };
   const probeHistory = buildProbeHistoryForCoverage(samples, config);
-  return attachProbeCoverageWarnings(report, probeHistory, config, endTs);
+  const withCoverage = attachProbeCoverageWarnings(report, probeHistory, config, endTs);
+  return attachDayAnalytics(withCoverage, config, days, consecutiveLossHaltDays, (day) => byDay.get(day)?.length ?? 0);
 }
 
 /** Group sorted days into consecutive blocks. Returns array of day arrays. */
@@ -877,6 +1130,7 @@ export function runBacktestCarryOver(
   let endTs = 0;
   const blockerAggregate = new Map<string, number>();
   let daysProcessed = 0;
+  let consecutiveLossHaltDays = 0;
   onDayProgress?.(0, totalDays);
 
   for (const blockDays of blocks) {
@@ -895,6 +1149,7 @@ export function runBacktestCarryOver(
     totalGainLoss += report.totalGainLoss;
     totalSamples += report.sampleCount;
     openAtEndTotal += report.openAtEnd ?? 0;
+    consecutiveLossHaltDays += report.consecutiveLossHaltDays ?? 0;
     if (report.ruleBlockerCounts) {
       for (const b of report.ruleBlockerCounts) {
         const k = blockerRowKey(b);
@@ -947,10 +1202,12 @@ export function runBacktestCarryOver(
     closeReasonCounts,
     nonConsecutiveWarning,
     ruleBlockerCounts: ruleBlockerCounts.length > 0 ? ruleBlockerCounts : undefined,
+    consecutiveLossHaltDays,
     ...dslMeta,
   };
   const probeHistory = buildProbeHistoryForCoverage(samples, config);
-  return attachProbeCoverageWarnings(report, probeHistory, config, endTs);
+  const withCoverage = attachProbeCoverageWarnings(report, probeHistory, config, endTs);
+  return attachDayAnalytics(withCoverage, config, days, consecutiveLossHaltDays, (day) => byDay.get(day)?.length ?? 0);
 }
 
 /** Async version: yields between days to prevent event-loop blocking and allow GC. */
@@ -974,6 +1231,7 @@ export function runBacktestPerDayAsync(
   let startTs = 0;
   let endTs = 0;
   const blockerAggregate = new Map<string, number>();
+  let consecutiveLossHaltDays = 0;
 
   function processDay(index: number): void {
     if (index >= days.length) {
@@ -1001,9 +1259,11 @@ export function runBacktestPerDayAsync(
         openAtEnd: openAtEndTotal,
         daysAnalysed: days.length,
         ruleBlockerCounts: ruleBlockerCounts.length > 0 ? ruleBlockerCounts : undefined,
+        consecutiveLossHaltDays,
       };
       const probeHistory = buildProbeHistoryForCoverage(samples, config);
-      done(attachProbeCoverageWarnings(asyncReport, probeHistory, config, endTs));
+      const withCoverage = attachProbeCoverageWarnings(asyncReport, probeHistory, config, endTs);
+      done(attachDayAnalytics(withCoverage, config, days, consecutiveLossHaltDays, (d) => byDay.get(d)?.length ?? 0));
       return;
     }
     const day = days[index];
@@ -1015,6 +1275,7 @@ export function runBacktestPerDayAsync(
         totalGainLoss += report.totalGainLoss;
         totalSamples += report.sampleCount;
         openAtEndTotal += report.openAtEnd ?? 0;
+        consecutiveLossHaltDays += report.consecutiveLossHaltDays ?? 0;
         if (report.ruleBlockerCounts) {
           for (const b of report.ruleBlockerCounts) {
             const k = blockerRowKey(b);
@@ -1107,6 +1368,12 @@ export function runBacktest(
     direction: 'BUY' | 'SELL';
     entryTs: number;
     entryPrice: number;
+    size: number;
+    contractSize: number;
+    maxUnrealizedDeal: number;
+    minUnrealizedDeal: number;
+    dslSettings: DynamicStopLossSettings | null;
+    hadFixedSl: boolean;
     ruleSet: RuleSetConfig | null;
     entryRulesSnapshot: BacktestTradeRuleLine[];
     trailing: TrailingStopSimState | null;
@@ -1118,6 +1385,8 @@ export function runBacktest(
   let consecutiveLossCount = 0;
   let lossStreakDayKey: string | null = null;
   let prevLoopDayKey: string | null = null;
+  let consecutiveLossHaltDays = 0;
+  const lossHaltDaysRecorded = new Set<string>();
 
   function resetLossHandlingForNewDay(): void {
     buyStoppedAfterLoss = false;
@@ -1159,6 +1428,10 @@ export function runBacktest(
       if (consecutiveLossCount >= streakLimit) {
         buyStoppedAfterLoss = true;
         sellStoppedAfterLoss = true;
+        if (!lossHaltDaysRecorded.has(closeDayKey)) {
+          lossHaltDaysRecorded.add(closeDayKey);
+          consecutiveLossHaltDays += 1;
+        }
         return;
       }
     }
@@ -1169,7 +1442,10 @@ export function runBacktest(
     pausedUntilTs = trade.exitTs + seconds * 1000;
   }
 
-  function recordTrade(trade: BacktestTrade): void {
+  function recordTrade(trade: BacktestTrade, excursion?: TradeExcursionSnapshot): void {
+    if (trade.profitLoss < 0 && excursion) {
+      trade.lossInsight = buildLossRiskInsight(trade, excursion);
+    }
     trades.push(trade);
     onTradeClosed(trade);
   }
@@ -1246,6 +1522,9 @@ export function runBacktest(
     }
 
     reportSampleProgress(i + 1);
+    if (openPosition) {
+      updatePositionExcursion(openPosition, s.bid, s.offer);
+    }
     const mid = (s.bid + s.offer) / 2;
     const sample: BacktestPriceSample = { ts: s.ts, mid, spread: s.spread, probeEligible: probeEligibleFlags[i] };
 
@@ -1344,6 +1623,7 @@ export function runBacktest(
             openPosition.direction === 'BUY'
               ? stop - openPosition.entryPrice
               : openPosition.entryPrice - stop;
+          const posSnap = excursionSnapshotFromPosition(openPosition);
           recordTrade({
             direction: openPosition.direction,
             entryTs: openPosition.entryTs,
@@ -1353,7 +1633,7 @@ export function runBacktest(
             profitLoss: pnl,
             exitReason: openPosition.trailing.triggerReached ? 'dsl' : 'sl',
             entryRules: er,
-          });
+          }, posSnap);
           openPosition = null;
           closedByTpSl = true;
         }
@@ -1387,6 +1667,7 @@ export function runBacktest(
         closedByTpSl = true;
       } else if (slLevel != null && openPosition.direction === 'BUY' && exitBid <= slLevel) {
         const pnl = slLevel - openPosition.entryPrice;
+        const posSnapSl = excursionSnapshotFromPosition(openPosition);
         recordTrade({
           direction: openPosition.direction,
           entryTs: openPosition.entryTs,
@@ -1396,11 +1677,12 @@ export function runBacktest(
           profitLoss: pnl,
           exitReason: 'sl',
           entryRules: er,
-        });
+        }, posSnapSl);
         openPosition = null;
         closedByTpSl = true;
       } else if (slLevel != null && openPosition.direction === 'SELL' && exitOffer >= slLevel) {
         const pnl = openPosition.entryPrice - slLevel;
+        const posSnapSl2 = excursionSnapshotFromPosition(openPosition);
         recordTrade({
           direction: openPosition.direction,
           entryTs: openPosition.entryTs,
@@ -1410,7 +1692,7 @@ export function runBacktest(
           profitLoss: pnl,
           exitReason: 'sl',
           entryRules: er,
-        });
+        }, posSnapSl2);
         openPosition = null;
         closedByTpSl = true;
       }
@@ -1433,6 +1715,7 @@ export function runBacktest(
           const pnl = pos.direction === 'BUY'
             ? (s.bid - pos.entryPrice)
             : (pos.entryPrice - s.offer);
+          const posSnapFc = excursionSnapshotFromPosition(pos);
           recordTrade({
             direction: pos.direction,
             entryTs: pos.entryTs,
@@ -1442,7 +1725,7 @@ export function runBacktest(
             profitLoss: pnl,
             exitReason: 'forcedClose',
             entryRules: er,
-          });
+          }, posSnapFc);
           openPosition = null;
           prevRulesPass = false;
           prevBlocked = false;
@@ -1464,6 +1747,7 @@ export function runBacktest(
       const pnl = openPosition.direction === 'BUY'
         ? (s.bid - entryPrice)
         : (entryPrice - s.offer);
+      const posSnapRules = excursionSnapshotFromPosition(openPosition);
       recordTrade({
         direction: openPosition.direction,
         entryTs: openPosition.entryTs,
@@ -1473,7 +1757,7 @@ export function runBacktest(
         profitLoss: pnl,
         exitReason: 'rules',
         entryRules: openPosition.entryRulesSnapshot.length > 0 ? openPosition.entryRulesSnapshot : undefined,
-      });
+      }, posSnapRules);
       openPosition = null;
     }
 
@@ -1482,12 +1766,14 @@ export function runBacktest(
       const direction = triggeredRuleSet ? triggeredRuleSet.direction : legacyDirection;
       const entryPrice = direction === 'BUY' ? s.offer : s.bid;
       const dslSettings = getDynamicSlSettings(config, direction);
+      const tpSlOpen = { ...config, ...getTpSlConfig(triggeredRuleSet, config) };
+      if (dslSettings) tpSlOpen.takeProfit = null;
+      const size = parseFloat(tpSlOpen.dealSize || config.dealSize || '1') || 1;
+      const contractSize = (config.contractSize != null && config.contractSize > 0) ? config.contractSize : 1;
+      const { slLevel } = getTpSlLevels(entryPrice, direction, tpSlOpen);
+      const hadFixedSl = slLevel != null && !isNaN(slLevel);
       let trailing: TrailingStopSimState | null = null;
       if (dslSettings) {
-        const tpSlOpen = { ...config, ...getTpSlConfig(triggeredRuleSet, config), takeProfit: null };
-        const size = parseFloat(tpSlOpen.dealSize || config.dealSize || '1') || 1;
-        const contractSize = (config.contractSize != null && config.contractSize > 0) ? config.contractSize : 1;
-        const { slLevel } = getTpSlLevels(entryPrice, direction, tpSlOpen);
         trailing = createTrailingStopSimState(
           direction,
           entryPrice,
@@ -1497,10 +1783,17 @@ export function runBacktest(
           slLevel
         );
       }
+      const u0 = unrealizedProfit(direction, entryPrice, size, contractSize, s.bid, s.offer);
       openPosition = {
         direction,
         entryTs: s.ts,
         entryPrice,
+        size,
+        contractSize,
+        maxUnrealizedDeal: u0,
+        minUnrealizedDeal: u0,
+        dslSettings,
+        hadFixedSl,
         ruleSet: triggeredRuleSet,
         entryRulesSnapshot: snapshotEntryRules(triggeredRuleSet, ctx),
         trailing,
@@ -1519,6 +1812,8 @@ export function runBacktest(
     const pnl = openPosition.direction === 'BUY'
       ? (last.bid - openPosition.entryPrice)
       : (openPosition.entryPrice - last.offer);
+    updatePositionExcursion(openPosition, last.bid, last.offer);
+    const posSnapEod = excursionSnapshotFromPosition(openPosition);
     recordTrade({
       direction: openPosition.direction,
       entryTs: openPosition.entryTs,
@@ -1528,7 +1823,7 @@ export function runBacktest(
       profitLoss: pnl,
       exitReason: 'endOfPeriod',
       entryRules: openPosition.entryRulesSnapshot.length > 0 ? openPosition.entryRulesSnapshot : undefined,
-    });
+    }, posSnapEod);
     openPosition = null;
   }
 
@@ -1578,8 +1873,24 @@ export function runBacktest(
     openAtEnd,
     closeReasonCounts,
     ruleBlockerCounts: ruleBlockerCounts.length > 0 ? ruleBlockerCounts : undefined,
+    consecutiveLossHaltDays,
     ...dslMeta,
   };
   const lastTs = samples.length > 0 ? samples[samples.length - 1].ts : 0;
-  return attachProbeCoverageWarnings(report, buildProbeHistoryForCoverage(samples, config), config, lastTs);
+  const withCoverage = attachProbeCoverageWarnings(
+    report,
+    buildProbeHistoryForCoverage(samples, config),
+    config,
+    lastTs
+  );
+  const dayKeys = new Set<string>();
+  for (const s of samples) dayKeys.add(getDayKey(s.ts));
+  const selectedDays = Array.from(dayKeys).sort();
+  return attachDayAnalytics(withCoverage, config, selectedDays, consecutiveLossHaltDays, (day) => {
+    let n = 0;
+    for (const s of samples) {
+      if (getDayKey(s.ts) === day) n += 1;
+    }
+    return n;
+  });
 }

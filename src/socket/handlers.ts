@@ -65,6 +65,8 @@ import {
   type RuleBlockerCountRow,
   type RuleSetConfig,
   buildDynamicSlReportMeta,
+  buildAnalysedDaySummariesFromTrades,
+  computeDailyStats,
   dayKeyFromTimestamp,
   isWithinScheduleWindow,
   isWeekdayInTimezone,
@@ -2294,14 +2296,24 @@ export function registerSocketHandlers(io: Server): void {
         socket.emit('delete_recorded_days_result', { error: 'Select days to delete (items or epic+days required)' });
         return;
       }
-      let totalDeleted = 0;
-      const daysRemoved: string[] = [];
-      for (const { epic, days } of toDelete) {
-        totalDeleted += deleteSamplesByDays(epic, days);
-        daysRemoved.push(...days.map((d) => d + '|' + epic));
-      }
-      invalidateRecordedCountCache();
-      socket.emit('delete_recorded_days_result', { deleted: totalDeleted, daysRemoved, recordedCount: null });
+      const itemCount = items.length > 0 ? items.length : toDelete.reduce((n, row) => n + row.days.length, 0);
+      socket.emit('delete_recorded_days_started', { itemCount });
+      // Let the client paint the wait modal before a long synchronous DB delete blocks the event loop.
+      setImmediate(() => {
+        let totalDeleted = 0;
+        const daysRemoved: string[] = [];
+        try {
+          for (const { epic, days } of toDelete) {
+            totalDeleted += deleteSamplesByDays(epic, days);
+            daysRemoved.push(...days.map((d) => d + '|' + epic));
+          }
+          invalidateRecordedCountCache();
+          socket.emit('delete_recorded_days_result', { deleted: totalDeleted, daysRemoved, recordedCount: null });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          socket.emit('delete_recorded_days_result', { error: msg });
+        }
+      });
     });
 
     socket.on('prune_sparse_days', (params: { epic: string; minCount: number }) => {
@@ -2584,31 +2596,23 @@ export function registerSocketHandlers(io: Server): void {
         return out;
       }
 
-      function buildAnalysedDaySummariesFromTrades(
-        days: string[],
-        trades: BacktestReport['trades'],
-        pnlDenom: number
-      ): BacktestDaySummary[] {
-        const tradesByDay = new Map<string, BacktestReport['trades']>();
-        for (const t of trades) {
-          const day = dayKeyFromTimestamp(t.entryTs);
-          const list = tradesByDay.get(day);
-          if (list) list.push(t);
-          else tradesByDay.set(day, [t]);
-        }
-        return days.map((day) => {
-          const sampleCount = getRecordedSamplesFiltered(epic, { days: [day] }).length;
-          const dayTrades = tradesByDay.get(day) ?? [];
-          const totalGainLoss = dayTrades.reduce((sum, tr) => sum + tr.profitLoss, 0);
-          return {
-            day,
-            sampleCount,
-            tradeCount: dayTrades.length,
-            totalGainLoss,
-            totalGainLossPounds: pnlDenom > 0 ? totalGainLoss * pnlDenom : undefined,
-            ...(sampleCount === 0 ? { status: 'noSamples' as const } : {}),
-          };
-        });
+      function enrichReportDailyAnalytics(
+        report: BacktestReport,
+        selectedDays: string[],
+        consecutiveLossHaltDays: number
+      ): BacktestReport {
+        const size = parseFloat(config.dealSize || '1') || 1;
+        const contractSize = config.contractSize != null && config.contractSize > 0 ? config.contractSize : 1;
+        const pnlDenom = size * contractSize;
+        const analysedDays = buildAnalysedDaySummariesFromTrades(
+          selectedDays,
+          report.trades ?? [],
+          pnlDenom,
+          (day) => getRecordedSamplesFiltered(epic, { days: [day] }).length
+        );
+        const streak = config.stopAfterConsecutiveLosses ?? 0;
+        const dailyStats = computeDailyStats(analysedDays, consecutiveLossHaltDays, streak, pnlDenom);
+        return { ...report, analysedDays, consecutiveLossHaltDays, dailyStats };
       }
 
       function emitFinalReport(report: BacktestReport, sampleQuality?: SampleQualityReport): void {
@@ -2673,6 +2677,7 @@ export function registerSocketHandlers(io: Server): void {
         let completedWins = 0;
         let completedLosses = 0;
         let completedTrades = 0;
+        let consecutiveLossHaltDays = 0;
         socket.emit('analyse_recording_progress', buildAnalyseProgressPayload({
           processed: 0,
           total: days.length,
@@ -2736,6 +2741,7 @@ export function registerSocketHandlers(io: Server): void {
             completedWins += dayReport.winningTrades;
             completedLosses += dayReport.losingTrades;
             completedTrades += dayReport.tradeCount;
+            consecutiveLossHaltDays += dayReport.consecutiveLossHaltDays ?? 0;
             analysedDays.push({
               day,
               sampleCount: dayReport.sampleCount,
@@ -2784,26 +2790,32 @@ export function registerSocketHandlers(io: Server): void {
         const ruleBlockerCounts = mergeBlockerAggregateMap(blockerAggregate);
         const qualitySamples = getRecordedSamplesFiltered(epic, { days });
         const sampleQuality = analyzeSampleQuality(qualitySamples);
-        emitFinalReport({
-          trades: allTrades,
-          totalGainLoss,
-          totalGainLossPounds,
-          tradeCount: allTrades.length,
-          winningTrades,
-          losingTrades,
-          winRate: allTrades.length > 0 ? (winningTrades / allTrades.length) * 100 : 0,
-          avgTradePnl: allTrades.length > 0 ? totalGainLoss / allTrades.length : 0,
-          avgTradePnlPounds,
-          sampleCount: totalSamples,
-          startTs,
-          endTs,
-          openAtEnd: openAtEndTotal,
-          daysAnalysed: days.length,
-          closeReasonCounts,
-          ruleBlockerCounts: ruleBlockerCounts.length > 0 ? ruleBlockerCounts : undefined,
-          dynamicStopLossApplied: !!(config.dynamicStopLossBuy || config.dynamicStopLossSell),
-          analysedDays,
-        }, sampleQuality);
+        emitFinalReport(
+          enrichReportDailyAnalytics(
+            {
+              trades: allTrades,
+              totalGainLoss,
+              totalGainLossPounds,
+              tradeCount: allTrades.length,
+              winningTrades,
+              losingTrades,
+              winRate: allTrades.length > 0 ? (winningTrades / allTrades.length) * 100 : 0,
+              avgTradePnl: allTrades.length > 0 ? totalGainLoss / allTrades.length : 0,
+              avgTradePnlPounds,
+              sampleCount: totalSamples,
+              startTs,
+              endTs,
+              openAtEnd: openAtEndTotal,
+              daysAnalysed: days.length,
+              closeReasonCounts,
+              ruleBlockerCounts: ruleBlockerCounts.length > 0 ? ruleBlockerCounts : undefined,
+              dynamicStopLossApplied: !!(config.dynamicStopLossBuy || config.dynamicStopLossSell),
+            },
+            days,
+            consecutiveLossHaltDays
+          ),
+          sampleQuality
+        );
         return;
       }
 
@@ -2853,6 +2865,7 @@ export function registerSocketHandlers(io: Server): void {
       let completedWins = 0;
       let completedLosses = 0;
       let completedTrades = 0;
+      let consecutiveLossHaltDays = 0;
       socket.emit('analyse_recording_progress', buildAnalyseProgressPayload({
         processed: 0,
         total: days.length,
@@ -2933,6 +2946,7 @@ export function registerSocketHandlers(io: Server): void {
         completedWins += report.winningTrades;
         completedLosses += report.losingTrades;
         completedTrades += report.tradeCount;
+        consecutiveLossHaltDays += report.consecutiveLossHaltDays ?? 0;
         daysProcessed += blockDays.length;
         socket.emit('analyse_recording_progress', buildAnalyseProgressPayload({
           processed: daysProcessed,
@@ -2972,28 +2986,33 @@ export function registerSocketHandlers(io: Server): void {
       const ruleBlockerCounts = mergeBlockerAggregateMap(blockerAggregate);
       const qualitySamples = getRecordedSamplesFiltered(epic, { days });
       const sampleQuality = analyzeSampleQuality(qualitySamples);
-      const analysedDays = buildAnalysedDaySummariesFromTrades(days, allTrades, denom);
-      emitFinalReport({
-        trades: allTrades,
-        totalGainLoss,
-        totalGainLossPounds,
-        tradeCount: allTrades.length,
-        winningTrades,
-        losingTrades,
-        winRate: allTrades.length > 0 ? (winningTrades / allTrades.length) * 100 : 0,
-        avgTradePnl: allTrades.length > 0 ? totalGainLoss / allTrades.length : 0,
-        avgTradePnlPounds,
-        sampleCount: totalSamples,
-        startTs,
-        endTs,
-        openAtEnd: openAtEndTotal,
-        daysAnalysed: days.length,
-        closeReasonCounts,
-        nonConsecutiveWarning,
-        ruleBlockerCounts: ruleBlockerCounts.length > 0 ? ruleBlockerCounts : undefined,
-        dynamicStopLossApplied: !!(config.dynamicStopLossBuy || config.dynamicStopLossSell),
-        analysedDays,
-      }, sampleQuality);
+      emitFinalReport(
+        enrichReportDailyAnalytics(
+          {
+            trades: allTrades,
+            totalGainLoss,
+            totalGainLossPounds,
+            tradeCount: allTrades.length,
+            winningTrades,
+            losingTrades,
+            winRate: allTrades.length > 0 ? (winningTrades / allTrades.length) * 100 : 0,
+            avgTradePnl: allTrades.length > 0 ? totalGainLoss / allTrades.length : 0,
+            avgTradePnlPounds,
+            sampleCount: totalSamples,
+            startTs,
+            endTs,
+            openAtEnd: openAtEndTotal,
+            daysAnalysed: days.length,
+            closeReasonCounts,
+            nonConsecutiveWarning,
+            ruleBlockerCounts: ruleBlockerCounts.length > 0 ? ruleBlockerCounts : undefined,
+            dynamicStopLossApplied: !!(config.dynamicStopLossBuy || config.dynamicStopLossSell),
+          },
+          days,
+          consecutiveLossHaltDays
+        ),
+        sampleQuality
+      );
     });
 
     socket.on('analyse_cancel', () => {

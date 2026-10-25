@@ -185,7 +185,8 @@ function cloneTradesForSave(trades, maxTrades) {
       exitTs: t.exitTs,
       exitPrice: t.exitPrice,
       profitLoss: t.profitLoss,
-      exitReason: t.exitReason
+      exitReason: t.exitReason,
+      lossInsight: t.lossInsight
     };
     if (Array.isArray(t.entryRules)) {
       copy.entryRules = t.entryRules.map(function (r) {
@@ -228,7 +229,12 @@ function cloneReportForSave(report) {
     dynamicStopLossNote: report.dynamicStopLossNote,
     analysedDays: Array.isArray(report.analysedDays)
       ? report.analysedDays.map(function (d) { return Object.assign({}, d); })
-      : undefined
+      : undefined,
+    dailyStats: report.dailyStats ? Object.assign({}, report.dailyStats, {
+      bestDay: report.dailyStats.bestDay ? Object.assign({}, report.dailyStats.bestDay) : undefined,
+      worstDay: report.dailyStats.worstDay ? Object.assign({}, report.dailyStats.worstDay) : undefined
+    }) : undefined,
+    consecutiveLossHaltDays: report.consecutiveLossHaltDays
   };
 }
 
