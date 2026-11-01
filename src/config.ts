@@ -53,7 +53,7 @@ export interface UserConfig {
     probesLongPeriod?: number;
     /** Max days to backfill for probes (cap; actual backfill = longest probe period, uses IG allowance) */
     probesBackfillDays?: number;
-    /** When true, live Trade chart day-seed merges SQLite recordings (Research DB). Default false for trading-only deployments. */
+    /** When true, live Trade chart day-seed merges SQLite. Also auto-on while recording or persistStreamSamplesWhileTrading. */
     liveChartUseRecordedSamples?: boolean;
     /** When true, persist live stream ticks to SQLite while not in Research recording mode. Default false. */
     persistStreamSamplesWhileTrading?: boolean;

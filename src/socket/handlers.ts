@@ -99,6 +99,7 @@ import {
   onLiveRulesTransactionClosed,
   registerServerRulesPlacedDeal,
   runLiveRulesScheduledTasks,
+  runServerForcedCloseClock,
   setLiveRulesEngineDeps,
   type LiveRulesEngineDeps,
   type PlaceRulesDealParams,
@@ -272,6 +273,12 @@ function updateSleepPrevention(io: Server, appRunning: boolean): void {
 
 /** Active stream epic — avoids loadConfig() on every Lightstreamer tick during recording. */
 let streamEpicCache: string | null = null;
+/** Last live tick per epic — 1 Hz hold-last probe cadence when IG is quiet (see startLiveProbeStatsTimer). */
+const HOLD_LAST_PROBE_STALE_MS = 15000;
+let lastStreamTickByEpic: Record<
+  string,
+  { tick: { bid: number; offer: number; spread: number; updateTime?: string; marketState?: string | null }; at: number }
+> = {};
 
 /** Lightstreamer PRICE fields arrive as strings; rules engine needs numeric bid/offer. */
 function parseStreamBidOffer(data: { bid?: unknown; offer?: unknown }): { bid: number; offer: number } | null {
@@ -783,7 +790,10 @@ function isIgHistoricalQuotaError(msg: string): boolean {
 /** Today (Europe/London) intraday history — IG minutes when quota allows; optional SQLite merge (config). */
 async function fetchAndEmitLiveDaySeed(session: IgSession, epic: string, io: Server): Promise<void> {
   const cfg = loadConfig();
-  const useRecorded = cfg.ui?.liveChartUseRecordedSamples === true;
+  const useRecorded =
+    cfg.ui?.liveChartUseRecordedSamples === true ||
+    isRecording() ||
+    cfg.ui?.persistStreamSamplesWhileTrading === true;
   const now = Date.now();
   const londonDay = londonDateKeyFromTimestamp(now);
   if (
@@ -1099,13 +1109,51 @@ export function registerSocketHandlers(io: Server): void {
     io.emit('live_probe_stats', { epic, dayStart: probeSnap.dayStart, probes: probeSnap.probes });
   }
 
+  /** Fill probe windows at 1 Hz with last quote when IG sends no merge (flat market). Rules still use live ticks only. */
+  function advanceProbesHeldLastQuoteIfNeeded(epic: string): void {
+    const liveRulesDeps = getLiveRulesEngineDeps();
+    if (!liveRulesDeps || !epic) return;
+    const entry = lastStreamTickByEpic[epic];
+    if (!entry || Date.now() - entry.at > HOLD_LAST_PROBE_STALE_MS) return;
+    advanceLiveStreamProbes(liveRulesDeps, epic, entry.tick);
+  }
+
+  /** 1 Hz SQLite writes with last quote when IG is quiet (matches probe hold-last cadence). */
+  function recordHeldDbSampleIfNeeded(epic: string): void {
+    const entry = lastStreamTickByEpic[epic];
+    if (!entry || Date.now() - entry.at > HOLD_LAST_PROBE_STALE_MS) return;
+    const t = entry.tick;
+    const data = {
+      bid: String(t.bid),
+      offer: String(t.offer),
+      spread: String(t.spread),
+    };
+    const sentiment = lastClientSentimentByEpic[epic] ?? null;
+    if (isRecording()) {
+      if (recordPrice(epic, data, sentiment)) {
+        io.emit('recorded_sample', {
+          epic,
+          ts: Date.now(),
+          bid: data.bid,
+          offer: data.offer,
+          spread: data.spread,
+        });
+      }
+    } else if (persistStreamSamplesWhileTrading) {
+      recordStreamSample(epic, data, sentiment);
+    }
+  }
+
   function startLiveProbeStatsTimer(): void {
     if (liveProbeStatsTimer) return;
     liveProbeStatsTimer = setInterval(() => {
       if (!isStreaming()) return;
       const cfg = loadConfig();
       const epic = (streamEpicCache || cfg.epic || '').trim();
-      if (epic) emitLiveProbeStatsIfReady(epic);
+      if (!epic) return;
+      advanceProbesHeldLastQuoteIfNeeded(epic);
+      recordHeldDbSampleIfNeeded(epic);
+      emitLiveProbeStatsIfReady(epic);
     }, 1000);
   }
 
@@ -1116,15 +1164,33 @@ export function registerSocketHandlers(io: Server): void {
     }
   }
 
-  function startLiveRulesMaintenanceTimer(): void {
+  function startSessionMaintenanceTimer(): void {
     if (liveRulesMaintenanceTimer) return;
     liveRulesMaintenanceTimer = setInterval(() => {
+      if (!currentSession) return;
       const cfg = loadConfig();
       const epic = (streamEpicCache || cfg.epic || '').trim();
       const liveRulesDeps = getLiveRulesEngineDeps();
       if (!epic || !liveRulesDeps) return;
+      void runServerForcedCloseClock(liveRulesDeps, epic);
       void runLiveRulesScheduledTasks(liveRulesDeps, epic);
     }, 30000);
+  }
+
+  /** @deprecated alias — same timer (forced close + rules housekeeping). */
+  function startLiveRulesMaintenanceTimer(): void {
+    startSessionMaintenanceTimer();
+  }
+
+  /** Load persisted closes, run overdue, and start the 5s close scheduler while logged in. */
+  async function ensureSessionScheduledCloses(session: IgSession, io: Server): Promise<void> {
+    scheduledCloses = loadScheduledCloses();
+    await runOverdueCloses(session, io);
+    if (scheduledCloses.length > 0) {
+      persistAndRunScheduler(session, io);
+      io.emit('log', 'Scheduled closes active: ' + scheduledCloses.length);
+    }
+    emitScheduledCloses(io);
   }
 
   function stopLiveRulesMaintenanceTimer(): void {
@@ -1264,12 +1330,9 @@ export function registerSocketHandlers(io: Server): void {
     lastPriceSocketEmitTs = 0;
     loggedClosedDealIds.clear();
     streamEpicCache = null;
+    lastStreamTickByEpic = {};
     invalidateRecordedCountCache();
     stopStream();
-    if (closeSchedulerTimer) {
-      clearInterval(closeSchedulerTimer);
-      closeSchedulerTimer = null;
-    }
     if (positionsPollTimer) {
       clearInterval(positionsPollTimer);
       positionsPollTimer = null;
@@ -1279,7 +1342,6 @@ export function registerSocketHandlers(io: Server): void {
       ordersPollTimer = null;
     }
     clearDynamicStopLossTracking();
-    stopLiveRulesMaintenanceTimer();
     stopLiveProbeStatsTimer();
     io.emit('price_update', null);
     io.emit('dynamic_stop_loss_status', []);
@@ -1559,6 +1621,7 @@ export function registerSocketHandlers(io: Server): void {
               updateTime: data.updateTime,
               marketState: data.marketState,
             };
+            lastStreamTickByEpic[epicNow] = { tick: rulesTick, at: Date.now() };
             const advanced = advanceLiveStreamProbes(liveRulesDeps, epicNow, rulesTick);
             if (advanced) emitLiveProbeStatsIfReady(epicNow);
             void onLiveRulesStreamTick(liveRulesDeps, epicNow, rulesTick, sentiment ?? null, advanced).catch(
@@ -1643,10 +1706,14 @@ export function registerSocketHandlers(io: Server): void {
     ensureRuntimeProbeState(epic);
 
     const emitServerProbeSeed = (): void => {
-      const samples = getLiveProbeSeedForEpic(epic);
+      const fromMs = londonDayStartMs(Date.now());
+      const samples = getLiveProbeSeedForEpic(epic, fromMs);
       if (samples.length > 0) {
         socket.emit('live_stream_probe_seed', { epic, samples, source: 'server' });
-        io.emit('log', `Probes: sent ${samples.length} in-memory samples to reconnecting client`);
+        io.emit(
+          'log',
+          `Probes: sent ${samples.length} in-memory samples to reconnecting client (from London day start)`
+        );
       } else if (isStreaming()) {
         io.emit('log', 'Probes: stream active — lookbacks fill at ~1 sample/sec');
       }
@@ -2055,6 +2122,11 @@ export function registerSocketHandlers(io: Server): void {
         if (cfg.epic) {
           await fetchAndEmitMarketDetails(session, cfg.epic);
         }
+        await ensureSessionScheduledCloses(session, io);
+        startSessionMaintenanceTimer();
+        const deps = getLiveRulesEngineDeps();
+        const epicTrim = (cfg.epic || '').trim();
+        if (deps && epicTrim) void runServerForcedCloseClock(deps, epicTrim);
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Login failed';
         io.emit('log', 'Error: ' + msg);

@@ -167,7 +167,10 @@ initStatus(socket, log, {
     if (appView.getView() === 'trade') ensureTradePriceStream();
   }
 });
-probesApi.setOnProbeUpdate(function () { tradingRulesApi.updateDealEnabled(); });
+probesApi.setOnProbeUpdate(function () {
+  tradingRulesApi.updateDealEnabled();
+  if (tradingRulesApi.updateSessionUi) tradingRulesApi.updateSessionUi();
+});
 socket.on('marketDetails', function () {
   if (probesApi.refreshProbes) probesApi.refreshProbes();
 });

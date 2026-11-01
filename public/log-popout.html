@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TiddeliTrade log</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/css/main.css">
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col">
+  <header class="shrink-0 px-4 py-3 border-b border-slate-800 bg-slate-900 flex flex-col gap-1">
+    <h1 id="popoutHeading" class="text-sm font-semibold text-slate-200">TiddeliTrade log</h1>
+    <p id="popoutHint" class="text-[11px] text-slate-500 leading-snug">Connecting to main window…</p>
+  </header>
+
+  <div id="popoutActivityRoot" class="flex-1 min-h-0 flex flex-col p-3">
+    <div id="popoutActivityScroll" class="flex-1 min-h-0 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 font-mono text-[10px] leading-tight text-slate-500">
+      <div id="popoutActivityContent">—</div>
+    </div>
+  </div>
+
+  <div id="popoutDealsRoot" class="hidden flex-1 min-h-0 flex flex-col p-3">
+    <div id="popoutDealsList" class="flex-1 min-h-0 overflow-y-auto overflow-x-auto space-y-1 text-xs font-mono rounded-lg border border-slate-800 bg-slate-900/50 p-2"></div>
+    <div class="mt-3 pt-3 border-t border-slate-800 flex justify-between items-center text-sm shrink-0 px-1">
+      <span class="text-slate-500 font-medium">Total P&amp;L</span>
+      <span id="popoutDealsTotal" class="font-mono font-semibold text-slate-300">—</span>
+    </div>
+  </div>
+
+  <div id="popoutRecordingRoot" class="hidden flex-1 min-h-0 flex flex-col p-3">
+    <div id="popoutRecordingScroll" class="flex-1 min-h-0 overflow-y-auto rounded-lg bg-slate-800 border border-slate-700 font-mono text-[11px]">
+      <table class="w-full border-collapse">
+        <thead class="sticky top-0 bg-slate-800 z-10">
+          <tr class="text-slate-500 border-b border-slate-700">
+            <th class="text-left px-2 py-1.5 font-normal">Time</th>
+            <th class="text-left px-2 py-1.5 font-normal">Buy</th>
+            <th class="text-left px-2 py-1.5 font-normal">Sell</th>
+            <th class="text-left px-2 py-1.5 font-normal">Mid</th>
+            <th class="text-left px-2 py-1.5 font-normal">Spread</th>
+          </tr>
+        </thead>
+        <tbody id="popoutRecordingBody" class="text-slate-400"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script type="module" src="/js/logPopoutPage.js"></script>
+</body>
+</html>

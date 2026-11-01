@@ -645,6 +645,8 @@ export function initTradingRules(
   var sessionStatusDot = document.getElementById('tradeSessionStatusDot');
   var sessionRulesLabel = document.getElementById('tradeSessionRulesLabel');
   var sessionRulesText = document.getElementById('tradeSessionRulesText');
+  var overviewStreamValue = document.getElementById('tradeOverviewStreamValue');
+  var overviewStreamDetail = document.getElementById('tradeOverviewStreamDetail');
   var navRulesBadge = document.getElementById('appNavTradeRulesBadge');
   var rulesStartModal = document.getElementById('rulesStartModal');
   var rulesStartModalSummary = document.getElementById('rulesStartModalSummary');
@@ -933,20 +935,9 @@ export function initTradingRules(
   }
 
   function runForcedCloseIfNeeded(nowMs) {
-    if (rulesEngineRunning) return false;
+    /* Forced close and per-deal scheduled closes run on the server (no browser required). */
     if (!hasForcedCloseTime() || !isPastForcedClose(nowMs)) return false;
-    var today = localDateKey(new Date(nowMs));
-    if (forcedCloseLastRunDate === today) return false;
-    forcedCloseLastRunDate = today;
-    var epicSelect = document.getElementById('epicSelect');
-    var epic = (epicSelect && epicSelect.value) || state.savedEpic;
-    if (socket && typeof socket.emit === 'function' && epic) {
-      socket.emit('rules_forced_close_sweep', { epic: epic });
-    }
-    var logFn = typeof log === 'function' ? log : function () {};
-    var fcTxt = forcedCloseInput && forcedCloseInput.value ? forcedCloseInput.value : '—';
-    logFn('Rules forced close at ' + fcTxt + ' — flattening open positions');
-    return true;
+    return false;
   }
 
   function hasScheduleLimits() {
@@ -1036,8 +1027,8 @@ export function initTradingRules(
       if (ui.doneForToday) return 'No new deals until tomorrow';
       return 'Next window ' + ui.scheduleText;
     }
-    if (ui.key === 'armed-probes') return 'Start probing for live prices';
-    if (ui.key === 'armed-warmup') return 'Waiting for probes — ' + (ui.warmupDetail || 'filling lookback windows');
+    if (ui.key === 'armed-probes') return 'Start price stream (Trade tab)';
+    if (ui.key === 'armed-warmup') return 'Probe lookbacks filling — see Overview';
     if (ui.key === 'active') return 'Monitoring conditions';
     if (canManualTrade()) return 'Manual trading available';
     if (isIgLoggedInLocal()) return 'Stop rules to trade manually';
@@ -1074,6 +1065,45 @@ export function initTradingRules(
     if (st === 'connecting') return { key: 'connecting' };
     if (st === 'disconnected') return { key: 'disconnected' };
     return { key: 'stopped' };
+  }
+
+  function formatStreamOverviewUi() {
+    var st = state && state.engineStatus ? state.engineStatus : 'ready';
+    if (st === 'running') {
+      return {
+        value: 'Live',
+        detail: 'IG price stream active — probes update on server and in panels below',
+        valueClass: 'trade-session-status-value--running'
+      };
+    }
+    if (st === 'connecting') {
+      return {
+        value: 'Connecting',
+        detail: 'Logging in to IG and opening Lightstreamer…',
+        valueClass: 'trade-session-status-value--connecting'
+      };
+    }
+    if (st === 'connected') {
+      return {
+        value: 'Starting',
+        detail: 'Starting price stream for Trade…',
+        valueClass: 'trade-session-status-value--connecting'
+      };
+    }
+    if (st === 'disconnected') {
+      return {
+        value: 'Offline',
+        detail: 'Connect from Home to restore live prices',
+        valueClass: 'trade-session-status-value--disconnected'
+      };
+    }
+    return {
+      value: 'Idle',
+      detail: isIgLoggedInLocal()
+        ? 'Open Trade while logged in — stream starts automatically'
+        : 'Connect to IG from Home',
+      valueClass: 'trade-session-status-value--stopped'
+    };
   }
 
   function updateTradeSessionUi() {
@@ -1129,6 +1159,14 @@ export function initTradingRules(
     if (sessionRulesText) {
       sessionRulesText.textContent = formatRulesSessionDetail(ui);
       sessionRulesText.className = 'trade-overview-rules-detail';
+    }
+    var streamUi = formatStreamOverviewUi();
+    if (overviewStreamValue) {
+      overviewStreamValue.textContent = streamUi.value;
+      overviewStreamValue.className = 'trade-session-status-value ' + streamUi.valueClass;
+    }
+    if (overviewStreamDetail) {
+      overviewStreamDetail.textContent = streamUi.detail;
     }
     if (navRulesBadge) navRulesBadge.classList.toggle('hidden', !sessionActive);
   }
@@ -1802,8 +1840,8 @@ export function initTradingRules(
       else if (ui.doneForToday) line += ' • done for today (' + ui.scheduleText + ')';
       else line += ' • next window ' + ui.scheduleText;
     }
-    if (ui.key === 'armed-probes') line += ' • No live prices — start probing';
-    if (ui.key === 'armed-warmup') line += ' • Probes warming up — no deals until lookbacks fill';
+    if (ui.key === 'armed-probes') line += ' • Price stream not running';
+    if (ui.key === 'armed-warmup') line += ' • Probe lookbacks filling (Overview)';
     if (rulesEngineRunning && sleepPreventionStatus) line += ' • ' + sleepPreventionStatus;
     return line;
   }
@@ -1942,7 +1980,7 @@ export function initTradingRules(
       else if (allEnabledRules.length === 0) status = 'Enable at least one rule';
       else if (needsProbes && !getProbeValuesFn()) status = 'Waiting for probe data';
       else if (probesWarmupBlocked && ruleNeedsLiveProbeStats(allEnabledRules)) {
-        status = 'Probes warming up — ' + (probeReady.detail || 'filling lookbacks') + ' (no deals yet)';
+        status = 'Probe lookbacks not ready — no deals yet (see Overview)';
       }
       else if (needsPrices && (state.currentBid == null || state.currentOffer == null)) status = 'Waiting for prices';
       else if (needsNowTrend && state.currentTrend == null) status = 'Waiting for price updates (now.trend)';
@@ -1965,7 +2003,7 @@ export function initTradingRules(
         status = 'Conditions met – halted for today (loss), resumes tomorrow';
       }
       else if (pass && probesWarmupBlocked) {
-        status = 'Conditions met – waiting for probes (' + (probeReady.detail || 'warming up') + '), no new deal';
+        status = 'Conditions met — probe lookbacks not ready (Overview), no new deal';
       }
       else if (pass && !blocked) {
         var willFireThisTick = !prevRulesPass || prevBlocked;

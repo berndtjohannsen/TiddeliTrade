@@ -359,45 +359,57 @@ export function drawLiveProbeChart(canvas, opts) {
   }
   if (pathOpen) ctx.stroke();
 
-  // Trade open (triangle) / close (diamond) markers
+  // Trade entry/exit as horizontal price lines for the open position (paired by dealId when present)
+  function drawTradePriceSegment(fromTs, toTs, price, color, dash) {
+    if (price == null || isNaN(price) || fromTs == null || toTs == null) return;
+    var seg0 = Math.max(t0, Math.min(fromTs, toTs));
+    var seg1 = Math.min(t1, Math.max(fromTs, toTs));
+    if (seg1 <= seg0) return;
+    var hx1 = xAt(seg0);
+    var hx2 = xAt(seg1);
+    var hy = yAt(price);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash(dash || [6, 4]);
+    ctx.beginPath();
+    ctx.moveTo(hx1, hy);
+    ctx.lineTo(hx2, hy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
   var tradeMarkers = opts.tradeMarkers || [];
+  var tradeOpens = Object.create(null);
+  var tradeCloses = Object.create(null);
+  var tradeOrphanOpens = [];
+  var tradeOrphanCloses = [];
   for (var mi = 0; mi < tradeMarkers.length; mi++) {
     var mk = tradeMarkers[mi];
     if (!mk || mk.ts == null || mk.price == null || isNaN(mk.price)) continue;
-    if (mk.ts < t0 || mk.ts > t1) continue;
-    var mx = xAt(mk.ts);
-    var my = yAt(mk.price);
     if (mk.kind === 'open') {
-      var isBuy = mk.direction === 'BUY';
-      ctx.fillStyle = isBuy ? '#22c55e' : '#ef4444';
-      ctx.strokeStyle = '#0f172a';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      if (isBuy) {
-        ctx.moveTo(mx, my - 7);
-        ctx.lineTo(mx - 5, my + 4);
-        ctx.lineTo(mx + 5, my + 4);
-      } else {
-        ctx.moveTo(mx, my + 7);
-        ctx.lineTo(mx - 5, my - 4);
-        ctx.lineTo(mx + 5, my - 4);
-      }
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
+      if (mk.dealId) tradeOpens[mk.dealId] = mk;
+      else tradeOrphanOpens.push(mk);
     } else {
-      ctx.fillStyle = 'rgba(251, 191, 36, 0.45)';
-      ctx.strokeStyle = '#fbbf24';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(mx, my - 5);
-      ctx.lineTo(mx + 5, my);
-      ctx.lineTo(mx, my + 5);
-      ctx.lineTo(mx - 5, my);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
+      if (mk.dealId) tradeCloses[mk.dealId] = mk;
+      else tradeOrphanCloses.push(mk);
     }
+  }
+  for (var dealKey in tradeOpens) {
+    if (!Object.prototype.hasOwnProperty.call(tradeOpens, dealKey)) continue;
+    var op = tradeOpens[dealKey];
+    var cl = tradeCloses[dealKey];
+    var endTs = cl ? cl.ts : refTs;
+    var isBuy = op.direction === 'BUY';
+    drawTradePriceSegment(op.ts, endTs, op.price, isBuy ? '#22c55e' : '#ef4444', [6, 4]);
+    if (cl) drawTradePriceSegment(op.ts, cl.ts, cl.price, '#fbbf24', [4, 4]);
+  }
+  for (var oi = 0; oi < tradeOrphanOpens.length; oi++) {
+    var oop = tradeOrphanOpens[oi];
+    var obuy = oop.direction === 'BUY';
+    drawTradePriceSegment(oop.ts, refTs, oop.price, obuy ? '#22c55e' : '#ef4444', [6, 4]);
+  }
+  for (var ci = 0; ci < tradeOrphanCloses.length; ci++) {
+    var ocl = tradeOrphanCloses[ci];
+    drawTradePriceSegment(t0, ocl.ts, ocl.price, '#fbbf24', [4, 4]);
   }
 
   // "Now" vertical

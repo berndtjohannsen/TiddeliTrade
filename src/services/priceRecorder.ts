@@ -235,6 +235,7 @@ export function recordPrice(epic: string, data: PriceData, sentiment?: ClientSen
 /**
  * Persist live stream ticks for the Trade chart (same DB as Research recordings).
  * Skipped while Research recording is active — recordPrice already writes.
+ * Both paths share ~1 Hz stream + server hold-last when IG is quiet (see handlers timer).
  */
 export function recordStreamSample(epic: string, data: PriceData, sentiment?: ClientSentiment | null): boolean {
   if (!epic || recording) return false;

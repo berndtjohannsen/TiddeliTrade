@@ -4,6 +4,7 @@
 import { formatTimeWithTz } from './utils.js';
 import { getRulesForBacktest } from './tradingRules.js';
 import { initBacktestProfiles } from './backtestProfiles.js';
+import { initMainPopoutBridge, wireLogPopoutButtons } from './logPopoutBridge.js';
 
 function resolveStopAfterConsecutiveLossesFromEngineControls(engineControls) {
   if (!engineControls) return undefined;
@@ -22,6 +23,17 @@ export function initTestRules(socket, state, log, profileOpts) {
   var pendingRecordStart = false;
   var pendingRecordSawConnecting = false;
 
+  function recordingPopoutPayload() {
+    return { tbodyHtml: logBody ? logBody.innerHTML : '' };
+  }
+
+  var publishRecordingPopout = initMainPopoutBridge('recording', recordingPopoutPayload);
+
+  function syncRecordingPopout() {
+    var p = recordingPopoutPayload();
+    publishRecordingPopout({ op: 'recording-snapshot', tbodyHtml: p.tbodyHtml });
+  }
+
   function appendLog(msg) {
     if (!logBody) return;
     var tr = document.createElement('tr');
@@ -33,6 +45,7 @@ export function initTestRules(socket, state, log, profileOpts) {
     logBody.appendChild(tr);
     if (logEl) logEl.scrollTop = logEl.scrollHeight;
     while (logBody.children.length > 100) logBody.removeChild(logBody.firstChild);
+    syncRecordingPopout();
   }
 
   function canStartRecording() {
@@ -95,6 +108,7 @@ export function initTestRules(socket, state, log, profileOpts) {
     logBody.appendChild(tr);
     if (logEl) logEl.scrollTop = logEl.scrollHeight;
     while (logBody.children.length > 100) logBody.removeChild(logBody.firstChild);
+    syncRecordingPopout();
   });
 
   var recordedCountEl = document.getElementById('testRulesRecordedCount');
@@ -1171,6 +1185,30 @@ export function initTestRules(socket, state, log, profileOpts) {
         ctx.textAlign = 'left';
       }
     }
+    /** Horizontal price line between two times (clipped to visible range). */
+    function drawHLineSegment(fromTs, toTs, price, color, label, dash) {
+      if (price == null || isNaN(price) || fromTs == null || toTs == null) return;
+      var seg0 = Math.max(t0, Math.min(fromTs, toTs));
+      var seg1 = Math.min(t1, Math.max(fromTs, toTs));
+      if (seg1 <= seg0) return;
+      var x1 = xAt(seg0);
+      var x2 = xAt(seg1);
+      var y = yAt(price);
+      ctx.strokeStyle = color;
+      ctx.setLineDash(dash || [6, 3]);
+      ctx.lineWidth = 1.25;
+      ctx.beginPath();
+      ctx.moveTo(x1, y);
+      ctx.lineTo(x2, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      if (label) {
+        ctx.fillStyle = color;
+        ctx.font = '10px ui-monospace,monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText(label + ' ' + price.toFixed(2), Math.min(x2 + 4, padL + plotW - 4), Math.max(padT + 10, Math.min(y - 4, padT + plotH - 4)));
+      }
+    }
     function drawCurve(values, color) {
       ctx.strokeStyle = color;
       ctx.lineWidth = 1.25;
@@ -1339,14 +1377,18 @@ export function initTestRules(socket, state, log, profileOpts) {
       if (overlays.probeLimits) {
         drawProbeWindowOverlays(tr.entryTs, chartCtx.probeMs || probeMs, 'lines');
       }
-      if (overlays.entry && tr.entryPrice != null) drawHLine(Number(tr.entryPrice), '#34d399', 'Entry', [6, 3]);
-      if (overlays.exit && tr.exitPrice != null) drawHLine(Number(tr.exitPrice), '#fbbf24', 'Exit', [6, 3]);
+      var tradeEndTs = tr.exitTs;
+      var tradeStartTs = tr.entryTs;
+      if (overlays.entry && tr.entryPrice != null) {
+        drawHLineSegment(tradeStartTs, tradeEndTs, Number(tr.entryPrice), '#34d399', 'Entry', [6, 3]);
+      }
+      if (overlays.exit && tr.exitPrice != null) {
+        drawHLineSegment(tradeStartTs, tradeEndTs, Number(tr.exitPrice), '#fbbf24', 'Exit', [6, 3]);
+      }
       if (overlays.tradeMid && tr.entryPrice != null && tr.exitPrice != null) {
         var tradeAvg = (Number(tr.entryPrice) + Number(tr.exitPrice)) / 2;
-        if (!isNaN(tradeAvg)) drawHLine(tradeAvg, '#f59e0b', 'TRD');
+        if (!isNaN(tradeAvg)) drawHLineSegment(tradeStartTs, tradeEndTs, tradeAvg, '#f59e0b', 'TRD', [4, 4]);
       }
-      if (overlays.entry) drawMarker(tr.entryTs, '#34d399', 'Open');
-      if (overlays.exit) drawMarker(tr.exitTs, '#fbbf24', 'Close');
     }
     drawDayBoundaryMarkers();
     updateChartModalQualityNote();
@@ -3051,6 +3093,8 @@ export function initTestRules(socket, state, log, profileOpts) {
   });
 
   if (logBody) logBody.innerHTML = '';
+  syncRecordingPopout();
+  wireLogPopoutButtons(document);
 
   var scheduleEnabledEl = document.getElementById('recordingScheduleEnabled');
   var scheduleModeFixedEl = document.getElementById('recordingScheduleModeFixed');
@@ -3184,6 +3228,11 @@ export function initTestRules(socket, state, log, profileOpts) {
     setTestRulesPanelEnabled: function (enabled) {
       var panel = document.getElementById('testRulesPanel');
       if (panel) panel.classList.toggle('hidden', !enabled);
+      var recBtn = document.getElementById('openRecordingLogBtn');
+      if (recBtn) recBtn.classList.toggle('hidden', !enabled);
+      document.querySelectorAll('[data-log-popout="recording"]').forEach(function (el) {
+        el.classList.toggle('hidden', !enabled);
+      });
     },
     refreshProfilesForEpic: function (epic) {
       if (profilesApi && profilesApi.refreshForEpic) profilesApi.refreshForEpic(epic);

@@ -30,6 +30,15 @@
       <p id="headerMessage" class="text-xs text-amber-400 hidden min-w-0"></p>
     </div>
     <div class="flex items-center gap-3 flex-1 justify-end flex-wrap">
+      <span class="relative inline-flex items-center gap-0.5">
+        <button type="button" id="openAppLogBtn" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-xs font-medium transition-colors" data-tooltip="Open activity log (server and app messages)">Log</button>
+        <button type="button" data-log-popout="activity" class="px-1.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-500 text-xs font-medium transition-colors" title="Pop out activity log to another window" aria-label="Pop out activity log">↗</button>
+        <span id="appLogUnreadBadge" class="hidden absolute -top-0.5 right-6 min-w-[0.5rem] h-2 w-2 rounded-full bg-amber-500 ring-2 ring-slate-950 pointer-events-none" aria-hidden="true"></span>
+      </span>
+      <button type="button" id="openTransactionLogBtn" class="hidden px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-xs font-medium transition-colors" data-tooltip="Live IG deals — open and close rows with matching deal id">Deals log</button>
+      <button type="button" data-log-popout="deals" class="hidden px-1.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-500 text-xs font-medium transition-colors" title="Pop out deals log" aria-label="Pop out deals log">↗</button>
+      <button type="button" id="openRecordingLogBtn" class="hidden px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-xs font-medium transition-colors" data-tooltip="Recorded price samples and research messages">Recording log</button>
+      <button type="button" data-log-popout="recording" class="hidden px-1.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-500 text-xs font-medium transition-colors" title="Pop out recording log" aria-label="Pop out recording log">↗</button>
       <span class="text-sm text-slate-500" id="status">Status: Ready</span>
       <span id="accountInfo" class="text-sm text-slate-500 hidden"></span>
       <span class="text-slate-600">|</span>
@@ -432,7 +441,7 @@
       </form>
     </div>
   </div>
-  <main class="p-4 pb-16">
+  <main class="p-4">
     <div class="flex flex-col gap-4 items-stretch w-full">
       <p id="mainPlaceholder" class="text-slate-500 text-sm hidden">Connect to log in.</p>
       <div id="tradeViewRoot" class="trade-layout hidden">
@@ -453,6 +462,19 @@
             </div>
           </div>
         </div>
+        <div class="trade-session-status-grid mb-3">
+          <div class="trade-session-status-block">
+            <span class="trade-session-status-block-label">Price stream</span>
+            <div class="trade-session-status-block-body">
+              <span id="tradeOverviewStreamValue" class="trade-session-status-value trade-session-status-value--stopped">—</span>
+              <span id="tradeOverviewStreamDetail" class="trade-session-status-detail">—</span>
+            </div>
+          </div>
+          <div class="trade-session-status-block">
+            <span class="trade-session-status-block-label">Probe lookbacks</span>
+            <div id="tradeOverviewProbesDetail" class="trade-session-status-detail font-mono text-[11px] leading-relaxed">—</div>
+          </div>
+        </div>
         <div id="probeStreamDiagram" class="probe-stream-diagram" aria-label="Live price stream and probe ranges">
           <div class="probe-stream-diagram-head">
             <span class="probe-stream-diagram-title">Live stream</span>
@@ -469,7 +491,7 @@
             <canvas id="probeStreamCanvas" class="probe-stream-canvas"></canvas>
             <canvas id="probeStreamCanvasOverlay" class="probe-stream-canvas probe-stream-canvas-overlay"></canvas>
           </div>
-          <p id="probeStreamDiagramHint" class="probe-stream-diagram-hint">Live stream chart — probes use in-memory prices only; optional IG day-seed (not Research recordings unless enabled in config).</p>
+          <p id="probeStreamDiagramHint" class="probe-stream-diagram-hint hidden">Chart uses live stream samples; optional IG day-seed when configured.</p>
         </div>
       </section>
       <section id="probesPanel" class="trade-layout-probes bg-slate-900 border border-slate-800 rounded-xl p-4 w-full min-w-0 hidden">
@@ -499,7 +521,10 @@
         </div>
         <div class="grid grid-cols-4 gap-2 text-xs">
           <div class="rounded-lg bg-slate-800 border border-slate-700 p-2 space-y-0.5">
-            <p id="probeLongStatus" class="text-[10px] leading-snug font-mono text-slate-500 mb-1 min-h-[1.25rem]" data-tooltip="In-market sample coverage for this lookback (rules warmup)">—</p>
+            <div class="probe-panel-head mb-1 pb-1 border-b border-slate-700/70">
+              <span class="text-[10px] font-semibold text-violet-400/90 uppercase tracking-wide">Long</span>
+              <p id="probeLongStatus" class="text-[10px] leading-snug font-mono text-slate-500 mt-0.5 min-h-[1.25rem]" data-tooltip="In-market sample coverage for this lookback (rules warmup)">—</p>
+            </div>
             <dl class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
               <dt class="text-slate-500" data-tooltip="First vs last price in period (up/down/flat)">Trend</dt><dd id="probeLongTrend" class="font-mono text-xs">—</dd>
               <dt class="text-slate-500" data-tooltip="Offer (buy) price at the oldest sample in the period">Start buy</dt><dd id="probeLongPeriodStartBuy" class="font-mono text-emerald-500">—</dd>
@@ -514,7 +539,10 @@
             </dl>
           </div>
           <div class="rounded-lg bg-slate-800 border border-slate-700 p-2 space-y-0.5">
-            <p id="probeMediumStatus" class="text-[10px] leading-snug font-mono text-slate-500 mb-1 min-h-[1.25rem]" data-tooltip="In-market sample coverage for this lookback (rules warmup)">—</p>
+            <div class="probe-panel-head mb-1 pb-1 border-b border-slate-700/70">
+              <span class="text-[10px] font-semibold text-amber-500/90 uppercase tracking-wide">Medium</span>
+              <p id="probeMediumStatus" class="text-[10px] leading-snug font-mono text-slate-500 mt-0.5 min-h-[1.25rem]" data-tooltip="In-market sample coverage for this lookback (rules warmup)">—</p>
+            </div>
             <dl class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
               <dt class="text-slate-500" data-tooltip="First vs last price in period (up/down/flat)">Trend</dt><dd id="probeMediumTrend" class="font-mono text-xs">—</dd>
               <dt class="text-slate-500" data-tooltip="Offer (buy) price at the oldest sample in the period">Start buy</dt><dd id="probeMediumPeriodStartBuy" class="font-mono text-emerald-500">—</dd>
@@ -529,7 +557,10 @@
             </dl>
           </div>
           <div class="rounded-lg bg-slate-800 border border-slate-700 p-2 space-y-0.5">
-            <p id="probeShortStatus" class="text-[10px] leading-snug font-mono text-slate-500 mb-1 min-h-[1.25rem]" data-tooltip="In-market sample coverage for this lookback (rules warmup)">—</p>
+            <div class="probe-panel-head mb-1 pb-1 border-b border-slate-700/70">
+              <span class="text-[10px] font-semibold text-cyan-500/90 uppercase tracking-wide">Short</span>
+              <p id="probeShortStatus" class="text-[10px] leading-snug font-mono text-slate-500 mt-0.5 min-h-[1.25rem]" data-tooltip="In-market sample coverage for this lookback (rules warmup)">—</p>
+            </div>
             <dl class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
               <dt class="text-slate-500" data-tooltip="First vs last price in period (up/down/flat)">Trend</dt><dd id="probeShortTrend" class="font-mono text-xs">—</dd>
               <dt class="text-slate-500" data-tooltip="Offer (buy) price at the oldest sample in the period">Start buy</dt><dd id="probeShortPeriodStartBuy" class="font-mono text-emerald-500">—</dd>
@@ -579,7 +610,7 @@
           </div>
           <div class="flex items-start gap-2">
             <input type="checkbox" id="tradingRulesRequireProbeWarmup" checked class="rounded bg-slate-800 border-slate-600 text-sky-500 focus:ring-sky-500 mt-0.5 shrink-0">
-            <label for="tradingRulesRequireProbeWarmup" class="text-slate-500 text-xs leading-snug" data-tooltip="When checked (default), no deals until each probe window used by your rules reaches ~85% in-market coverage — e.g. after reconnect. Uncheck to allow deals on partial probe data (you accept weaker stats). Editable while rules are running.">Require full probe lookback before deals</label>
+            <label for="tradingRulesRequireProbeWarmup" class="text-slate-500 text-xs leading-snug" data-tooltip="When checked (default), no deals until each probe window used by your rules reaches ~85% in-market coverage. Server fills ~1 probe sample/sec during trade hours using the last IG quote when price is flat. Uncheck to allow deals on partial probe data. Editable while rules are running.">Require full probe lookback before deals</label>
           </div>
           <p class="text-[11px] text-slate-600 leading-snug" data-tooltip="Rules evaluation and probes always run on the server while the price stream is active. The browser is for setup and status; reload does not stop the engine. Uncheck Confirm before placing for unattended deals.">Live rules always run on the server — browser reload does not stop evaluation while the stream keeps running.</p>
           <div class="flex flex-wrap items-center gap-2">
@@ -775,18 +806,6 @@
         </div>
       </section>
       </div>
-      <section id="transactionLogPanel" class="trade-layout-log bg-slate-900 border border-slate-800 rounded-xl p-4 w-full min-w-0 min-h-[200px] max-h-[360px] flex flex-col hidden">
-        <div class="flex items-center justify-between gap-2 mb-2">
-          <h3 class="text-sm font-semibold text-slate-400" data-tooltip="Live IG deals only — not backtests. Open and close rows with the same # and coloured stripe are one round-trip (IG deal id).">Transaction log</h3>
-          <span class="text-[10px] text-emerald-500/90 font-medium">Live</span>
-          <button type="button" id="transactionLogReset" class="px-2 py-1 rounded text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">Reset</button>
-        </div>
-        <div id="transactionLogList" class="flex-1 min-h-0 overflow-y-auto overflow-x-auto space-y-1 text-xs font-mono"></div>
-        <div class="mt-3 pt-3 border-t border-slate-700 flex justify-between items-center text-sm shrink-0">
-          <span class="text-slate-500 font-medium">Total P&L</span>
-          <span id="transactionLogTotal" class="font-mono font-semibold">—</span>
-        </div>
-      </section>
       <div id="tradeManualSection" class="trade-layout-manual hidden">
         <p class="trade-manual-heading text-[11px] text-slate-500 col-span-full mb-0">Manual trade — market deals and working orders (disabled while a rules engine is running).</p>
       <section id="dealPanel" class="bg-slate-900 border border-slate-800 rounded-xl p-4 min-w-0 w-full hidden">
@@ -1016,23 +1035,7 @@
           <p class="text-[10px] text-slate-500">Click a profile to activate it on Trade. Use Export… for the active profile, or ↓ on a row.</p>
           <ul id="backtestProfilesList" class="flex flex-col gap-0.5 max-h-36 overflow-y-auto text-[11px]"></ul>
         </div>
-        <div class="flex flex-col gap-1">
-          <span class="text-xs text-slate-500">Recorded log</span>
-          <div id="testRulesLog" class="h-24 overflow-y-auto rounded-lg bg-slate-800 border border-slate-700 font-mono text-[11px]">
-            <table class="w-full border-collapse">
-              <thead class="sticky top-0 bg-slate-800 z-10">
-                <tr class="text-slate-500 border-b border-slate-700">
-                  <th class="text-left px-2 py-1.5 font-normal">Time</th>
-                  <th class="text-left px-2 py-1.5 font-normal">Buy</th>
-                  <th class="text-left px-2 py-1.5 font-normal">Sell</th>
-                  <th class="text-left px-2 py-1.5 font-normal">Mid</th>
-                  <th class="text-left px-2 py-1.5 font-normal">Spread</th>
-                </tr>
-              </thead>
-              <tbody id="testRulesLogBody" class="text-slate-400"></tbody>
-            </table>
-          </div>
-        </div>
+        <p class="text-[11px] text-slate-500">Use Recording log in the header while recording or analysing.</p>
         <div id="testRulesReport" class="hidden mt-2 rounded-lg bg-slate-800 border border-slate-700 p-2 text-xs">
           <h4 class="text-slate-400 font-medium mb-1.5">Backtest report <span class="text-violet-400/80 font-normal">(simulated)</span></h4>
           <dl id="testRulesReportBody" class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-slate-300"></dl>
@@ -1106,10 +1109,76 @@
       </section>
     </div>
   </main>
-  <div id="logWindow" class="fixed bottom-0 left-0 right-0 flex flex-col bg-slate-950 border-t border-slate-800 font-mono text-[10px] leading-tight text-slate-500" style="height: 48px;" aria-label="Debug log">
-    <div id="logResizeHandle" class="h-2 cursor-ns-resize hover:bg-slate-700 active:bg-slate-600 transition-colors flex-shrink-0 border-b border-slate-800" title="Drag to resize log"></div>
-    <div id="logContent" class="flex-1 min-h-0 overflow-y-auto px-3 py-1"></div>
+
+  <!-- Activity log (popup — not docked under Trade/Research) -->
+  <div id="appLogModal" class="app-float-modal hidden" role="dialog" aria-modal="true" aria-labelledby="appLogModalTitle">
+    <div class="app-float-modal-backdrop" data-close-modal="appLogModal" aria-hidden="true"></div>
+    <div id="logWindow" class="app-float-modal-panel app-log-modal-panel flex flex-col bg-slate-950 border border-slate-700 rounded-xl shadow-2xl font-mono text-[10px] leading-tight text-slate-500" style="height: 320px;" aria-label="Activity log">
+      <div class="app-float-modal-header shrink-0">
+        <h2 id="appLogModalTitle" class="text-sm font-semibold text-slate-300">Activity log</h2>
+        <div class="flex items-center gap-2">
+          <button type="button" id="appLogClearBtn" class="px-2 py-1 rounded text-xs bg-slate-800 hover:bg-slate-700 text-slate-400" data-tooltip="Clear messages in this window only">Clear</button>
+          <button type="button" data-log-popout="activity" class="px-2 py-1 rounded text-xs bg-slate-800 hover:bg-slate-700 text-slate-400" data-tooltip="Open in a separate browser window (second monitor)">Pop out</button>
+          <button type="button" class="app-float-modal-close px-2 py-1 rounded text-xs bg-slate-800 hover:bg-slate-700 text-slate-300" data-close-modal="appLogModal" aria-label="Close">Close</button>
+        </div>
+      </div>
+      <div id="logResizeHandle" class="h-2 cursor-ns-resize hover:bg-slate-700 active:bg-slate-600 transition-colors flex-shrink-0 border-y border-slate-800" title="Drag to resize log"></div>
+      <div id="logContent" class="flex-1 min-h-0 overflow-y-auto px-3 py-2"></div>
+    </div>
   </div>
+
+  <!-- Live IG transaction log (Trade) -->
+  <div id="transactionLogModal" class="app-float-modal hidden" role="dialog" aria-modal="true" aria-labelledby="transactionLogModalTitle">
+    <div class="app-float-modal-backdrop" data-close-modal="transactionLogModal" aria-hidden="true"></div>
+    <div id="transactionLogPanel" class="app-float-modal-panel app-transaction-log-panel flex flex-col bg-slate-900 border border-slate-700 rounded-xl shadow-2xl p-4 min-h-[240px] max-h-[min(70vh,520px)] w-[min(640px,calc(100vw-2rem))]">
+      <div class="app-float-modal-header shrink-0 mb-2">
+        <div>
+          <h2 id="transactionLogModalTitle" class="text-sm font-semibold text-slate-300">Transaction log</h2>
+          <p class="text-[10px] text-slate-500 mt-0.5">Live IG deals only — matching deal ids share a round-trip # and colour.</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-[10px] text-emerald-500/90 font-medium">Live</span>
+          <button type="button" id="transactionLogReset" class="px-2 py-1 rounded text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">Reset</button>
+          <button type="button" data-log-popout="deals" class="px-2 py-1 rounded text-xs bg-slate-800 hover:bg-slate-700 text-slate-400" data-tooltip="Open in a separate browser window (second monitor)">Pop out</button>
+          <button type="button" class="app-float-modal-close px-2 py-1 rounded text-xs bg-slate-800 hover:bg-slate-700 text-slate-300" data-close-modal="transactionLogModal" aria-label="Close">Close</button>
+        </div>
+      </div>
+      <div id="transactionLogList" class="flex-1 min-h-0 overflow-y-auto overflow-x-auto space-y-1 text-xs font-mono"></div>
+      <div class="mt-3 pt-3 border-t border-slate-700 flex justify-between items-center text-sm shrink-0">
+        <span class="text-slate-500 font-medium">Total P&L</span>
+        <span id="transactionLogTotal" class="font-mono font-semibold">—</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Research recording log (samples + analyse messages) -->
+  <div id="recordingLogModal" class="app-float-modal hidden" role="dialog" aria-modal="true" aria-labelledby="recordingLogModalTitle">
+    <div class="app-float-modal-backdrop" data-close-modal="recordingLogModal" aria-hidden="true"></div>
+    <div class="app-float-modal-panel flex flex-col bg-slate-900 border border-slate-700 rounded-xl shadow-2xl p-4 min-h-[200px] max-h-[min(70vh,480px)] w-[min(560px,calc(100vw-2rem))]">
+      <div class="app-float-modal-header shrink-0 mb-2">
+        <h2 id="recordingLogModalTitle" class="text-sm font-semibold text-violet-300">Recording log</h2>
+        <div class="flex items-center gap-2 shrink-0">
+          <button type="button" data-log-popout="recording" class="px-2 py-1 rounded text-xs bg-slate-800 hover:bg-slate-700 text-slate-400" data-tooltip="Open in a separate browser window (second monitor)">Pop out</button>
+          <button type="button" class="app-float-modal-close px-2 py-1 rounded text-xs bg-slate-800 hover:bg-slate-700 text-slate-300" data-close-modal="recordingLogModal" aria-label="Close">Close</button>
+        </div>
+      </div>
+      <div id="testRulesLog" class="flex-1 min-h-[160px] overflow-y-auto rounded-lg bg-slate-800 border border-slate-700 font-mono text-[11px]">
+        <table class="w-full border-collapse">
+          <thead class="sticky top-0 bg-slate-800 z-10">
+            <tr class="text-slate-500 border-b border-slate-700">
+              <th class="text-left px-2 py-1.5 font-normal">Time</th>
+              <th class="text-left px-2 py-1.5 font-normal">Buy</th>
+              <th class="text-left px-2 py-1.5 font-normal">Sell</th>
+              <th class="text-left px-2 py-1.5 font-normal">Mid</th>
+              <th class="text-left px-2 py-1.5 font-normal">Spread</th>
+            </tr>
+          </thead>
+          <tbody id="testRulesLogBody" class="text-slate-400"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
   <script src="/socket.io/socket.io.js"></script>
   <script type="module" src="/js/main.js"></script>
 </body>

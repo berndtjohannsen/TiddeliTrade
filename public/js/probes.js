@@ -5,7 +5,6 @@
 import {
   analyzeProbeCoverage,
   formatProbeLookbackStatus,
-  formatProbeSampleCount,
   isProbeEligibleSample,
   probeFilterOptsFromState
 } from './probeSamples.js';
@@ -159,6 +158,7 @@ export function initProbes(socket, state, log) {
   var streamMeta = document.getElementById('probeStreamMeta');
   var streamHoverBar = document.getElementById('probeStreamHoverBar');
   var streamHint = document.getElementById('probeStreamDiagramHint');
+  var overviewProbesDetail = document.getElementById('tradeOverviewProbesDetail');
   var streamChartState = {
     layout: null,
     samples: [],
@@ -375,11 +375,7 @@ export function initProbes(socket, state, log) {
     var probeMs = probeMsFromPeriods(p);
     var bid = state.currentBid;
     var offer = state.currentOffer;
-    var st = state.engineStatus || 'ready';
-    var statusText = 'Collecting samples…';
-    if (st === 'connecting') statusText = 'Connecting to IG and price stream…';
-    else if (st === 'connected') statusText = 'Starting price stream…';
-    else if (st !== 'running') statusText = 'Waiting for live prices — open Trade to start the stream.';
+    var statusText = 'Waiting for chart data — see Overview for stream status.';
 
     if (streamMeta) {
       var bidStr = bid != null && !isNaN(bid) ? formatVal(bid) : '—';
@@ -423,14 +419,7 @@ export function initProbes(socket, state, log) {
     paintStreamChart(p, longSamp, shortStats, mediumStats, longStats, shortT, mediumT, longT);
     if (streamHint) {
       var hasData = longSamp.length >= 2;
-      var eng = state.engineStatus || 'ready';
       streamHint.classList.toggle('hidden', hasData);
-      if (!hasData && eng !== 'running' && eng !== 'connecting') {
-        streamHint.textContent =
-          eng === 'connected'
-            ? 'Starting price stream…'
-            : 'Live chart starts automatically on Trade (independent of rules).';
-      }
     }
   }
 
@@ -456,7 +445,7 @@ export function initProbes(socket, state, log) {
 
   function setSampleCountEl(el, row) {
     if (!el || !row) return;
-    el.textContent = formatProbeSampleCount(row.count, row.expectedCount, row.coveragePct);
+    el.textContent = String(row.count != null ? row.count : 0);
     el.classList.toggle('text-amber-400', row.lowCoverage);
     el.classList.toggle('text-slate-500', !row.lowCoverage);
     var tip = row.fromServer
@@ -470,13 +459,9 @@ export function initProbes(socket, state, log) {
     el.title = tip;
   }
 
-  /** Server buffer when rules run on server; trade-only view keeps local price_history (~1 Hz). */
+  /** Server stats after reconnect (or live_probe_stats); chart still uses merged priceHistory. */
   function shouldUseServerProbes() {
-    return !!(
-      state.rulesEngineRunning &&
-      state.serverProbeSnapshot &&
-      state.serverProbeSnapshot.probes
-    );
+    return !!(state.serverProbeSnapshot && state.serverProbeSnapshot.probes);
   }
 
   function trendFromServerProbe(p) {
@@ -488,8 +473,28 @@ export function initProbes(socket, state, log) {
     return { dir: dir, pct: pct, text: arrow + ' ' + sign + Number(pct).toFixed(2) + '%' };
   }
 
-  function coverageRowFromServerCount(count) {
-    return { count: count || 0, expectedCount: 0, coveragePct: null, lowCoverage: false, fromServer: true };
+  /** Overview + panel lookback lines (Short / Medium / Long). */
+  function updateTradeOverviewProbes(coverageByProbe) {
+    if (!overviewProbesDetail) return;
+    var order = [
+      { key: 'long', label: 'Long', color: 'rgb(167 139 250 / 0.95)' },
+      { key: 'medium', label: 'Medium', color: 'rgb(245 158 11 / 0.95)' },
+      { key: 'short', label: 'Short', color: 'rgb(34 211 238 / 0.95)' }
+    ];
+    var lines = [];
+    for (var oi = 0; oi < order.length; oi++) {
+      var item = order[oi];
+      var row = coverageByProbe[item.key];
+      var st = formatProbeLookbackStatus(row);
+      lines.push(
+        '<span style="color:' + item.color + '">' + item.label + '</span> ' +
+          (st.warn ? '<span class="text-amber-400">' : '<span class="text-emerald-500/90">') +
+          st.text +
+          '</span>'
+      );
+    }
+    overviewProbesDetail.innerHTML = lines.join('<br>');
+    overviewProbesDetail.title = 'In-market coverage per probe window (≥85% = ready for rules warmup)';
   }
 
   function applyServerProbeSnapshot(msg) {
@@ -546,15 +551,13 @@ export function initProbes(socket, state, log) {
         periodStartBuy: sp.long.periodStartBuy,
         periodStartSell: sp.long.periodStartSell
       };
-      coverageByProbe = {
-        short: coverageRowFromServerCount(sp.short.count),
-        medium: coverageRowFromServerCount(sp.medium.count),
-        long: coverageRowFromServerCount(sp.long.count)
-      };
       shortTrendVal = trendFromServerProbe(sp.short);
       mediumTrendVal = trendFromServerProbe(sp.medium);
       longTrendVal = trendFromServerProbe(sp.long);
-      coverage = { hasWarnings: false, warnings: [] };
+      coverage = analyzeProbeCoverage(history, now, p.short, p.medium, p.long, filterOpts);
+      for (var svi = 0; svi < coverage.rows.length; svi++) {
+        coverageByProbe[coverage.rows[svi].probe] = coverage.rows[svi];
+      }
     } else {
       shortStats = computeStats(shortSamp);
       mediumStats = computeStats(mediumSamp);
@@ -607,6 +610,7 @@ export function initProbes(socket, state, log) {
     setProbeLookbackStatusEl(longStatusEl, coverageByProbe.long);
     setProbeLookbackStatusEl(mediumStatusEl, coverageByProbe.medium);
     setProbeLookbackStatusEl(shortStatusEl, coverageByProbe.short);
+    updateTradeOverviewProbes(coverageByProbe);
     var shortT = shortTrendVal || lastShortTrend;
     var mediumT = mediumTrendVal || lastMediumTrend;
     var longT = longTrendVal || lastLongTrend;
@@ -668,6 +672,7 @@ export function initProbes(socket, state, log) {
     state.priceHistory = merged;
     chartSeedCache = merged.slice(-MAX_SAMPLES);
     scheduleChartRepaint();
+    render();
   }
 
   function addSample(bid, offer, spread, marketState) {
@@ -853,18 +858,6 @@ export function initProbes(socket, state, log) {
     getProbeValues: function () { return lastProbeValues; },
     /** Coverage rows for short/medium/long (same thresholds as probe warnings). */
     getProbeCoverage: function () {
-      if (shouldUseServerProbes()) {
-        var sp = state.serverProbeSnapshot.probes;
-        return {
-          hasWarnings: false,
-          warnings: [],
-          rows: [
-            { probe: 'short', label: 'Short', count: sp.short.count, fromServer: true },
-            { probe: 'medium', label: 'Medium', count: sp.medium.count, fromServer: true },
-            { probe: 'long', label: 'Long', count: sp.long.count, fromServer: true }
-          ]
-        };
-      }
       var history = state.priceHistory || [];
       var p = getPeriods();
       return analyzeProbeCoverage(

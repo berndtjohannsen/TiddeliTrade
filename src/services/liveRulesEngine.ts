@@ -32,6 +32,8 @@ import type { ClientSentiment } from './priceRecorder';
 const RULE_GROUP_ORDER = ['long', 'medium', 'short', 'other'] as const;
 const DEAL_ATTEMPT_COOLDOWN_MS = 8000;
 const MAX_STREAM_SAMPLES = 120000;
+/** Cap reconnect seed payload (~1 Hz trading day fits; thinned if larger). */
+const MAX_RECONNECT_PROBE_SEED = 12000;
 /** Stream pause longer than this resets probe buffers when full lookback is required. */
 const PROBE_STREAM_GAP_RESET_MS = 5000;
 
@@ -376,15 +378,27 @@ export function onLiveRulesTransactionClosed(
   }
 }
 
-/** Clock-driven tasks (forced close) — call ~every 30s while stream/rules active. */
+/**
+ * Daily forced flatten at configured time — server-only, independent of rules engine running
+ * and of whether a browser tab is open (requires IG session + maintenance timer on server).
+ */
+export async function runServerForcedCloseClock(
+  deps: LiveRulesEngineDeps,
+  epic: string,
+  nowMs: number = Date.now()
+): Promise<void> {
+  const cfg = loadConfig();
+  const rt = getRuntime(epic);
+  await runForcedCloseIfNeeded(deps, epic, rt, cfg, nowMs);
+}
+
+/** Loss-handling day rollover — only while rules engine is enabled for this epic. */
 export async function runLiveRulesScheduledTasks(deps: LiveRulesEngineDeps, epic: string): Promise<void> {
   const cfg = loadConfig();
   if (!isServerRulesEngineEnabled(cfg, epic)) return;
   const rt = getRuntime(epic);
   const tz = scheduleTimezone(cfg, getInstrumentSettings(epic));
-  const now = Date.now();
-  syncLossHandlingDayRollover(rt, now, tz);
-  await runForcedCloseIfNeeded(deps, epic, rt, cfg, now);
+  syncLossHandlingDayRollover(rt, Date.now(), tz);
 }
 
 function configCacheKey(cfg: UserConfig, epic: string, filterOpts: ProbeSampleFilterOpts): string {
@@ -560,7 +574,8 @@ function confirmBeforePlace(cfg: UserConfig, inst: InstrumentSettings | null): b
   return cfg.ui?.tradingRulesConfirmBeforePlace !== false;
 }
 
-/** Advance server probe windows on every stream tick (independent of rules running). */
+/** Advance server probe windows on every stream tick (independent of rules running).
+ *  Handlers also call advanceLiveStreamProbes at 1 Hz with the last quote when IG is quiet. */
 function advanceServerProbesFromTick(
   deps: LiveRulesEngineDeps,
   epic: string,
@@ -659,7 +674,7 @@ export async function onLiveRulesStreamTick(
   const instEarly = getInstrumentSettings(epic);
   const tz = scheduleTimezone(cfg, instEarly);
   syncLossHandlingDayRollover(rt, now, tz);
-  await runForcedCloseIfNeeded(deps, epic, rt, cfg, now);
+  await runServerForcedCloseClock(deps, epic, now);
 
   const inst = getInstrumentSettings(epic);
   const filterOpts = deps.getProbeFilterOpts(epic);
@@ -795,12 +810,43 @@ export function countStreamSampleCount(epic: string): number {
   return runtimeByEpic.get(epic)?.streamSamples.length ?? 0;
 }
 
-/** In-memory probe samples for reconnect (browser chart + coverage display). */
-export function getLiveProbeSeedForEpic(epic: string): Array<{ ts: number; mid: number; spread: number }> {
+function thinSeedSamples<T extends { ts: number }>(samples: T[], maxPoints: number): T[] {
+  if (samples.length <= maxPoints) return samples;
+  const out: T[] = [];
+  const step = samples.length / maxPoints;
+  for (let i = 0; i < maxPoints; i++) {
+    out.push(samples[Math.floor(i * step)]!);
+  }
+  return out;
+}
+
+/** In-memory probe/chart seed for reconnect — prefer stream buffer since fromTs (London day start on server). */
+export function getLiveProbeSeedForEpic(
+  epic: string,
+  fromTs = 0
+): Array<{ ts: number; mid: number; spread: number; marketState?: string | null }> {
   const rt = ensureRuntimeProbeState(epic);
-  if (rt?.tracker) return rt.tracker.exportSeedSamples();
-  if (rt && rt.streamSamples.length > 0) {
-    return rt.streamSamples.map((row) => ({ ts: row.ts, mid: row.mid, spread: row.spread }));
+  if (!rt) return [];
+  if (rt.streamSamples.length > 0) {
+    const fromStream = rt.streamSamples
+      .filter((row) => row.ts >= fromTs)
+      .map((row) => ({
+        ts: row.ts,
+        mid: row.mid,
+        spread: row.spread,
+        marketState: row.marketState ?? null,
+      }));
+    if (fromStream.length >= 2) {
+      return thinSeedSamples(fromStream, MAX_RECONNECT_PROBE_SEED);
+    }
+  }
+  if (rt.tracker) {
+    return rt.tracker.exportSeedSamples().map((row) => ({
+      ts: row.ts,
+      mid: row.mid,
+      spread: row.spread,
+      marketState: null as string | null,
+    }));
   }
   return [];
 }

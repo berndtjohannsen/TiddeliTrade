@@ -150,6 +150,39 @@
   width: 100%;
   align-items: start;
 }
+.app-float-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+.app-float-modal.hidden {
+  display: none;
+}
+.app-float-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgb(0 0 0 / 0.55);
+}
+.app-float-modal-panel {
+  position: relative;
+  z-index: 1;
+  min-width: min(520px, calc(100vw - 2rem));
+  max-width: calc(100vw - 2rem);
+}
+.app-log-modal-panel {
+  width: min(720px, calc(100vw - 2rem));
+}
+.app-float-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
 .trade-layout-probes,
 .trade-layout-log {
   grid-column: 1 / -1;
