@@ -8,6 +8,7 @@ import { loadConfig, type InstrumentSettings, type UserConfig } from '../config'
 import {
   analyzeProbeCoverage,
   isProbeEligibleSample,
+  PROBE_LOW_COVERAGE_PCT,
   PROBE_SAMPLE_INTERVAL_MS,
   type ProbeSampleFilterOpts,
 } from './probeSamples';
@@ -36,6 +37,8 @@ const MAX_STREAM_SAMPLES = 120000;
 const MAX_RECONNECT_PROBE_SEED = 12000;
 /** Stream pause longer than this resets probe buffers when full lookback is required. */
 const PROBE_STREAM_GAP_RESET_MS = 5000;
+/** While probe warmup blocks deals, re-log status at most this often (activity log). */
+const PROBE_WARMUP_LOG_INTERVAL_MS = 15 * 60 * 1000;
 
 export type LiveRulesStreamTick = {
   bid: number;
@@ -108,6 +111,9 @@ type EpicRuntime = {
   lossHandlingWatchDayKey: string | null;
   /** Raw ~1 Hz stream samples — survives tracker rebuilds and stream stop/start. */
   streamSamples: Array<{ ts: number; mid: number; spread: number; marketState?: string | null }>;
+  /** Last probesReady state written to activity log (undefined = not yet logged). */
+  lastLoggedProbesReady?: boolean;
+  lastProbeWarmupLogMs: number;
 };
 
 const runtimeByEpic = new Map<string, EpicRuntime>();
@@ -199,7 +205,8 @@ function forcedCloseTime(cfg: UserConfig, inst: InstrumentSettings | null): stri
   return (inst?.tradingRulesForcedCloseTime ?? cfg.ui?.tradingRulesForcedCloseTime ?? '').trim();
 }
 
-function buildLiveBacktestConfig(cfg: UserConfig, epic: string, filterOpts: ProbeSampleFilterOpts, contractSize: number): BacktestConfig {
+/** Shared shape for live rules and live/backtest reconcile. */
+export function buildLiveBacktestConfig(cfg: UserConfig, epic: string, filterOpts: ProbeSampleFilterOpts, contractSize: number): BacktestConfig {
   const ui = cfg.ui || {};
   const inst = getInstrumentSettings(epic);
   const pm = probeMinutes(cfg);
@@ -436,10 +443,55 @@ function getRuntime(epic: string): EpicRuntime {
       lossHaltedDayKey: null,
       lossHandlingWatchDayKey: null,
       streamSamples: [],
+      lastProbeWarmupLogMs: 0,
     };
     runtimeByEpic.set(epic, rt);
   }
   return rt;
+}
+
+function formatProbeWarmupLine(
+  probeReady: { ready: boolean; detail: string },
+  rt: EpicRuntime,
+  pm: { short: number; medium: number; long: number }
+): string {
+  const buf = rt.samplesForCoverage.length;
+  const periods = `S${pm.short}/M${pm.medium}/L${pm.long}m`;
+  const detail = probeReady.detail.trim() || 'lookbacks filling';
+  return (
+    `Rules: probe warmup — deals blocked (${detail}) · buffer ${buf} samples · ` +
+    `periods ${periods} (need ≥${PROBE_LOW_COVERAGE_PCT}%)`
+  );
+}
+
+/** Activity log: warmup enter/exit and periodic blocked status (server buffer, not the DB). */
+function emitProbeWarmupLogs(
+  deps: LiveRulesEngineDeps,
+  rt: EpicRuntime,
+  pm: { short: number; medium: number; long: number },
+  probeReady: { ready: boolean; detail: string },
+  now: number
+): void {
+  const wasReady = rt.lastLoggedProbesReady;
+  const isReady = probeReady.ready;
+  if (isReady) {
+    if (wasReady !== true) {
+      deps.log(
+        `Rules: probe lookbacks ready — deal placement enabled (server · buffer ${rt.samplesForCoverage.length} samples)`
+      );
+      rt.lastLoggedProbesReady = true;
+      rt.lastProbeWarmupLogMs = now;
+    }
+    return;
+  }
+  const becameBlocked = wasReady === true;
+  const firstBlocked = wasReady === undefined;
+  const duePeriodic = now - rt.lastProbeWarmupLogMs >= PROBE_WARMUP_LOG_INTERVAL_MS;
+  if (becameBlocked || firstBlocked || duePeriodic) {
+    deps.log(formatProbeWarmupLine(probeReady, rt, pm));
+    rt.lastLoggedProbesReady = false;
+    rt.lastProbeWarmupLogMs = now;
+  }
 }
 
 function rebuildTrackerFromStreamSamples(
@@ -521,6 +573,8 @@ function resetProbeBuffersAfterStreamGap(rt: EpicRuntime): void {
   rt.prevRulesPass = false;
   rt.prevBlocked = true;
   rt.dayStartBuy = null;
+  rt.lastLoggedProbesReady = undefined;
+  rt.lastProbeWarmupLogMs = 0;
 }
 
 function probesReadyForRules(
@@ -592,9 +646,11 @@ function advanceServerProbesFromTick(
     isProbeWarmupRequired(cfg, inst) &&
     isServerRulesEngineEnabled(cfg, epic)
   ) {
+    const cleared = rt.samplesForCoverage.length;
     resetProbeBuffersAfterStreamGap(rt);
     deps.log(
-      `Rules: stream gap ${Math.round((now - lastBufTs) / 1000)}s — probe lookbacks reset (warmup required)`
+      `Rules: stream gap ${Math.round((now - lastBufTs) / 1000)}s — probe lookbacks reset ` +
+        `(${cleared} stream samples cleared; warmup required)`
     );
   }
   if (now - rt.lastSampleTs < PROBE_SAMPLE_INTERVAL_MS) return null;
@@ -684,6 +740,9 @@ export async function onLiveRulesStreamTick(
   const ruleSets = baseConfig.ruleSets || [];
   const allRules = ruleSets.flatMap((rs) => rs.rules.filter((r) => r.enabled !== false));
   const probeReady = probesReadyForRules(cfg, inst, allRules, rt, filterOpts, pm);
+  if (isProbeWarmupRequired(cfg, inst) && ruleNeedsProbeStats(allRules)) {
+    emitProbeWarmupLogs(deps, rt, pm, probeReady, now);
+  }
 
   const ctx: LiveRulesEvalContext = {
     offer: tick.offer,

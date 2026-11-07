@@ -107,7 +107,20 @@ export interface BacktestConfig {
   pauseOnLossSecondsSell?: number;
   /** IG daily open mid by Europe/London YYYY-MM-DD (from pre-fetch). Falls back to first sample mid per London day. */
   dayStartByLondonDate?: Record<string, number>;
+  /** When false, simulated stops ratchet every second (optimistic). Default: realistic IG amend throttle. */
+  simulateIgAmendThrottle?: boolean;
+  /** When false, allow rapid re-entries in sim. Default: same ~8s cooldown as live rules. */
+  matchLiveDealCooldown?: boolean;
+  /** Ms between deal attempts in backtest when matchLiveDealCooldown is on. */
+  dealAttemptCooldownMs?: number;
+  /** IG account currency code for optional simulated P/L in account currency. */
+  accountCurrency?: string;
+  /** FX: deal/instrument P/L × this rate ≈ account currency (from IG market). */
+  accountFxRate?: number;
 }
+
+/** Same default as live rules engine. */
+export const LIVE_DEAL_ATTEMPT_COOLDOWN_MS = 8000;
 
 export function parseScheduleTimeHHMM(s: string | undefined | null): number | null {
   if (!s || !s.trim()) return null;
@@ -581,10 +594,33 @@ export function buildDynamicSlReportMeta(config: BacktestConfig): {
   if (config.dynamicStopLossBuy) parts.push('BUY');
   if (config.dynamicStopLossSell) parts.push('SELL');
   if (parts.length === 0) return { dynamicStopLossApplied: false };
+  const realisticAmend = config.simulateIgAmendThrottle !== false;
+  const throttle = realisticAmend
+    ? '; IG amend interval simulated'
+    : ' (instant amend — fast mode, not live-like)';
+  const cooldown =
+    config.matchLiveDealCooldown !== false
+      ? '; live deal cooldown ~' + Math.round((config.dealAttemptCooldownMs ?? LIVE_DEAL_ATTEMPT_COOLDOWN_MS) / 1000) + 's'
+      : '; deal cooldown off (fast mode)';
   return {
     dynamicStopLossApplied: true,
     dynamicStopLossNote:
-      parts.join(' + ') + ' — simulated trailing stop (1s samples; may differ from live IG)',
+      parts.join(' + ') + ' — simulated trailing stop (1s samples' + throttle + cooldown + ')',
+  };
+}
+
+function withAccountCurrencyPnl(report: BacktestReport, config: BacktestConfig): BacktestReport {
+  const cur = (config.accountCurrency || '').trim();
+  const rate = config.accountFxRate;
+  if (!cur || rate == null || isNaN(rate) || rate <= 0) return report;
+  const dealPl = report.totalGainLossPounds;
+  if (dealPl == null) return report;
+  return {
+    ...report,
+    accountCurrency: cur,
+    totalGainLossAccount: dealPl * rate,
+    avgTradePnlAccount:
+      report.tradeCount > 0 ? (dealPl / report.tradeCount) * rate : undefined,
   };
 }
 
@@ -782,6 +818,11 @@ export interface BacktestReport {
   dynamicStopLossApplied?: boolean;
   /** Human-readable note for the simulation report. */
   dynamicStopLossNote?: string;
+  /** IG account currency when accountFxRate was supplied. */
+  accountCurrency?: string;
+  /** Total simulated P/L converted to account currency (approx.). */
+  totalGainLossAccount?: number;
+  avgTradePnlAccount?: number;
   /** One row per calendar day included in this analysis run. */
   analysedDays?: BacktestDaySummary[];
   /** Win/loss/breakeven days, avg/median day P/L, best/worst day, loss-streak halts. */
@@ -1466,6 +1507,7 @@ export function runBacktest(
   let prevRulesPass = false;
   let prevBlocked = false;
   let prevCanOpen = false;
+  let lastDealAttemptTs = 0;
   let prevMid: number | null = null;
   const fallbackDayStartByLondon = fallbackDayStartByLondonDate(samples);
 
@@ -1616,7 +1658,10 @@ export function runBacktest(
       const er = openPosition.entryRulesSnapshot.length > 0 ? openPosition.entryRulesSnapshot : undefined;
 
       if (dslSettings && openPosition.trailing) {
-        advanceTrailingStopSim(openPosition.trailing, exitBid, exitOffer);
+        advanceTrailingStopSim(openPosition.trailing, exitBid, exitOffer, {
+          simulateIgAmendThrottle: config.simulateIgAmendThrottle !== false,
+          sampleTs: s.ts,
+        });
         const stop = openPosition.trailing.lastStopLevel;
         if (stop != null && isTrailingStopHit(openPosition.direction, stop, exitBid, exitOffer)) {
           const pnl =
@@ -1762,7 +1807,10 @@ export function runBacktest(
     }
 
     // Open when rules + dealing session allow (rising edge); closes still use pass / TP/SL above
-    if (canOpenHere && !blocked && !prevCanOpen) {
+    const dealCooldownMs = config.dealAttemptCooldownMs ?? LIVE_DEAL_ATTEMPT_COOLDOWN_MS;
+    const cooldownBlocks =
+      config.matchLiveDealCooldown !== false && lastDealAttemptTs > 0 && s.ts - lastDealAttemptTs < dealCooldownMs;
+    if (canOpenHere && !blocked && !prevCanOpen && !cooldownBlocks) {
       const direction = triggeredRuleSet ? triggeredRuleSet.direction : legacyDirection;
       const entryPrice = direction === 'BUY' ? s.offer : s.bid;
       const dslSettings = getDynamicSlSettings(config, direction);
@@ -1798,6 +1846,7 @@ export function runBacktest(
         entryRulesSnapshot: snapshotEntryRules(triggeredRuleSet, ctx),
         trailing,
       };
+      lastDealAttemptTs = s.ts;
     }
 
     prevRulesPass = pass;
@@ -1886,11 +1935,14 @@ export function runBacktest(
   const dayKeys = new Set<string>();
   for (const s of samples) dayKeys.add(getDayKey(s.ts));
   const selectedDays = Array.from(dayKeys).sort();
-  return attachDayAnalytics(withCoverage, config, selectedDays, consecutiveLossHaltDays, (day) => {
-    let n = 0;
-    for (const s of samples) {
-      if (getDayKey(s.ts) === day) n += 1;
-    }
-    return n;
-  });
+  return withAccountCurrencyPnl(
+    attachDayAnalytics(withCoverage, config, selectedDays, consecutiveLossHaltDays, (day) => {
+      let n = 0;
+      for (const s of samples) {
+        if (getDayKey(s.ts) === day) n += 1;
+      }
+      return n;
+    }),
+    config
+  );
 }

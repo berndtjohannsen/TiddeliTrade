@@ -52,6 +52,17 @@ function pairBorderStyle(seq) {
   return 'border-left: 3px solid ' + color;
 }
 
+function closeReasonShort(reason) {
+  if (!reason) return '—';
+  if (reason === 'dsl') return 'DynSL';
+  if (reason === 'sl') return 'SL';
+  if (reason === 'tp') return 'TP';
+  if (reason === 'forced') return 'Forced';
+  if (reason === 'scheduled') return 'Sched';
+  if (reason === 'manual') return 'Manual';
+  return String(reason);
+}
+
 function renderListHeader() {
   return (
     '<div class="flex items-center gap-2 py-1 px-2 text-[10px] uppercase tracking-wide text-slate-600 border-b border-slate-800 sticky top-0 bg-slate-900/95 z-[1]">' +
@@ -62,6 +73,7 @@ function renderListHeader() {
     '<span class="flex-1 min-w-0">Instrument</span>' +
     '<span class="shrink-0">Side</span>' +
     '<span class="shrink-0">Entry → exit</span>' +
+    '<span class="shrink-0 w-14 text-center" title="Close reason / deal source">Why</span>' +
     '<span class="shrink-0 ml-auto text-right min-w-[4.5rem]">P/L</span>' +
     '</div>'
   );
@@ -98,6 +110,14 @@ function renderTransactionRow(tx, dealMeta) {
   var dirClass = tx.direction === 'BUY' ? 'text-emerald-500' : 'text-red-500';
   var plClass = isOpen ? 'text-amber-400' : tx.profitLoss >= 0 ? 'text-emerald-500' : 'text-red-500';
   var plStr = isOpen ? 'Open' : formatMoney(tx.profitLoss, tx.currency || '');
+  var metaParts = [];
+  if (tx.source) metaParts.push(tx.source);
+  if (!isOpen && tx.closeReason) metaParts.push(closeReasonShort(tx.closeReason));
+  var whyStr = metaParts.length ? metaParts.join(' · ') : '—';
+  var whyTitle = '';
+  if (tx.rulesRunLabel) whyTitle += tx.rulesRunLabel + ' · ';
+  if (tx.stopLossLevel != null) whyTitle += 'SL@open ' + tx.stopLossLevel + ' · ';
+  if (tx.stopLevelAtClose != null) whyTitle += 'SL@close ' + tx.stopLevelAtClose;
   var entryStr = tx.entry != null ? Number(tx.entry).toFixed(2) : '—';
   var exitStr = tx.exit != null ? Number(tx.exit).toFixed(2) : '—';
   var sizeStr = tx.size != null ? String(tx.size) : '';
@@ -141,6 +161,11 @@ function renderTransactionRow(tx, dealMeta) {
     '</span>' +
     '<span class="text-slate-500 font-mono shrink-0">' +
     escAttr(priceLine) +
+    '</span>' +
+    '<span class="text-slate-500 shrink-0 w-14 text-center truncate" title="' +
+    escAttr(whyTitle || whyStr) +
+    '">' +
+    escAttr(whyStr) +
     '</span>' +
     '<span class="' +
     plClass +

@@ -359,57 +359,37 @@ export function drawLiveProbeChart(canvas, opts) {
   }
   if (pathOpen) ctx.stroke();
 
-  // Trade entry/exit as horizontal price lines for the open position (paired by dealId when present)
-  function drawTradePriceSegment(fromTs, toTs, price, color, dash) {
-    if (price == null || isNaN(price) || fromTs == null || toTs == null) return;
-    var seg0 = Math.max(t0, Math.min(fromTs, toTs));
-    var seg1 = Math.min(t1, Math.max(fromTs, toTs));
-    if (seg1 <= seg0) return;
-    var hx1 = xAt(seg0);
-    var hx2 = xAt(seg1);
-    var hy = yAt(price);
+  // Trade open/close: vertical lines at deal times (dot marks entry/exit price on the line)
+  function drawTradeVerticalMarker(mk) {
+    if (!mk || mk.ts == null || mk.ts < t0 || mk.ts > t1) return;
+    var isOpen = mk.kind === 'open';
+    var isBuy = mk.direction === 'BUY';
+    var color = isOpen ? (isBuy ? '#22c55e' : '#ef4444') : '#fbbf24';
+    var dash = isOpen ? [6, 4] : [4, 4];
+    var vx = xAt(mk.ts);
     ctx.strokeStyle = color;
     ctx.lineWidth = 1.5;
-    ctx.setLineDash(dash || [6, 4]);
+    ctx.setLineDash(dash);
     ctx.beginPath();
-    ctx.moveTo(hx1, hy);
-    ctx.lineTo(hx2, hy);
+    ctx.moveTo(vx, padT);
+    ctx.lineTo(vx, padT + plotH);
     ctx.stroke();
     ctx.setLineDash([]);
-  }
-  var tradeMarkers = opts.tradeMarkers || [];
-  var tradeOpens = Object.create(null);
-  var tradeCloses = Object.create(null);
-  var tradeOrphanOpens = [];
-  var tradeOrphanCloses = [];
-  for (var mi = 0; mi < tradeMarkers.length; mi++) {
-    var mk = tradeMarkers[mi];
-    if (!mk || mk.ts == null || mk.price == null || isNaN(mk.price)) continue;
-    if (mk.kind === 'open') {
-      if (mk.dealId) tradeOpens[mk.dealId] = mk;
-      else tradeOrphanOpens.push(mk);
-    } else {
-      if (mk.dealId) tradeCloses[mk.dealId] = mk;
-      else tradeOrphanCloses.push(mk);
+    var price = mk.price != null ? Number(mk.price) : NaN;
+    if (!isNaN(price)) {
+      var py = yAt(price);
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(vx, py, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#0f172a';
+      ctx.lineWidth = 1;
+      ctx.stroke();
     }
   }
-  for (var dealKey in tradeOpens) {
-    if (!Object.prototype.hasOwnProperty.call(tradeOpens, dealKey)) continue;
-    var op = tradeOpens[dealKey];
-    var cl = tradeCloses[dealKey];
-    var endTs = cl ? cl.ts : refTs;
-    var isBuy = op.direction === 'BUY';
-    drawTradePriceSegment(op.ts, endTs, op.price, isBuy ? '#22c55e' : '#ef4444', [6, 4]);
-    if (cl) drawTradePriceSegment(op.ts, cl.ts, cl.price, '#fbbf24', [4, 4]);
-  }
-  for (var oi = 0; oi < tradeOrphanOpens.length; oi++) {
-    var oop = tradeOrphanOpens[oi];
-    var obuy = oop.direction === 'BUY';
-    drawTradePriceSegment(oop.ts, refTs, oop.price, obuy ? '#22c55e' : '#ef4444', [6, 4]);
-  }
-  for (var ci = 0; ci < tradeOrphanCloses.length; ci++) {
-    var ocl = tradeOrphanCloses[ci];
-    drawTradePriceSegment(t0, ocl.ts, ocl.price, '#fbbf24', [4, 4]);
+  var tradeMarkers = opts.tradeMarkers || [];
+  for (var mi = 0; mi < tradeMarkers.length; mi++) {
+    drawTradeVerticalMarker(tradeMarkers[mi]);
   }
 
   // "Now" vertical

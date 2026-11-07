@@ -27,7 +27,19 @@ import {
   type MarketDetails,
 } from '../services/ig';
 import { getLastStreamMarketState, isStreaming, startStream, stopStream, switchEpic } from '../services/stream';
-import { appendTransaction, appendTransactionOpen } from '../transactionLog';
+import {
+  appendTransaction,
+  appendTransactionOpen,
+  consumePendingCloseReason,
+  moveDealOpenMeta,
+  peekDealOpenMeta,
+  setPendingCloseReason,
+  stashDealOpenMeta,
+  getClosedTransactionsForEpic,
+  type DealSource,
+  type TransactionCloseReason,
+} from '../transactionLog';
+import { reconcileLiveWithBacktest } from '../services/liveBacktestReconcile';
 import { setOnProfileChangeListener } from '../onProfileChange';
 import { preventSleep, allowSleep } from '../preventSleep';
 import {
@@ -53,6 +65,7 @@ import {
   type RecordedSample,
 } from '../services/priceRecorder';
 import { VERSION } from '../version';
+import { appendAppLogMessage } from '../activityLogFile';
 import path from 'path';
 import { Worker } from 'worker_threads';
 import {
@@ -85,6 +98,7 @@ import {
   shouldOmitTakeProfitForDeal,
   syncDynamicStopLossWithPositions,
   unregisterDynamicStopLoss,
+  peekDynamicStopLossForDeal,
 } from '../services/dynamicStopLoss';
 import { analyzeSampleQuality, DEFAULT_GAP_PRUNE_LOW_COVERAGE_PCT, type SampleQualityReport } from '../services/sampleQuality';
 import {
@@ -97,6 +111,7 @@ import {
   isServerRulesEngineEnabled,
   onLiveRulesStreamTick,
   onLiveRulesTransactionClosed,
+  buildLiveBacktestConfig,
   registerServerRulesPlacedDeal,
   runLiveRulesScheduledTasks,
   runServerForcedCloseClock,
@@ -452,12 +467,15 @@ async function pollAndEmitPositionsImpl(
     for (const prev of previousPositions) {
       const id = prev.dealId;
       if (currentDealIds.has(id)) continue;
+      const dslPeek = peekDynamicStopLossForDeal(id);
       unregisterDynamicStopLoss(id);
       if (recentlyClosedByUs[id] && now - recentlyClosedByUs[id] < RECENTLY_CLOSED_TTL_MS) continue;
       const size = prev.size ?? 0;
       if (size > 0) {
         const closeConf = await enrichCloseConfFromHistory(session, prev, undefined, session.currencyIsoCode);
-        await recordTransactionFromPosition(io, session, prev, size, closeConf, session.currencyIsoCode);
+        await recordTransactionFromPosition(io, session, prev, size, closeConf, session.currencyIsoCode, {
+          stopLevelAtClose: dslPeek?.lastStopLevel ?? undefined,
+        });
         io.emit('log', 'Position closed by IG (TP/SL): ' + id + ' – recorded in transaction log');
       }
     }
@@ -535,6 +553,53 @@ function openTxTimestamp(pos: Pick<PositionLike, 'createdAt'>): string {
   return new Date().toISOString();
 }
 
+function buildRulesRunLabel(cfg: ReturnType<typeof loadConfig>, epic: string): string {
+  const inst = getInstrumentSettings(epic);
+  const profile = cfg.activeProfile || 'demo';
+  const start =
+    (inst?.tradingRulesEngineStartedDate || '').trim() ||
+    (cfg.ui?.tradingRulesEngineStartedDate || '').trim() ||
+    '';
+  return start ? `${profile} · rules from ${start}` : `${profile} · rules`;
+}
+
+function stashOpenMetaForDeal(params: {
+  key: string;
+  epic: string;
+  source: DealSource;
+  takeProfit?: number;
+  stopLoss?: number;
+}): void {
+  const cfg = loadConfig();
+  stashDealOpenMeta(params.key, {
+    source: params.source,
+    takeProfitLevel:
+      params.takeProfit != null && !isNaN(params.takeProfit) ? params.takeProfit : undefined,
+    stopLossLevel: params.stopLoss != null && !isNaN(params.stopLoss) ? params.stopLoss : undefined,
+    rulesRunLabel: params.source === 'rules' ? buildRulesRunLabel(cfg, params.epic) : undefined,
+  });
+}
+
+function inferIgCloseReason(
+  pos: PositionLike,
+  dslPeek: ReturnType<typeof peekDynamicStopLossForDeal>,
+  exitPrice: number
+): TransactionCloseReason {
+  const tol = 0.08;
+  if (dslPeek?.triggerReached && dslPeek.lastStopLevel != null) {
+    if (pos.direction === 'BUY' && exitPrice <= dslPeek.lastStopLevel + tol) return 'dsl';
+    if (pos.direction === 'SELL' && exitPrice >= dslPeek.lastStopLevel - tol) return 'dsl';
+  }
+  if (pos.limitLevel != null && !isNaN(pos.limitLevel) && Math.abs(exitPrice - pos.limitLevel) < tol) {
+    return 'tp';
+  }
+  if (pos.stopLevel != null && !isNaN(pos.stopLevel) && Math.abs(exitPrice - pos.stopLevel) < tol) {
+    return 'sl';
+  }
+  if (dslPeek?.lastStopLevel != null && Math.abs(exitPrice - dslPeek.lastStopLevel) < tol) return 'dsl';
+  return 'unknown';
+}
+
 function emitTransactionOpenIfNew(
   io: Server,
   pos: PositionLike & { size?: number },
@@ -546,6 +611,7 @@ function emitTransactionOpenIfNew(
   try {
     const sizeNum = pos.size ?? 0;
     const entry = pos.level ?? 0;
+    const meta = peekDealOpenMeta(dealId);
     const tx = appendTransactionOpen({
       timestamp: openTxTimestamp(pos),
       dealId,
@@ -556,6 +622,10 @@ function emitTransactionOpenIfNew(
       entry: typeof entry === 'number' && !isNaN(entry) ? entry : 0,
       currency: pos.currency ?? currencyFallback ?? 'GBP',
       profile: currentIgProfile(),
+      source: meta?.source,
+      takeProfitLevel: meta?.takeProfitLevel,
+      stopLossLevel: meta?.stopLossLevel ?? (pos.stopLevel != null && !isNaN(pos.stopLevel) ? pos.stopLevel : undefined),
+      rulesRunLabel: meta?.rulesRunLabel,
     });
     if (tx) io.emit('transaction_added', tx);
   } catch {
@@ -664,7 +734,11 @@ async function recordTransactionFromPosition(
   pos: PositionLike,
   size: number,
   closeConfirmation?: CloseConfirmation,
-  accountCurrency?: string
+  accountCurrency?: string,
+  closeExtra?: {
+    closeReason?: TransactionCloseReason;
+    stopLevelAtClose?: number;
+  }
 ): Promise<void> {
   const dealIdKey = (pos.dealId || '').trim();
   if (!dealIdKey) return;
@@ -728,6 +802,18 @@ async function recordTransactionFromPosition(
       }
     }
 
+    const openMeta = peekDealOpenMeta(dealIdKey);
+    const pendingReason = consumePendingCloseReason(dealIdKey);
+    const dslPeek = peekDynamicStopLossForDeal(dealIdKey);
+    const closeReason =
+      closeExtra?.closeReason ??
+      pendingReason ??
+      inferIgCloseReason(pos, dslPeek, exit);
+    const stopLevelAtClose =
+      closeExtra?.stopLevelAtClose ??
+      dslPeek?.lastStopLevel ??
+      (pos.stopLevel != null && !isNaN(pos.stopLevel) ? pos.stopLevel : undefined);
+
     const tx = appendTransaction({
       timestamp: new Date().toISOString(),
       openedAt: openTxTimestamp(pos),
@@ -742,6 +828,12 @@ async function recordTransactionFromPosition(
       profitLoss,
       currency,
       profile: currentIgProfile(),
+      source: openMeta?.source,
+      takeProfitLevel: openMeta?.takeProfitLevel,
+      stopLossLevel: openMeta?.stopLossLevel,
+      stopLevelAtClose,
+      closeReason,
+      rulesRunLabel: openMeta?.rulesRunLabel,
     });
     persisted = true;
     if (tx) {
@@ -945,6 +1037,7 @@ function persistAndRunScheduler(session: IgSession, io: Server): void {
           /* ignore */
         }
         recentlyClosedByUs[s.dealId] = Date.now();
+        setPendingCloseReason(s.dealId, 'scheduled');
         const closeResult = await closePosition(session, { dealId: s.dealId, direction: s.direction, size: s.size });
         let closeConf: CloseConfirmation | undefined;
         try {
@@ -953,7 +1046,9 @@ function persistAndRunScheduler(session: IgSession, io: Server): void {
         } catch { /* ignore */ }
         if (posBeforeClose) {
           closeConf = await enrichCloseConfFromHistory(session, posBeforeClose, closeConf, session.currencyIsoCode);
-          await recordTransactionFromPosition(io, session, posBeforeClose, s.size, closeConf, session.currencyIsoCode);
+          await recordTransactionFromPosition(io, session, posBeforeClose, s.size, closeConf, session.currencyIsoCode, {
+            closeReason: 'scheduled',
+          });
         }
         io.emit('log', 'Position closed at scheduled time: ' + s.dealId);
         io.emit('position_closed', { dealId: s.dealId });
@@ -987,6 +1082,7 @@ async function runOverdueCloses(session: IgSession, io: Server): Promise<void> {
         /* ignore */
       }
       recentlyClosedByUs[s.dealId] = Date.now();
+      setPendingCloseReason(s.dealId, 'scheduled');
       const closeResult = await closePosition(session, { dealId: s.dealId, direction: s.direction, size: s.size });
       let closeConf: CloseConfirmation | undefined;
       try {
@@ -995,7 +1091,9 @@ async function runOverdueCloses(session: IgSession, io: Server): Promise<void> {
       } catch { /* ignore */ }
       if (posBeforeClose) {
         closeConf = await enrichCloseConfFromHistory(session, posBeforeClose, closeConf, session.currencyIsoCode);
-        await recordTransactionFromPosition(io, session, posBeforeClose, s.size, closeConf, session.currencyIsoCode);
+        await recordTransactionFromPosition(io, session, posBeforeClose, s.size, closeConf, session.currencyIsoCode, {
+          closeReason: 'scheduled',
+        });
       }
       io.emit('log', 'Position closed (overdue): ' + s.dealId);
       io.emit('position_closed', { dealId: s.dealId });
@@ -1028,6 +1126,14 @@ function accountToClient(session: IgSession) {
 }
 
 export function registerSocketHandlers(io: Server): void {
+  const ioEmit = io.emit.bind(io);
+  io.emit = ((event: string, ...args: unknown[]) => {
+    if (event === 'log' && typeof args[0] === 'string') {
+      appendAppLogMessage(args[0]);
+    }
+    return ioEmit(event, ...args);
+  }) as Server['emit'];
+
   let engineStatus: EngineStatus = 'ready';
   let currentSession: IgSession | null = null;
   /** Cached marketDetails for tab reload (skip redundant IG calls while stream stays up). */
@@ -1053,6 +1159,7 @@ export function registerSocketHandlers(io: Server): void {
         try {
           const posBeforeClose = pos;
           recentlyClosedByUs[pos.dealId] = Date.now();
+          setPendingCloseReason(pos.dealId, 'forced');
           const closeDirection = pos.direction === 'BUY' ? 'SELL' : 'BUY';
           const closeResult = await closePosition(currentSession, {
             dealId: pos.dealId,
@@ -1081,7 +1188,8 @@ export function registerSocketHandlers(io: Server): void {
             posBeforeClose,
             pos.size,
             closeConf,
-            currentSession.currencyIsoCode
+            currentSession.currencyIsoCode,
+            { closeReason: 'forced' }
           );
           scheduledCloses = scheduledCloses.filter((s) => s.dealId !== pos.dealId);
           saveScheduledCloses(scheduledCloses);
@@ -1420,6 +1528,13 @@ export function registerSocketHandlers(io: Server): void {
     const offer = params.offer;
     const entryPrice = direction === 'BUY' ? offer : bid;
     const dealRef = 'TT-' + Date.now();
+    stashOpenMetaForDeal({
+      key: dealRef,
+      epic,
+      source: 'rules',
+      takeProfit,
+      stopLoss,
+    });
     try {
       const result = await createPosition(session, {
         epic,
@@ -1453,7 +1568,10 @@ export function registerSocketHandlers(io: Server): void {
         );
       } catch { /* ignore */ }
       const rulesRegDealId = placedPosition?.dealId ?? conf.dealId;
-      if (rulesRegDealId) registerServerRulesPlacedDeal(rulesRegDealId, direction);
+      if (rulesRegDealId) {
+        moveDealOpenMeta(dealRef, rulesRegDealId);
+        registerServerRulesPlacedDeal(rulesRegDealId, direction);
+      }
       if (placedPosition) {
         emitTransactionOpenIfNew(io, placedPosition, epic, currencyCode);
       }
@@ -2482,6 +2600,8 @@ export function registerSocketHandlers(io: Server): void {
       scheduleTimezone?: string;
       forcedCloseTime?: string;
       maxRunDays?: number;
+      simulateIgAmendThrottle?: boolean;
+      matchLiveDealCooldown?: boolean;
       /** From loaded profile — applied before dealing/day-start resolve for cross-machine parity. */
       backtestMarketSnapshot?: BacktestProfileMarketSnapshot;
     }) => {
@@ -2628,7 +2748,18 @@ export function registerSocketHandlers(io: Server): void {
               inst?.tradingRulesPauseOnLossSeconds,
               ui?.tradingRulesPauseOnLossSeconds
             ),
+        simulateIgAmendThrottle: params.simulateIgAmendThrottle !== false,
+        matchLiveDealCooldown: params.matchLiveDealCooldown !== false,
       };
+
+      if (currentSession) {
+        config.accountCurrency = (currentSession.currencyIsoCode || '').trim() || undefined;
+        try {
+          const mkt = await getMarketDetails(currentSession, epic);
+          const rate = mkt?.exchangeRateToAccount;
+          if (rate != null && !isNaN(rate) && rate > 0) config.accountFxRate = rate;
+        } catch { /* ignore */ }
+      }
 
       function getDaysToAnalyse(): string[] {
         if (selectedDays && selectedDays.length > 0) return selectedDays;
@@ -3095,6 +3226,97 @@ export function registerSocketHandlers(io: Server): void {
       }
     });
 
+    socket.on('reconcile_live_backtest', async (params: {
+      epic: string;
+      fromDate?: string | null;
+      toDate?: string | null;
+      selectedDays?: string[];
+      backtestRuleSets?: ('BUY' | 'SELL')[];
+      simulateIgAmendThrottle?: boolean;
+      matchLiveDealCooldown?: boolean;
+      matchWindowSec?: number;
+    }) => {
+      const epic = (params?.epic || '').trim();
+      if (!epic) {
+        socket.emit('reconcile_live_backtest_report', { error: 'No epic specified' });
+        return;
+      }
+      const cfg = loadConfig();
+      const inst = getInstrumentSettings(epic);
+      const dealingResolved = await resolveDealingForBacktest(epic, inst, currentSession, false);
+      const filterOpts = {
+        is24_7: dealingResolved.is24_7,
+        dealingWeekLondon: dealingResolved.dealingWeekLondon,
+      };
+      const contractSize = liveMarketContextByEpic[epic]?.contractSize ?? 1;
+      const base = buildLiveBacktestConfig(cfg, epic, filterOpts, contractSize);
+      const ruleSetsFilter =
+        Array.isArray(params.backtestRuleSets) && params.backtestRuleSets.length > 0
+          ? params.backtestRuleSets
+          : (['BUY', 'SELL'] as const);
+      const config: BacktestConfig = {
+        ...base,
+        backtestRuleSets: [...ruleSetsFilter],
+        dynamicStopLossBuy: resolveDynamicStopLossForBacktest(epic, cfg, 'rules-buy'),
+        dynamicStopLossSell: resolveDynamicStopLossForBacktest(epic, cfg, 'rules-sell'),
+        simulateIgAmendThrottle: params.simulateIgAmendThrottle !== false,
+        matchLiveDealCooldown: params.matchLiveDealCooldown !== false,
+        dealSize: inst?.dealSize ?? cfg.ui?.dealSize ?? cfg.defaultSize ?? '1',
+      };
+      const fromDate = params?.fromDate?.trim();
+      const toDate = params?.toDate?.trim();
+      const selectedDays =
+        Array.isArray(params?.selectedDays) && params.selectedDays.length > 0
+          ? params.selectedDays.map((d) => d.trim()).filter(Boolean).sort()
+          : getRecordedDays(epic).filter((d) => {
+              if (fromDate && d < fromDate) return false;
+              if (toDate && d > toDate) return false;
+              return true;
+            });
+      if (selectedDays.length === 0) {
+        socket.emit('reconcile_live_backtest_report', { error: 'No days in range' });
+        return;
+      }
+      const dayStartResolved = await resolveDayStartsForBacktest(
+        epic,
+        selectedDays,
+        inst,
+        currentSession,
+        (msg) => io.emit('log', msg)
+      );
+      config.dayStartByLondonDate = dayStartResolved.dayStarts;
+      const samples: RecordedSample[] = [];
+      for (const day of selectedDays) {
+        samples.push(...getRecordedSamplesFiltered(epic, { days: [day] }));
+      }
+      samples.sort((a, b) => a.ts - b.ts);
+      if (samples.length === 0) {
+        socket.emit('reconcile_live_backtest_report', { error: 'No samples in range' });
+        return;
+      }
+      const workerPath = path.resolve(process.cwd(), 'dist', 'workers', 'backtestWorker.js');
+      let report: BacktestReport;
+      try {
+        report = await runBacktestInWorker(workerPath, samples, config, false, { isCancelled: () => false, onWorker: () => {} });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        socket.emit('reconcile_live_backtest_report', { error: msg });
+        return;
+      }
+      const fromTs = samples[0].ts;
+      const toTs = samples[samples.length - 1].ts;
+      const liveClosed = getClosedTransactionsForEpic(epic, { fromTs, toTs });
+      const reconcile = reconcileLiveWithBacktest(epic, liveClosed, report.trades ?? [], {
+        fromTs,
+        toTs,
+        matchWindowSec:
+          typeof params.matchWindowSec === 'number' && params.matchWindowSec > 0
+            ? params.matchWindowSec
+            : undefined,
+      });
+      socket.emit('reconcile_live_backtest_report', { reconcile, simTradeCount: report.tradeCount, simTotalPl: report.totalGainLossAccount ?? report.totalGainLossPounds });
+    });
+
     socket.on('getPositions', async () => {
       if (!currentSession) {
         socket.emit('positions', []);
@@ -3189,6 +3411,7 @@ export function registerSocketHandlers(io: Server): void {
         }
         if (id) {
           recentlyClosedByUs[id] = Date.now();
+          setPendingCloseReason(id, 'manual');
         }
         const closeResult = await closePosition(currentSession, { dealId: dealId || undefined, epic, expiry, direction: closeDirection, size });
         if (id) {
@@ -3205,7 +3428,9 @@ export function registerSocketHandlers(io: Server): void {
           } catch { /* ignore */ }
           if (posBeforeClose) {
             closeConf = await enrichCloseConfFromHistory(currentSession, posBeforeClose, closeConf, currentSession.currencyIsoCode);
-            await recordTransactionFromPosition(io, currentSession, posBeforeClose, size, closeConf, currentSession.currencyIsoCode);
+            await recordTransactionFromPosition(io, currentSession, posBeforeClose, size, closeConf, currentSession.currencyIsoCode, {
+              closeReason: 'manual',
+            });
           }
         }
         io.emit('log', 'Position closed: ' + (epic || dealId));
@@ -3317,6 +3542,14 @@ export function registerSocketHandlers(io: Server): void {
       const entryPrice = direction === 'BUY' ? offer : bid;
 
       const dealRef = 'TT-' + Date.now();
+      const dealSource: DealSource = params.source === 'rules' ? 'rules' : 'manual';
+      stashOpenMetaForDeal({
+        key: dealRef,
+        epic,
+        source: dealSource,
+        takeProfit,
+        stopLoss,
+      });
       try {
         if (dslSettings) {
           const srcLabel = params.source === 'rules' ? 'rules deal' : 'deal';
@@ -3354,6 +3587,8 @@ export function registerSocketHandlers(io: Server): void {
           direction,
         });
         let placedPosition: Awaited<ReturnType<typeof getPositions>>[number] | undefined;
+        const regDealId = conf.dealId?.trim();
+        if (regDealId) moveDealOpenMeta(dealRef, regDealId);
         if (currentSession) {
           try {
             const positions = await pollAndEmitPositions(currentSession, io);

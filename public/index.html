@@ -31,7 +31,7 @@
     </div>
     <div class="flex items-center gap-3 flex-1 justify-end flex-wrap">
       <span class="relative inline-flex items-center gap-0.5">
-        <button type="button" id="openAppLogBtn" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-xs font-medium transition-colors" data-tooltip="Open activity log (server and app messages)">Log</button>
+        <button type="button" id="openAppLogBtn" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-xs font-medium transition-colors" data-tooltip="Main app log — server messages; also saved on disk as app.log">Log</button>
         <button type="button" data-log-popout="activity" class="px-1.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-500 text-xs font-medium transition-colors" title="Pop out activity log to another window" aria-label="Pop out activity log">↗</button>
         <span id="appLogUnreadBadge" class="hidden absolute -top-0.5 right-6 min-w-[0.5rem] h-2 w-2 rounded-full bg-amber-500 ring-2 ring-slate-950 pointer-events-none" aria-hidden="true"></span>
       </span>
@@ -937,7 +937,7 @@
           </div>
           <button type="button" id="researchOpenTradeRulesBtn" class="shrink-0 px-2 py-1 rounded text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 border border-slate-600" data-tooltip="Switch to Trade tab to edit BUY/SELL rules and probe periods">Edit rules on Trade →</button>
         </div>
-        <p class="text-[10px] text-amber-500/90 mb-2 border border-amber-700/40 rounded px-2 py-1 bg-amber-950/30" data-tooltip="Uses the active Trade profile (or Custom rules on Trade). Dynamic stop loss is simulated when enabled (see report).">Simulated only. Backtest uses the same rules as Trade; dynamic stop loss is simulated when enabled (see report).</p>
+        <p class="text-[10px] text-amber-500/90 mb-2 border border-amber-700/40 rounded px-2 py-1 bg-amber-950/30" data-tooltip="Uses Trade rules. By default the sim uses IG-style amend timing and live deal cooldown unless you turn fast mode off below.">Simulated only — defaults to live-like timing (IG amend interval + deal cooldown). Uncheck those only for a faster, optimistic run.</p>
         <div class="flex flex-wrap items-center gap-2 mb-2">
           <button type="button" id="testRulesRecordBtn" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-slate-700" data-tooltip="Start or stop recording prices to the database (~1/sec). Connects to IG automatically when needed.">Start recording</button>
           <button type="button" id="testRulesButton2" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed" data-tooltip="Run backtest on recorded samples using current rules and probe periods">Analyse recording</button>
@@ -1023,6 +1023,18 @@
               <span class="text-slate-400" data-tooltip="Positions can span days. Use fewer days for long runs.">Positions carry over</span>
             </label>
           </div>
+          <div class="flex flex-col gap-1 pt-1 border-t border-slate-800">
+            <span class="text-slate-500 text-[11px]" data-tooltip="On by default for Analyse and Reconcile. Uncheck only for fast optimistic runs.">Live-like simulation (default on):</span>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" id="backtestSimulateIgAmend" checked class="rounded bg-slate-800 border-slate-600 text-violet-500">
+              <span class="text-slate-400" data-tooltip="On by default. Off = stop trails every second (usually looks better than live).">IG amend interval</span>
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" id="backtestMatchLiveCooldown" checked class="rounded bg-slate-800 border-slate-600 text-violet-500">
+              <span class="text-slate-400" data-tooltip="On by default. Off = sim may re-enter faster than live rules.">Live deal cooldown (~8s)</span>
+            </label>
+            <button type="button" id="testRulesReconcileBtn" class="mt-0.5 self-start px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-[11px]" data-tooltip="Compare deals log closes to a quick backtest on the selected days (same rules as Trade)">Reconcile with deals log</button>
+          </div>
         </div>
         <div id="backtestProfilesSection" class="mb-2 flex flex-col gap-1.5 text-xs border border-slate-700/80 rounded-lg p-2 bg-slate-900/60">
           <div class="flex flex-wrap items-center gap-2">
@@ -1054,6 +1066,10 @@
           <div id="testRulesBlockerSection" class="hidden mt-2 pt-2 border-t border-slate-700">
             <h5 class="text-slate-500 font-medium mb-1" data-tooltip="Times a rule alone blocked an open while flat, market open, and your schedule allowed trading. Each count is one episode (burst seconds collapsed) — roughly the max extra trades if you removed that rule alone.">Missed opens (trim candidates)</h5>
             <ul id="testRulesBlockerList" class="text-slate-400 space-y-0.5"></ul>
+          </div>
+          <div id="testRulesReconcileSection" class="hidden mt-2 pt-2 border-t border-amber-700/40">
+            <h5 class="text-amber-300/90 font-medium mb-1" data-tooltip="Pairs live IG deals from the Deals log with simulated trades for the same days.">Live vs simulated</h5>
+            <div id="testRulesReconcileBody" class="text-[11px] text-slate-300 font-mono space-y-1"></div>
           </div>
         </div>
       </section>
@@ -1115,9 +1131,11 @@
     <div class="app-float-modal-backdrop" data-close-modal="appLogModal" aria-hidden="true"></div>
     <div id="logWindow" class="app-float-modal-panel app-log-modal-panel flex flex-col bg-slate-950 border border-slate-700 rounded-xl shadow-2xl font-mono text-[10px] leading-tight text-slate-500" style="height: 320px;" aria-label="Activity log">
       <div class="app-float-modal-header shrink-0">
-        <h2 id="appLogModalTitle" class="text-sm font-semibold text-slate-300">Activity log</h2>
+        <h2 id="appLogModalTitle" class="text-sm font-semibold text-slate-300">Log</h2>
+        <p class="text-[10px] text-slate-500 mt-0.5">Server messages (rules, probes, deals). Saved to <span class="font-mono">app.log</span> on the machine running TiddeliTrade — not the Deals or Recording logs.</p>
         <div class="flex items-center gap-2">
-          <button type="button" id="appLogClearBtn" class="px-2 py-1 rounded text-xs bg-slate-800 hover:bg-slate-700 text-slate-400" data-tooltip="Clear messages in this window only">Clear</button>
+          <a href="/api/app-log.txt" class="px-2 py-1 rounded text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 no-underline" download title="Download persisted server log">Download</a>
+          <button type="button" id="appLogClearBtn" class="px-2 py-1 rounded text-xs bg-slate-800 hover:bg-slate-700 text-slate-400" data-tooltip="Clear this window only — app.log on disk is unchanged">Clear</button>
           <button type="button" data-log-popout="activity" class="px-2 py-1 rounded text-xs bg-slate-800 hover:bg-slate-700 text-slate-400" data-tooltip="Open in a separate browser window (second monitor)">Pop out</button>
           <button type="button" class="app-float-modal-close px-2 py-1 rounded text-xs bg-slate-800 hover:bg-slate-700 text-slate-300" data-close-modal="appLogModal" aria-label="Close">Close</button>
         </div>
@@ -1134,10 +1152,12 @@
       <div class="app-float-modal-header shrink-0 mb-2">
         <div>
           <h2 id="transactionLogModalTitle" class="text-sm font-semibold text-slate-300">Transaction log</h2>
-          <p class="text-[10px] text-slate-500 mt-0.5">Live IG deals only — matching deal ids share a round-trip # and colour.</p>
+          <p class="text-[10px] text-slate-500 mt-0.5">Live IG deals — source, close reason, stops when known. Matching deal ids share a round-trip #.</p>
         </div>
         <div class="flex items-center gap-2">
           <span class="text-[10px] text-emerald-500/90 font-medium">Live</span>
+          <a href="/api/transactions/export.csv" class="px-2 py-1 rounded text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors no-underline" download title="Download closed deals as CSV">CSV</a>
+          <a href="/api/transactions/export.json" class="px-2 py-1 rounded text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors no-underline" download title="Download full deals log as JSON">JSON</a>
           <button type="button" id="transactionLogReset" class="px-2 py-1 rounded text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">Reset</button>
           <button type="button" data-log-popout="deals" class="px-2 py-1 rounded text-xs bg-slate-800 hover:bg-slate-700 text-slate-400" data-tooltip="Open in a separate browser window (second monitor)">Pop out</button>
           <button type="button" class="app-float-modal-close px-2 py-1 rounded text-xs bg-slate-800 hover:bg-slate-700 text-slate-300" data-close-modal="transactionLogModal" aria-label="Close">Close</button>

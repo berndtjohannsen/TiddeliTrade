@@ -464,6 +464,8 @@ export interface TrailingStopSimState {
   highestLockApplied: number;
   /** True once unrealized profit reached trigger (trailing active). */
   triggerReached: boolean;
+  /** Simulated IG amend throttle (ms since epoch of last ratchet). */
+  lastAmendAttemptMs: number;
 }
 
 export function createTrailingStopSimState(
@@ -490,11 +492,24 @@ export function createTrailingStopSimState(
     lastStopLevel: initialStopLevel,
     highestLockApplied,
     triggerReached: false,
+    lastAmendAttemptMs: 0,
   };
 }
 
-/** Ratchet simulated stop from bid/offer (one sample; no amend throttle). */
-export function advanceTrailingStopSim(state: TrailingStopSimState, bid: number, offer: number): void {
+export interface TrailingStopSimAdvanceOpts {
+  /** When true, only ratchet the stop at updateIntervalMs (like live IG amends). */
+  simulateIgAmendThrottle?: boolean;
+  /** Sample timestamp for throttle (defaults to Date.now()). */
+  sampleTs?: number;
+}
+
+/** Ratchet simulated stop from bid/offer (one sample per call). */
+export function advanceTrailingStopSim(
+  state: TrailingStopSimState,
+  bid: number,
+  offer: number,
+  opts?: TrailingStopSimAdvanceOpts
+): void {
   const unrealized = unrealizedProfit(
     state.direction,
     state.entryPrice,
@@ -515,8 +530,28 @@ export function advanceTrailingStopSim(state: TrailingStopSimState, bid: number,
     state.contractSize
   );
   if (!isStopImprovement(state.direction, targetStop, state.lastStopLevel)) return;
+  const now = opts?.sampleTs ?? Date.now();
+  if (opts?.simulateIgAmendThrottle) {
+    if (now - state.lastAmendAttemptMs < state.settings.updateIntervalMs) return;
+    state.lastAmendAttemptMs = now;
+  }
   state.lastStopLevel = targetStop;
   state.highestLockApplied = desiredLock;
+}
+
+/** Snapshot live dynamic-SL state before unregister (for deal journal). */
+export function peekDynamicStopLossForDeal(dealId: string): {
+  lastStopLevel: number | null;
+  triggerReached: boolean;
+  highestLockApplied: number;
+} | null {
+  const t = trackedByDealId.get((dealId || '').trim());
+  if (!t) return null;
+  return {
+    lastStopLevel: t.lastStopLevel,
+    triggerReached: t.triggerReached,
+    highestLockApplied: t.highestLockApplied,
+  };
 }
 
 export function isTrailingStopHit(

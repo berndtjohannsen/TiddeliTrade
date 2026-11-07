@@ -1122,6 +1122,34 @@ export function initTestRules(socket, state, log, profileOpts) {
       ctx.font = '10px system-ui,sans-serif';
       ctx.fillText(label, Math.min(x + 3, w - padR - 48), padT + 12);
     }
+    /** Vertical deal marker at open/close time with price dot on the line. */
+    function drawTradeDealVertical(ts, price, color, label, dash) {
+      if (ts < t0 || ts > t1) return;
+      var x = xAt(ts);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash(dash || [6, 4]);
+      ctx.beginPath();
+      ctx.moveTo(x, padT);
+      ctx.lineTo(x, padT + plotH);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      if (price != null && !isNaN(price)) {
+        var y = yAt(price);
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#0f172a';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      if (label) {
+        ctx.fillStyle = color;
+        ctx.font = '10px system-ui,sans-serif';
+        ctx.fillText(label, Math.min(x + 3, w - padR - 48), padT + 24);
+      }
+    }
     /** Shaded probe lookback bands and start/stop verticals at a reference time (usually entry). */
     function drawProbeWindowOverlays(refTs, probeWindowMs, phase) {
       if (refTs == null || !probeWindowMs) return;
@@ -1380,10 +1408,10 @@ export function initTestRules(socket, state, log, profileOpts) {
       var tradeEndTs = tr.exitTs;
       var tradeStartTs = tr.entryTs;
       if (overlays.entry && tr.entryPrice != null) {
-        drawHLineSegment(tradeStartTs, tradeEndTs, Number(tr.entryPrice), '#34d399', 'Entry', [6, 3]);
+        drawTradeDealVertical(tradeStartTs, Number(tr.entryPrice), '#34d399', 'Entry', [6, 3]);
       }
       if (overlays.exit && tr.exitPrice != null) {
-        drawHLineSegment(tradeStartTs, tradeEndTs, Number(tr.exitPrice), '#fbbf24', 'Exit', [6, 3]);
+        drawTradeDealVertical(tradeEndTs, Number(tr.exitPrice), '#fbbf24', 'Exit', [6, 3]);
       }
       if (overlays.tradeMid && tr.entryPrice != null && tr.exitPrice != null) {
         var tradeAvg = (Number(tr.entryPrice) + Number(tr.exitPrice)) / 2;
@@ -2073,6 +2101,15 @@ export function initTestRules(socket, state, log, profileOpts) {
       : (r.avgTradePnl != null ? (r.avgTradePnl >= 0 ? '+' : '') + r.avgTradePnl.toFixed(2) + ' pts' : '—');
     var rows = [
       ['Total P/L', totalPl],
+      [
+        'Total P/L (account)',
+        r.totalGainLossAccount != null && r.accountCurrency
+          ? (r.totalGainLossAccount >= 0 ? '+' : '') +
+            r.totalGainLossAccount.toFixed(2) +
+            ' ' +
+            r.accountCurrency
+          : '—'
+      ],
       ['Trades', r.tradeCount != null ? String(r.tradeCount) : '—'],
       ['Winning', r.winningTrades != null ? String(r.winningTrades) : '—'],
       ['Losing', r.losingTrades != null ? String(r.losingTrades) : '—'],
@@ -2140,7 +2177,7 @@ export function initTestRules(socket, state, log, profileOpts) {
     if (r.dynamicStopLossNote) {
       rows.push(['Dynamic SL', r.dynamicStopLossNote]);
     } else if (usedDynamicSl || r.dynamicStopLossApplied) {
-      rows.push(['Dynamic SL', 'Applied in simulation (trailing stop)']);
+      rows.push(['Dynamic SL', 'Simulated trailing stop (see realism toggles above)']);
     }
     if (usedTpSl) rows.unshift(['TP/SL', 'Applied from deal settings']);
     reportBody.innerHTML = rows.map(function (row) {
@@ -2987,6 +3024,157 @@ export function initTestRules(socket, state, log, profileOpts) {
     }
   });
 
+  function backtestRealismFromUi() {
+    var amendEl = document.getElementById('backtestSimulateIgAmend');
+    var cdEl = document.getElementById('backtestMatchLiveCooldown');
+    // Default on when controls missing (server also defaults realistic if omitted).
+    return {
+      simulateIgAmendThrottle: !amendEl || amendEl.checked,
+      matchLiveDealCooldown: !cdEl || cdEl.checked
+    };
+  }
+
+  function renderReconcileReport(payload) {
+    var section = document.getElementById('testRulesReconcileSection');
+    var body = document.getElementById('testRulesReconcileBody');
+    if (!section || !body) return;
+    if (payload && payload.error) {
+      section.classList.remove('hidden');
+      body.innerHTML = '<p class="text-amber-400">' + String(payload.error) + '</p>';
+      return;
+    }
+    var rec = payload && payload.reconcile;
+    if (!rec) return;
+    var lines = [];
+    lines.push(
+      'Live closes: ' +
+        rec.liveCount +
+        ' · Simulated: ' +
+        rec.simCount +
+        ' · Paired (±' +
+        rec.matchWindowSec +
+        's entry): ' +
+        rec.pairedCount
+    );
+    if (rec.onlyLive && rec.onlyLive.length > 0) {
+      lines.push('<p class="text-amber-300/90 mt-1">Only in deals log (' + rec.onlyLive.length + ')</p>');
+      lines.push(
+        '<ul class="list-disc pl-4 text-slate-400">' +
+          rec.onlyLive
+            .map(function (t) {
+              return (
+                '<li>' +
+                (t.openedAt || t.timestamp) +
+                ' ' +
+                t.direction +
+                ' ' +
+                (t.closeReason || '') +
+                ' P/L ' +
+                (t.profitLoss != null ? t.profitLoss.toFixed(2) : '—') +
+                ' ' +
+                (t.currency || '') +
+                '</li>'
+              );
+            })
+            .join('') +
+          '</ul>'
+      );
+    }
+    if (rec.onlySim && rec.onlySim.length > 0) {
+      lines.push('<p class="text-sky-300/90 mt-1">Only in simulation (' + rec.onlySim.length + ')</p>');
+      lines.push(
+        '<ul class="list-disc pl-4 text-slate-400">' +
+          rec.onlySim
+            .map(function (t) {
+              return (
+                '<li>' +
+                formatTimeWithTz(new Date(t.entryTs).toISOString()) +
+                ' ' +
+                t.direction +
+                ' ' +
+                (t.exitReason || '') +
+                '</li>'
+              );
+            })
+            .join('') +
+          '</ul>'
+      );
+    }
+    if (rec.pairs && rec.pairs.length > 0) {
+      lines.push('<p class="text-slate-500 mt-1">Paired</p><ul class="list-disc pl-4 text-slate-400">';
+      for (var pi = 0; pi < rec.pairs.length; pi++) {
+        var p = rec.pairs[pi];
+        lines.push(
+          '<li>Δentry ' +
+            p.entryDeltaSec +
+            's · live P/L ' +
+            (p.live.profitLoss != null ? p.live.profitLoss.toFixed(2) : '—') +
+            ' ' +
+            (p.live.currency || '') +
+            ' · ' +
+            (p.live.closeReason || '?') +
+            '</li>'
+        );
+      }
+      lines.push('</ul>');
+    }
+    section.classList.remove('hidden');
+    body.innerHTML = lines.join('');
+  }
+
+  socket.on('reconcile_live_backtest_report', function (data) {
+    renderReconcileReport(data);
+    if (data && data.error) {
+      appendLog('Reconcile: ' + data.error);
+    } else if (data && data.reconcile) {
+      appendLog(
+        'Reconcile: live ' +
+          data.reconcile.liveCount +
+          ', sim ' +
+          data.reconcile.simCount +
+          ', paired ' +
+          data.reconcile.pairedCount
+      );
+    }
+  });
+
+  var reconcileBtn = document.getElementById('testRulesReconcileBtn');
+  if (reconcileBtn) {
+    reconcileBtn.addEventListener('click', function () {
+      var epic = (epicSelect && epicSelect.value) || state.savedEpic || '';
+      if (!epic) {
+        showError('Select an instrument first');
+        return;
+      }
+      var fromDateEl = document.getElementById('testRulesFromDate');
+      var toDateEl = document.getElementById('testRulesToDate');
+      var fromDate = fromDateEl && fromDateEl.value ? fromDateEl.value : null;
+      var toDate = toDateEl && toDateEl.value ? toDateEl.value : null;
+      var selectedDays = [];
+      var dayCheckboxes = document.querySelectorAll('#testRulesDaysList input[type="checkbox"]:checked');
+      for (var i = 0; i < dayCheckboxes.length; i++) {
+        var val = dayCheckboxes[i].value;
+        if (!val) continue;
+        var pipeIdx = val.indexOf('|');
+        var day = pipeIdx >= 0 ? val.slice(0, pipeIdx) : val;
+        var itemEpic = pipeIdx >= 0 ? val.slice(pipeIdx + 1) : '';
+        if (itemEpic && itemEpic !== epic) continue;
+        selectedDays.push(day);
+      }
+      var cfg = getRulesForBacktest();
+      appendLog('Reconciling deals log with simulation…');
+      socket.emit('reconcile_live_backtest', {
+        epic: epic,
+        fromDate: selectedDays.length === 0 ? fromDate : null,
+        toDate: selectedDays.length === 0 ? toDate : null,
+        selectedDays: selectedDays.length > 0 ? selectedDays : null,
+        backtestRuleSets: cfg.backtestRuleSets,
+        simulateIgAmendThrottle: backtestRealismFromUi().simulateIgAmendThrottle,
+        matchLiveDealCooldown: backtestRealismFromUi().matchLiveDealCooldown
+      });
+    });
+  }
+
   if (button2) {
     button2.addEventListener('click', function () {
       var epic = (epicSelect && epicSelect.value) || state.savedEpic || '';
@@ -3080,7 +3268,9 @@ export function initTestRules(socket, state, log, profileOpts) {
         scheduleActiveDate: cfg.engineControls && cfg.engineControls.scheduleActiveDate,
         scheduleTimezone: cfg.engineControls && cfg.engineControls.scheduleTimezone,
         forcedCloseTime: cfg.engineControls && cfg.engineControls.forcedCloseTime,
-        maxRunDays: cfg.engineControls && cfg.engineControls.maxRunDays
+        maxRunDays: cfg.engineControls && cfg.engineControls.maxRunDays,
+        simulateIgAmendThrottle: backtestRealismFromUi().simulateIgAmendThrottle,
+        matchLiveDealCooldown: backtestRealismFromUi().matchLiveDealCooldown
       });
     });
   }
