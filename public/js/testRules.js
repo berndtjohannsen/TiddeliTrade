@@ -3101,7 +3101,7 @@ export function initTestRules(socket, state, log, profileOpts) {
       );
     }
     if (rec.pairs && rec.pairs.length > 0) {
-      lines.push('<p class="text-slate-500 mt-1">Paired</p><ul class="list-disc pl-4 text-slate-400">';
+      lines.push('<p class="text-slate-500 mt-1">Paired</p><ul class="list-disc pl-4 text-slate-400">');
       for (var pi = 0; pi < rec.pairs.length; pi++) {
         var p = rec.pairs[pi];
         lines.push(
